@@ -55,7 +55,7 @@ the tier rules and is identical across repeated/shuffled-input runs.
 
 ### Tests for User Story 1 (write first, ensure they FAIL) ⚠️
 
-- [ ] T005 [US1] Write ordering & determinism tests in `VociCore/Tests/VociCoreTests/NextTaskTests.swift` covering §6.2 #1 (in-progress beats higher-priority to-do), #2 (overdue beats priority-1 no-deadline), #7 (deadline-tomorrow does NOT outrank priority-today), #4 (identical tasks → stable `id` tiebreak), clarify #10 (multiple in-progress → single stable result), and empty/all-done input → `nil`; include an input-order-shuffle assertion for SC-001
+- [ ] T005 [US1] Write ordering & determinism tests in `VociCore/Tests/VociCoreTests/NextTaskTests.swift` covering §6.2 #1 (in-progress beats higher-priority to-do), #2 (overdue beats priority-1 no-deadline), #7 (deadline-tomorrow does NOT outrank priority-today), #4 (identical tasks → stable `id` tiebreak), FR-007 (a `nil`-priority task sorts AFTER an explicit priority-4 task), clarify #10 (multiple in-progress → single stable result), and empty/all-done input → `nil`; include an input-order-shuffle assertion for SC-001
 
 ### Implementation for User Story 1
 
