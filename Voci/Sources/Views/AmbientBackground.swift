@@ -275,7 +275,7 @@ private struct CustomImageLayer: View {
             ZStack {
                 Color(voci: 0x14141A)
                 HatchPattern()
-                Text("paste an image URL in Tweaks → Focus")
+                Text("Choose an image in Settings → Appearance")
                     .font(.system(size: 12, design: .monospaced))
                     .tracking(0.48)
                     .foregroundStyle(Color.white.opacity(0.28))

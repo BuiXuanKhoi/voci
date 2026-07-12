@@ -5,6 +5,8 @@
 // defaults, notification toggles, etc.) — the frozen `AppState` (spec §4) does not own these
 // preferences, only `accent` and `density`, which this view binds for real via `@Bindable`.
 import SwiftUI
+import AppKit
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
@@ -215,6 +217,49 @@ struct SettingsView: View {
                     .init(id: "dark", label: "Dark"), .init(id: "system", label: "Match system", disabled: true),
                 ])
             }
+            SettingsRow(label: "Background", hint: "A live scene or your own image behind the glass. Task list and panels stay readable on top.") {
+                Segmented(
+                    value: Binding(
+                        get: { appState.ambient },
+                        set: { appState.setAmbient($0) }
+                    ),
+                    options: AmbientMode.allCases.map { SegmentOption(id: $0, label: $0.label) }
+                )
+            }
+            if appState.ambient == .custom {
+                SettingsRow(label: "Custom image", hint: "Choose a photo or wallpaper from your Mac.") {
+                    HStack(spacing: 10) {
+                        Group {
+                            if let url = appState.customImageURL, let nsImage = NSImage(contentsOf: url) {
+                                Image(nsImage: nsImage)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                            } else {
+                                Color.white.opacity(0.06)
+                            }
+                        }
+                        .frame(width: 44, height: 30)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+                        Button("Choose image…") { chooseImage(appState: appState) }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(VociColor.textPri)
+                            .padding(.horizontal, 12)
+                            .frame(height: 28)
+                            .background(VociColor.card)
+                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                            .vociHairline(cornerRadius: 7)
+
+                        if appState.customImageURL != nil {
+                            Button("Remove") { appState.setCustomImage(nil) }
+                                .buttonStyle(.plain)
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(VociColor.textSec)
+                        }
+                    }
+                }
+            }
             SettingsRow(label: "Accent color", hint: "Used for active states and the capture button.") {
                 HStack(spacing: 10) {
                     ForEach(VociAccent.allCases) { candidate in
@@ -253,6 +298,21 @@ struct SettingsView: View {
                     ]
                 )
             }
+        }
+    }
+
+    /// Opens a file picker for the custom ambient background image. Not sandboxed today, so a
+    /// plain file path (via `NSOpenPanel.url`) is fine — no security-scoped bookmark needed. If
+    /// sandboxing is ever enabled for this app, this will need to start/stop a security-scoped
+    /// bookmark around every `NSImage(contentsOf:)` load instead of a raw path.
+    private func chooseImage(appState: AppState) {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image]
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            appState.setCustomImage(url)
         }
     }
 

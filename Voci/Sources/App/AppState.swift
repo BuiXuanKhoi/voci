@@ -5,8 +5,22 @@ import VociCore
 
 /// Ambient visual mode — mirrors the prototype's `ambient` prop
 /// ('none' | 'rain' | 'snow' | 'embers' | 'custom') from `voci-ambient.jsx`.
-enum AmbientMode: Sendable, Equatable {
+/// String-backed + `CaseIterable`/`Identifiable` so Settings → Appearance can drive it straight
+/// off a `Segmented<AmbientMode>` control and persist the raw value to `UserDefaults`.
+enum AmbientMode: String, Sendable, Equatable, Hashable, CaseIterable, Identifiable {
     case none, rain, snow, embers, custom
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .none: return "None"
+        case .rain: return "Rain"
+        case .snow: return "Snow"
+        case .embers: return "Fireflies"
+        case .custom: return "Custom"
+        }
+    }
 }
 
 @Observable
@@ -65,6 +79,11 @@ final class AppState {
     let hotkey = HotkeyManager()
     let speech = SpeechCapture()
 
+    // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
+
+    private static let ambientKey = "voci.ambient"
+    private static let customImageKey = "voci.customImageURL"
+
     init(
         store: TaskStore? = nil,
         tasks: [TaskItem]? = nil,
@@ -84,6 +103,14 @@ final class AppState {
         self.glass = glass
         self.ambient = ambient
         self.customImageURL = customImageURL
+        // Override from persisted user choice, if any — falls back to the caller-supplied
+        // defaults above (e.g. previews/tests that construct AppState directly still work).
+        if let raw = UserDefaults.standard.string(forKey: Self.ambientKey), let m = AmbientMode(rawValue: raw) {
+            self.ambient = m
+        }
+        if let p = UserDefaults.standard.string(forKey: Self.customImageKey) {
+            self.customImageURL = URL(fileURLWithPath: p)
+        }
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -241,6 +268,29 @@ final class AppState {
         // Mirrors `readDay` in voci-mac.jsx: announces open task count + up to 3 titles, or
         // "All clear" when empty. `VoicePlayback.readDay` reads `openTasks` off this instance.
         voice.readDay(self)
+    }
+
+    // MARK: - Ambient background controls (Settings → Appearance → Background)
+
+    /// Sets the ambient visual mode and persists it, so it survives relaunch.
+    func setAmbient(_ mode: AmbientMode) {
+        ambient = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.ambientKey)
+    }
+
+    /// Sets (or clears) the custom background image and persists its path. Picking an image
+    /// implicitly switches `ambient` to `.custom`, mirroring the prototype's behavior of
+    /// previewing whatever image you just chose. Not sandboxed today, so a plain file path is
+    /// fine; if sandboxing is ever enabled, this needs a security-scoped bookmark instead.
+    func setCustomImage(_ url: URL?) {
+        customImageURL = url
+        if let url {
+            UserDefaults.standard.set(url.path, forKey: Self.customImageKey)
+            ambient = .custom
+            UserDefaults.standard.set(AmbientMode.custom.rawValue, forKey: Self.ambientKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: Self.customImageKey)
+        }
     }
 
     // MARK: - Ambient sound (Phase 3: wires `Sources/Audio/AmbientSound.swift`)
