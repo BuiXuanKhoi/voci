@@ -36,6 +36,19 @@ final class AppState {
     var focusSecondsLeft: Int
     var focusIndex: Int
 
+    // MARK: - Modal / banner state (Phase 3: mounts MorningFrogView / TaskBreakdownView /
+    // NotificationView into the running app; not part of the frozen §4 surface, additive only).
+
+    struct ReminderBanner: Identifiable, Equatable {
+        let id = UUID()
+        var title: String
+        var timing: String
+    }
+
+    var showMorningFrog = false
+    var showBreakdown = false
+    var reminderBanner: ReminderBanner? = nil
+
     // MARK: - Collaborators (implementation detail, not part of the frozen §4 surface)
 
     private let parser: NLParser
@@ -247,6 +260,60 @@ final class AppState {
         for index in tasks.indices {
             tasks[index].frog = (tasks[index].id == id)
         }
+    }
+
+    // MARK: - Modal / banner actions (Phase 3)
+
+    /// Morning-frog sheet: user picked a candidate — set it as today's frog, then dismiss.
+    func pickFrog(_ id: UUID) {
+        setFrog(id)
+        showMorningFrog = false
+    }
+
+    /// Morning-frog sheet: "Skip today" (or answering by voice instead) — just dismiss.
+    func dismissMorningFrog() {
+        showMorningFrog = false
+    }
+
+    /// Task-breakdown sheet: "Save all as tasks" — persists each step title as a real `TaskItem`
+    /// (medium priority, `.later`, no deadline/duration — the breakdown generator doesn't produce
+    /// those yet), then dismisses.
+    func saveBreakdown(_ titles: [String]) {
+        for t in titles {
+            addTask(TaskItem(
+                id: UUID(),
+                title: t,
+                priority: .medium,
+                status: .todo,
+                deadline: nil,
+                dependsOn: [],
+                createdAt: clock(),
+                when: .later,
+                durationMinutes: nil,
+                frog: false
+            ))
+        }
+        showBreakdown = false
+    }
+
+    /// Menu-bar "Preview reminder": surfaces the in-app notification banner for the current
+    /// `activeTask` (falling back to the artboard's sample copy when nothing is active).
+    func showReminderPreview() {
+        if let t = activeTask {
+            reminderBanner = ReminderBanner(
+                title: t.title,
+                timing: t.timeBadge.map { "Coming up · \($0)" } ?? "Coming up"
+            )
+        } else {
+            reminderBanner = ReminderBanner(
+                title: "Customer call — Acme onboarding",
+                timing: "In 15 minutes · 2:00 PM"
+            )
+        }
+    }
+
+    func dismissBanner() {
+        reminderBanner = nil
     }
 
     // MARK: - Service activation (Phase 3: call once from the main window's `.task`)

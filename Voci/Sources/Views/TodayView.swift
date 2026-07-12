@@ -36,6 +36,27 @@ struct TodayView: View {
                 FocusOverlay()
             }
         }
+        .overlay(alignment: .topTrailing) {
+            if let banner = appState.reminderBanner {
+                NotificationView(
+                    title: banner.title,
+                    timing: banner.timing,
+                    onDone: { appState.dismissBanner() },
+                    onSnooze: { appState.dismissBanner() },
+                    onReschedule: { appState.dismissBanner() }
+                )
+                .padding(.top, 44)
+                .padding(.trailing, 20)
+                .transition(.asymmetric(insertion: .move(edge: .top).combined(with: .opacity), removal: .opacity))
+                .zIndex(20)
+                .task(id: appState.reminderBanner?.id) {
+                    guard appState.reminderBanner != nil else { return }
+                    try? await Task.sleep(for: .seconds(5))
+                    appState.dismissBanner()
+                }
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: appState.reminderBanner)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 ToolButton(icon: ambientSoundPlaying ? .volume : .volumeOff, tint: ambientSoundPlaying) {

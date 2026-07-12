@@ -1,13 +1,16 @@
 // Sources/Views/MorningFrogView.swift — "Good morning" daily-frog modal, ported from
 // `design/voci-extras.jsx`'s `VociMorningFrog`. Candidates are sourced live from
 // `appState.openTasks` (title + "urgent" flag when priority == .high) instead of the prototype's
-// static sample list. Picking a candidate only updates local selection state here — actually
-// setting a task's `frog` flag needs a new AppState mutator, which is out of scope for this
-// Phase-2 view (see the `// Phase 3` note below); no new AppState methods are added.
+// static sample list. Phase 3: mounted as a daily first-launch sheet from `VociApp.swift`;
+// picking a candidate calls `AppState.pickFrog(_:)` (sets it as today's frog + dismisses),
+// "Skip today" / the voice CTA call `AppState.dismissMorningFrog()`.
 import SwiftUI
 
 struct MorningFrogView: View {
     @State private var picked: UUID?
+
+    var onPick: (UUID) -> Void = { _ in }
+    var onSkip: () -> Void = {}
 
     @Environment(AppState.self) private var appState
 
@@ -47,7 +50,7 @@ struct MorningFrogView: View {
             candidateList
 
             Button {
-                // Skip today — dismissal is owned by whatever presents this modal (Phase 3).
+                onSkip()
             } label: {
                 Text("Skip today")
                     .font(.system(size: 12, weight: .medium))
@@ -69,8 +72,10 @@ struct MorningFrogView: View {
 
     private var voiceCTA: some View {
         Button {
-            // Phase 3: wire to the real hold-to-talk gesture (HotkeyManager / SpeechCapture);
-            // this artboard button is visual only.
+            // Answer by voice: kick off the real hold-to-talk capture flow, then dismiss this
+            // modal the same way "Skip today" does.
+            appState.startCapture()
+            onSkip()
         } label: {
             HStack(spacing: 10) {
                 VocIcon(.mic, size: 16, color: accentColors.solid, weight: .regular)
@@ -178,9 +183,7 @@ struct MorningFrogView: View {
         .contentShape(Rectangle())
         .onTapGesture {
             picked = candidate.id
-            // Phase 3: once AppState exposes a "set frog" mutator, call it here so the picked
-            // candidate becomes today's frog task, e.g. `appState.setFrog(candidate.id)`. Not
-            // added in this pass — the frozen §4 AppState surface isn't extended by Phase-2 views.
+            onPick(candidate.id)
         }
     }
 }

@@ -1,7 +1,9 @@
 // Sources/Views/TaskBreakdownView.swift — AI task-breakdown artboard, ported from
-// `design/voci-extras.jsx`'s `VociTaskBreakdown`. Static/sample content by design — this is the
-// AI-breakdown design surface; wiring a real breakdown generator into VociCore/NLParser is a
-// later phase.
+// `design/voci-extras.jsx`'s `VociTaskBreakdown`. Steps are still static/sample content by
+// design — wiring a real breakdown generator into VociCore/NLParser is a later phase — but the
+// sheet is now live: Phase 3 mounts it from `TaskRow`'s "Break down into steps…" context-menu
+// item, and "Save all as tasks" persists the sample step titles as real `TaskItem`s via
+// `AppState.saveBreakdown(_:)`.
 import SwiftUI
 
 struct TaskBreakdownView: View {
@@ -20,6 +22,9 @@ struct TaskBreakdownView: View {
         Step(number: 5, label: "Publish + share link", duration: "5 min"),
     ]
     private let totalLabel = "40 min"
+
+    var onSave: ([String]) -> Void = { _ in }
+    var onClose: () -> Void = {}
 
     @Environment(AppState.self) private var appState
     private var accentColors: Accent { appState.accent.accent }
@@ -147,7 +152,9 @@ struct TaskBreakdownView: View {
     private var actions: some View {
         HStack(spacing: 8) {
             Button {
-                // Static artboard — real editing lands with the AI-breakdown generator.
+                // Real per-step editing lands with the AI-breakdown generator; for now, "Edit"
+                // just dismisses like Cancel.
+                onClose()
             } label: {
                 Text("Edit")
                     .font(.system(size: 13, weight: .medium))
@@ -161,7 +168,7 @@ struct TaskBreakdownView: View {
             .vociHairline(cornerRadius: 9)
 
             Button {
-                // Static artboard — cancel/dismiss is owned by whatever presents this view.
+                onClose()
             } label: {
                 Text("Cancel")
                     .font(.system(size: 13, weight: .medium))
@@ -175,7 +182,7 @@ struct TaskBreakdownView: View {
             .vociHairline(cornerRadius: 9)
 
             Button {
-                // Phase 3: persist the (edited) steps as real TaskItems via AppState.addTask.
+                onSave(steps.map(\.label))
             } label: {
                 HStack(spacing: 8) {
                     Text("Save all as tasks")

@@ -1,10 +1,19 @@
-// Sources/Views/NotificationView.swift — in-app notification artboard, ported from
-// `design/voci-extras.jsx`'s `VociNotification`. Static design surface with sample copy; real
-// reminders are delivered via `UNUserNotificationCenter` in Phase 3 — this view is just the
-// visual reference / optional in-app preview.
+// Sources/Views/NotificationView.swift — in-app notification banner artboard, ported from
+// `design/voci-extras.jsx`'s `VociNotification`. Parameterized (title/timing/Done/Snooze/
+// Reschedule) with defaults matching the original sample copy so `#Preview` stays valid. Phase 3
+// mounts it as an overlay banner on `TodayView` driven by `AppState.reminderBanner`, triggered
+// manually via the menu-bar "Preview reminder" item (`AppState.showReminderPreview()`). Real
+// reminders delivered via `UNUserNotificationCenter` on the actual task deadline are still
+// pending — see backlog.
 import SwiftUI
 
 struct NotificationView: View {
+    var title: String = "Customer call — Acme onboarding"
+    var timing: String = "In 15 minutes · 2:00 PM"
+    var onDone: () -> Void = {}
+    var onSnooze: () -> Void = {}
+    var onReschedule: () -> Void = {}
+
     @Environment(AppState.self) private var appState
     private var accentColors: Accent { appState.accent.accent }
 
@@ -25,11 +34,11 @@ struct NotificationView: View {
                             .font(.system(size: 11))
                             .foregroundStyle(VociColor.textSec)
                     }
-                    Text("Coming up: Customer call \u{2014} Acme onboarding")
+                    Text("Coming up: \(title)")
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(VociColor.textPri)
                         .lineLimit(2)
-                    Text("In 15 minutes \u{00B7} 2:00 PM")
+                    Text(timing)
                         .font(.system(size: 12))
                         .foregroundStyle(VociColor.textSec)
                 }
@@ -37,9 +46,9 @@ struct NotificationView: View {
             }
 
             HStack(spacing: 6) {
-                actionButton("Done", solid: false)
-                actionButton("Snooze 10 min", solid: false)
-                actionButton("Reschedule", solid: true)
+                actionButton("Done", solid: false, action: onDone)
+                actionButton("Snooze 10 min", solid: false, action: onSnooze)
+                actionButton("Reschedule", solid: true, action: onReschedule)
             }
             .padding(.top, 2)
         }
@@ -48,10 +57,9 @@ struct NotificationView: View {
         .vociGlass(level: .heavy, tint: Color(voci: 0x282828), cornerRadius: 14)
     }
 
-    private func actionButton(_ label: String, solid: Bool) -> some View {
+    private func actionButton(_ label: String, solid: Bool, action: @escaping () -> Void) -> some View {
         Button {
-            // Static artboard — Done/Snooze/Reschedule wire into UNUserNotificationCenter
-            // actions in Phase 3.
+            action()
         } label: {
             Text(label)
                 .font(.system(size: 11.5, weight: .medium))

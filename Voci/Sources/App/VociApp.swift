@@ -8,6 +8,8 @@ struct VociApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var appState: AppState
     @AppStorage("hasOnboardedV1") private var hasOnboarded = false
+    /// Day key ("yyyy-MM-dd") the morning-frog sheet was last shown on — gates it to once/day.
+    @AppStorage("morningFrogLastShown") private var frogLastShown = ""
 
     init() {
         // Degrade gracefully: if the SwiftData container fails to initialize for any reason,
@@ -34,6 +36,14 @@ struct VociApp: App {
                     // Starts the global ⌃⌥Space hold-to-talk hotkey (degrades gracefully without
                     // Accessibility permission — see AppState.activateServices).
                     appState.activateServices()
+
+                    // Daily morning-frog prompt: once per calendar day, once onboarding is done,
+                    // and only when there's actually something open to pick from.
+                    let day = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
+                    if hasOnboarded, frogLastShown != day, !appState.openTasks.isEmpty {
+                        appState.showMorningFrog = true
+                        frogLastShown = day
+                    }
                 }
                 .sheet(isPresented: Binding(
                     get: { !hasOnboarded },
@@ -43,6 +53,28 @@ struct VociApp: App {
                         .environment(appState)
                         .interactiveDismissDisabled(true)
                         .frame(minWidth: 640, minHeight: 440)
+                }
+                .sheet(isPresented: Binding(
+                    get: { appState.showMorningFrog },
+                    set: { presented in if !presented { appState.showMorningFrog = false } }
+                )) {
+                    MorningFrogView(
+                        onPick: { appState.pickFrog($0) },
+                        onSkip: { appState.dismissMorningFrog() }
+                    )
+                    .environment(appState)
+                    .frame(minWidth: 640, minHeight: 560)
+                }
+                .sheet(isPresented: Binding(
+                    get: { appState.showBreakdown },
+                    set: { presented in if !presented { appState.showBreakdown = false } }
+                )) {
+                    TaskBreakdownView(
+                        onSave: { appState.saveBreakdown($0) },
+                        onClose: { appState.showBreakdown = false }
+                    )
+                    .environment(appState)
+                    .frame(minWidth: 480, minHeight: 560)
                 }
         }
 
@@ -71,6 +103,9 @@ private struct MenuBarMenuContent: View {
             }
             SettingsLink {
                 Text("Settings\u{2026}")
+            }
+            Button("Preview reminder") {
+                appState.showReminderPreview()
             }
             Divider()
             Button("Quit Voci") {

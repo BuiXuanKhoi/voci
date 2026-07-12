@@ -83,6 +83,12 @@ struct TaskRow: View {
         .onTapGesture { isSelected.toggle() }
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .animation(.easeOut(duration: 0.12), value: isActive)
+        .contextMenu {
+            Button("Break down into steps…") { appState.showBreakdown = true }
+            Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
+            Divider()
+            Button("Delete", role: .destructive) { appState.deleteTask(task.id) }
+        }
     }
 
     private var checkbox: some View {
