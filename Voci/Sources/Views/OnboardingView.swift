@@ -6,11 +6,13 @@ import SwiftUI
 
 struct OnboardingView: View {
     @State private var step: Int
+    var onComplete: () -> Void = {}
 
     @Environment(AppState.self) private var appState
 
-    init(step: Int = 1) {
+    init(step: Int = 1, onComplete: @escaping () -> Void = {}) {
         _step = State(initialValue: step)
+        self.onComplete = onComplete
     }
 
     private var accentColors: Accent { appState.accent.accent }
@@ -171,9 +173,10 @@ struct OnboardingView: View {
 
             HStack(spacing: 10) {
                 Button {
-                    // Phase 3: request SFSpeechRecognizer / microphone authorization here, then
-                    // advance to step 3 once granted.
-                    withAnimation { step = 3 }
+                    Task {
+                        _ = await appState.speech.requestAuthorization()
+                        withAnimation { step = 3 }
+                    }
                 } label: {
                     Text("Allow microphone")
                         .font(.system(size: 14, weight: .medium))
@@ -252,7 +255,25 @@ struct OnboardingView: View {
             .padding(.bottom, 22)
 
             Button {
-                // Onboarding complete — Phase 3 dismisses this window / marks first-run done.
+                onComplete()
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Start using Voci")
+                    Text("\u{2192}")
+                }
+                .font(.system(size: 14, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 22)
+                .frame(height: 44)
+            }
+            .buttonStyle(.plain)
+            .background(accentColors.solid)
+            .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+            .shadow(color: accentColors.glow, radius: 20, y: 6)
+            .padding(.bottom, 10)
+
+            Button {
+                onComplete()
             } label: {
                 Text("Skip for now")
                     .font(.system(size: 13, weight: .medium))

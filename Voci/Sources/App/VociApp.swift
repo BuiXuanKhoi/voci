@@ -7,6 +7,7 @@ import UserNotifications
 struct VociApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var appState: AppState
+    @AppStorage("hasOnboardedV1") private var hasOnboarded = false
 
     init() {
         // Degrade gracefully: if the SwiftData container fails to initialize for any reason,
@@ -33,6 +34,15 @@ struct VociApp: App {
                     // Starts the global ⌃⌥Space hold-to-talk hotkey (degrades gracefully without
                     // Accessibility permission — see AppState.activateServices).
                     appState.activateServices()
+                }
+                .sheet(isPresented: Binding(
+                    get: { !hasOnboarded },
+                    set: { presented in if !presented { hasOnboarded = true } }
+                )) {
+                    OnboardingView(onComplete: { hasOnboarded = true })
+                        .environment(appState)
+                        .interactiveDismissDisabled(true)
+                        .frame(minWidth: 640, minHeight: 440)
                 }
         }
 
