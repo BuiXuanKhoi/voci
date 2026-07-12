@@ -1,0 +1,40 @@
+name: Voci
+options:
+  bundleIdPrefix: app.voci
+  deploymentTarget:
+    macOS: "26.0"
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Release: release
+packages:
+  VociCore:
+    path: ../VociCore
+targets:
+  Voci:
+    type: application
+    platform: macOS
+    deploymentTarget: "26.0"
+    sources:
+      - path: Sources
+      - path: Resources
+        excludes:
+          - Info.plist
+          - Voci.entitlements
+    info:
+      path: Resources/Info.plist
+    entitlements:
+      path: Resources/Voci.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: app.voci.Voci
+        PRODUCT_NAME: Voci
+        MACOSX_DEPLOYMENT_TARGET: "26.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+    dependencies:
+      - package: VociCore
+        product: VociCore

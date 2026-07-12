@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  Tradeoff: App Sandbox is deliberately left OFF (no `com.apple.security.app-sandbox` key).
+
+	  HotkeyManager (Phase 2) needs a global NSEvent monitor for the hold-to-talk gesture
+	  (Ctrl+Option+Space keyDown/keyUp), which requires Accessibility permission and does not
+	  reliably deliver events outside the app's own windows when the app is sandboxed. A fully
+	  sandboxed build would need a separate Accessibility-permission XPC helper to keep the
+	  global monitor working, which is out of scope for v1.
+
+	  Because the app is non-sandboxed, no `com.apple.security.device.audio-input` entitlement
+	  is required either: microphone access is governed purely by the
+	  NSMicrophoneUsageDescription Info.plist key and the standard macOS TCC consent prompt.
+
+	  Cost: this app cannot be distributed via the Mac App Store as-is (sandboxing is mandatory
+	  there). Acceptable for an indie/direct-distributed menu-bar utility for now — revisit if
+	  App Store distribution becomes a goal (tracked in backlog.md).
+	-->
+</dict>
+</plist>
