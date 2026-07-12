@@ -8,6 +8,13 @@
 
 **Input**: User description: "nextTask() engine — deterministic task selector (pure function) powering the single-task menu bar for the Voci macOS app. Source: docs/voci-voice-task-engine-spec.md §3, §6, §6.1, §6.2."
 
+## Clarifications
+
+### Session 2026-07-12
+
+- Q: When a prerequisite task becomes Archived (not Done), does its dependent become unblocked? → A: Yes — an archived prerequisite is treated as satisfied (same as a deleted one), so a prerequisite counts as "resolved" when it is done, archived, or no longer exists. This avoids permanently stranding dependents.
+- Q: Can multiple tasks be In Progress at the same time? → A: Yes — the engine must not assume a cap of one; when two or more tasks are in progress, tier 1 groups them and tiers 2–5 deterministically disambiguate.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - The one task to do right now (Priority: P1)
@@ -90,8 +97,11 @@ selected. Mark the prerequisite done; confirm the dependent task can now be sele
 3. **Given** every task in the set is blocked by an unfinished prerequisite, **When** the
    next task is requested, **Then** nothing is returned (empty state).
 4. **Given** a task that depends on another task which is later deleted, **When** the next
-   task is requested, **Then** the deleted prerequisite is treated as satisfied (it no longer
+   task is requested, **Then** the deleted prerequisite is treated as resolved (it no longer
    blocks) and the user is notified once about the change.
+5. **Given** a task whose only prerequisite is later archived (not completed), **When** the
+   next task is requested, **Then** the archived prerequisite no longer blocks and the
+   dependent task can be selected.
 
 ---
 
@@ -130,8 +140,12 @@ rejected with a human-readable message and the relationship is not saved.
 - **Deadline in the past (overdue)**: Treated in the today/overdue tier, earliest first.
 - **Deadline in the future beyond today**: Does not receive deadline precedence; sorts as if
   it had no near-term deadline for tier purposes.
+- **Archived prerequisite**: An archived prerequisite is treated as resolved and no longer
+  blocks its dependents (same effect as completion for eligibility purposes).
 - **Deleted prerequisite**: Its id is removed from every dependent's prerequisite list and
-  treated as satisfied; user notified once.
+  treated as resolved; user notified once.
+- **Multiple in-progress tasks**: When more than one task is in progress, all rank in tier 1
+  and are ordered deterministically by tiers 2–5; the result is still a single stable choice.
 - **Mixed unset attributes**: Tasks with no priority sort after all explicitly prioritized
   tasks; tasks with no near-term deadline sort after today/overdue ones within their tier.
 
@@ -145,8 +159,10 @@ rejected with a human-readable message and the relationship is not saved.
   tasks and a given reference time, or nothing when no task is eligible.
 - **FR-002**: A task MUST be considered eligible only if its status is "to do" or
   "in progress" (tasks that are done or archived are never eligible).
-- **FR-003**: A task MUST be excluded from selection if any of its prerequisites is not yet
-  done; it becomes eligible only when ALL prerequisites are done.
+- **FR-003**: A task MUST be excluded from selection while any of its prerequisites is
+  unresolved; it becomes eligible only when ALL prerequisites are resolved. A prerequisite
+  counts as **resolved** when it is done, archived, or no longer exists (deleted). An archived
+  or deleted prerequisite MUST NOT permanently block its dependents.
 - **FR-004**: Selection MUST be a pure computation: the same tasks and the same reference
   time MUST always produce the same result, with no side effects and no dependence on
   external state, ordering of input, or randomness.
@@ -155,7 +171,8 @@ rejected with a human-readable message and the relationship is not saved.
 
 - **FR-005**: Among eligible tasks, ordering MUST apply the following tiers in order, using
   the first tier that distinguishes two tasks:
-  1. In-progress tasks rank before to-do tasks.
+  1. In-progress tasks rank before to-do tasks. More than one task may be in progress at
+     once; when so, this tier does not separate them and tiers 2–5 decide their order.
   2. Tasks whose deadline is today or overdue rank next, earliest deadline first; tasks with
      no today/overdue deadline rank after these within this tier.
   3. Explicit priority ascending (1 is highest); tasks with no priority rank after priority 4.
@@ -182,8 +199,9 @@ rejected with a human-readable message and the relationship is not saved.
 - **FR-012**: A rejected cyclic relationship MUST NOT be stored, and the user MUST receive a
   human-readable explanation of why it was rejected.
 - **FR-013**: When a task is deleted, its identifier MUST be removed from every other task's
-  prerequisite list and treated as satisfied, and the user MUST be notified once when this
-  changes a task's blocked state.
+  prerequisite list and treated as resolved. When a task is archived, it MUST be treated as a
+  resolved prerequisite for eligibility (its identifier need not be stripped from dependents).
+  In both cases the user MUST be notified once when this changes a task's blocked state.
 
 #### Empty state
 
@@ -240,8 +258,12 @@ rejected with a human-readable message and the relationship is not saved.
 - Auto-advance and the "Next: …" transition are user-facing behaviors driven by re-invoking the
   selection after a state change; the visual transition styling is out of scope for this engine
   spec.
-- Notifying the user "once" about a deleted prerequisite is handled by the surrounding app; this
-  spec only requires that the deleted prerequisite stops blocking and the relationship is
+- A prerequisite is "resolved" (stops blocking its dependents) when it is done, archived, or
+  deleted; only prerequisites that are still to-do or in-progress block a dependent. Notifying
+  the user "once" about an archived/deleted prerequisite is handled by the surrounding app; this
+  spec only requires that such a prerequisite stops blocking and any deleted relationship is
   cleaned up.
+- The engine does not assume a maximum of one in-progress task; it must return a single stable
+  result even when several tasks are in progress simultaneously.
 - Persistence, voice capture, parsing, and the reminder engine are separate features; this spec
   covers only eligibility, ordering, auto-advance recomputation, and dependency-graph integrity.
