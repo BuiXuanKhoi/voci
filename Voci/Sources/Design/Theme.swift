@@ -144,3 +144,16 @@ extension View {
         monospacedDigit()
     }
 }
+
+/// Shared motion curves so every interaction feels like one system. Spring-based for a soft,
+/// premium feel. NEVER use `.repeatForever` on a MenuBarExtra/NSStatusItem-hosted view.
+enum VociMotion {
+    /// Hover / active / selection feedback — snappy but soft.
+    static let hover = Animation.spring(response: 0.26, dampingFraction: 0.82)
+    /// Press-down feedback — quick.
+    static let press = Animation.spring(response: 0.20, dampingFraction: 0.72)
+    /// List insert / remove / reorder.
+    static let list = Animation.spring(response: 0.38, dampingFraction: 0.86)
+    /// Capture-state cross-fades / banners.
+    static let state = Animation.easeInOut(duration: 0.20)
+}

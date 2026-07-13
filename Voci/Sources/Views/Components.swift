@@ -165,11 +165,21 @@ struct ToolButton: View {
             VocIcon(icon, size: 14, color: foreground, weight: .regular)
                 .frame(width: 28, height: 28)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(ToolButtonStyle())
         .background(background)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .animation(VociMotion.hover, value: isHovering)
+    }
+}
+
+/// Subtle press-down scale for `ToolButton`, layered via `ButtonStyle` so it composes with the
+/// existing hover-driven background/foreground without a second competing gesture recognizer.
+private struct ToolButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(VociMotion.press, value: configuration.isPressed)
     }
 }
 

@@ -20,6 +20,7 @@ struct PopoverView: View {
 
             if showTranscript {
                 transcriptSection()
+                    .transition(.opacity)
             }
 
             if showParsedCard, let parsed = appState.parsed {
@@ -29,10 +30,12 @@ struct PopoverView: View {
 
             if showActions {
                 actionsRow(accent: accent)
+                    .transition(.opacity)
             }
 
             if appState.captureState == .error {
                 errorActionsRow(accent: accent)
+                    .transition(.opacity)
             }
         }
         .padding(.horizontal, 14)
@@ -43,7 +46,7 @@ struct PopoverView: View {
         .shadow(color: .black.opacity(0.55), radius: 30, x: 0, y: 24)
         .scaleEffect(mounted ? 1 : 0.96)
         .opacity(mounted ? 1 : 0)
-        .animation(.easeOut(duration: 0.16), value: appState.captureState)
+        .animation(VociMotion.state, value: appState.captureState)
         .onAppear {
             // Appear animation: scale 0.96 -> 1 + fade, mirrors the JSX `mounted` flag flipped on
             // the next animation frame.
@@ -97,18 +100,24 @@ struct PopoverView: View {
                 Text("Listening…")
             }
             .foregroundStyle(VociColor.textMut)
+            .transition(.opacity)
         case .parsing:
             Text("Parsing with AI…").foregroundStyle(accent.solid)
+                .transition(.opacity)
         case .parsed:
             Text("Looks right? Hit return.").foregroundStyle(VociColor.textMut)
+                .transition(.opacity)
         case .saving:
             Text("Saving…").foregroundStyle(accent.solid)
+                .transition(.opacity)
         case .done:
             Text("Saved").foregroundStyle(VociColor.done)
+                .transition(.opacity)
         case .error:
             Text(appState.captureErrorDetail ?? "Didn't catch that.")
                 .foregroundStyle(VociColor.destruct)
                 .lineLimit(2)
+                .transition(.opacity)
         }
     }
 
@@ -125,6 +134,7 @@ struct PopoverView: View {
                     bars: 32,
                     height: 42
                 )
+                .transition(.opacity)
             } else {
                 HStack {
                     switch appState.captureState {
@@ -136,15 +146,18 @@ struct PopoverView: View {
                                 .shadow(color: Color(voci: 0x5BD17A, opacity: 0.5), radius: 24)
                             VocIcon(.check, size: 18, color: Color(voci: 0x0E2A16), weight: .bold)
                         }
+                        .transition(.opacity)
                     case .error:
                         Text("Try again")
                             .font(.system(size: 13))
                             .foregroundStyle(VociColor.destruct)
+                            .transition(.opacity)
                     default:
                         EmptyView()
                     }
                 }
                 .frame(maxWidth: .infinity)
+                .transition(.opacity)
             }
         }
         .frame(height: 42)

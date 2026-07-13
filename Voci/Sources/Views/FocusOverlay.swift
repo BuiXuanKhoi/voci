@@ -80,7 +80,7 @@ struct FocusOverlay: View {
                     .foregroundStyle(timerColor)
                     .opacity(appState.focusPaused ? 0.45 : 1)
                     .shadow(color: timerColor.opacity(0.27), radius: 40)
-                    .animation(.easeOut(duration: 0.2), value: appState.focusPaused)
+                    .animation(VociMotion.hover, value: appState.focusPaused)
 
                 progressHairline
                     .padding(.top, 20)
@@ -285,6 +285,6 @@ private struct FocusRoundBtn: View {
         .disabled(disabled)
         .help(title)
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
+        .animation(VociMotion.hover, value: isHovering)
     }
 }

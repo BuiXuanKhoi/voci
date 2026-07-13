@@ -8,6 +8,7 @@ struct TaskRow: View {
 
     @Environment(AppState.self) private var appState: AppState
     @State private var isHovering = false
+    @GestureState private var isPressed = false
 
     init(task: TaskItem, isActive: Bool) {
         self.task = task
@@ -75,12 +76,22 @@ struct TaskRow: View {
             }
         )
         .contentShape(Rectangle())
+        .scaleEffect(isPressed ? 0.985 : 1)
         .onHover { isHovering = $0 }
         // Row tap opens the detail sheet (Phase 1); the checkbox above is its own `Button` and
-        // consumes its own tap first, so toggling done never also opens the sheet.
+        // consumes its own tap first, so toggling done never also opens the sheet. A plain nested
+        // `Button` (row-as-Button wrapping the checkbox Button) was considered for press feedback,
+        // but macOS's AppKit-backed hit-testing for nested buttons is unreliable, so press feedback
+        // is layered on separately via a `simultaneousGesture` instead — it doesn't compete with
+        // the checkbox's own tap recognition, same as the existing `onTapGesture` above.
         .onTapGesture { appState.openDetail(task.id) }
-        .animation(.easeOut(duration: 0.12), value: isHovering)
-        .animation(.easeOut(duration: 0.12), value: isActive)
+        .simultaneousGesture(
+            DragGesture(minimumDistance: 0)
+                .updating($isPressed) { _, state, _ in state = true }
+        )
+        .animation(VociMotion.hover, value: isHovering)
+        .animation(VociMotion.hover, value: isActive)
+        .animation(VociMotion.press, value: isPressed)
         .contextMenu {
             Button("Break down into steps…") { appState.showBreakdown = true }
             Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
@@ -100,11 +111,13 @@ struct TaskRow: View {
                 .overlay {
                     if task.done {
                         VocIcon(.check, size: 11, color: .white, weight: .bold)
+                            .transition(.scale.combined(with: .opacity))
                     }
                 }
         }
         .buttonStyle(.plain)
         .padding(.top, 1)
+        .animation(VociMotion.press, value: task.done)
     }
 
     private var titleAndSubrow: some View {

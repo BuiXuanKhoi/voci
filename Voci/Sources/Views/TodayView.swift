@@ -56,7 +56,7 @@ struct TodayView: View {
                 }
             }
         }
-        .animation(.easeOut(duration: 0.2), value: appState.reminderBanner)
+        .animation(VociMotion.state, value: appState.reminderBanner)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 ToolButton(icon: ambientSoundPlaying ? .volume : .volumeOff, tint: ambientSoundPlaying) {
@@ -92,6 +92,7 @@ struct TodayView: View {
                             VStack(spacing: appState.density.rowGap) {
                                 ForEach(appState.nowTasks) { task in
                                     TaskRow(task: task, isActive: task.id == appState.activeTask?.id)
+                                        .transition(rowTransition)
                                 }
                             }
                         }
@@ -102,6 +103,7 @@ struct TodayView: View {
                             VStack(spacing: appState.density.rowGap) {
                                 ForEach(appState.laterTasks) { task in
                                     TaskRow(task: task, isActive: false)
+                                        .transition(rowTransition)
                                 }
                             }
                         }
@@ -112,6 +114,7 @@ struct TodayView: View {
                             VStack(spacing: appState.density.rowGap) {
                                 ForEach(appState.doneTasks) { task in
                                     TaskRow(task: task, isActive: false)
+                                        .transition(rowTransition)
                                 }
                             }
                         }
@@ -122,6 +125,7 @@ struct TodayView: View {
                     .padding(.horizontal, 22)
                     .padding(.top, 8)
                     .padding(.bottom, 18)
+                    .animation(VociMotion.list, value: appState.tasks)
                 }
             }
         }
@@ -292,6 +296,15 @@ struct TodayView: View {
 
     private func fmtClock(_ seconds: Int) -> String {
         "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+
+    /// Shared insert/remove transition for `TaskRow`s across the Now/Later/Completed sections —
+    /// new rows drop in from just above, removed rows fade out and settle slightly smaller.
+    private var rowTransition: AnyTransition {
+        .asymmetric(
+            insertion: .opacity.combined(with: .offset(y: -6)),
+            removal: .opacity.combined(with: .scale(scale: 0.97))
+        )
     }
 }
 

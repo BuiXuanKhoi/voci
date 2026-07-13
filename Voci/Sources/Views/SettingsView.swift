@@ -429,7 +429,7 @@ private struct VociToggle: View {
                     .padding(2)
             }
             .shadow(color: isOn ? accentColors.glow.opacity(0.4) : .clear, radius: 8)
-            .animation(.easeOut(duration: 0.15), value: isOn)
+            .animation(VociMotion.hover, value: isOn)
             .onTapGesture { isOn.toggle() }
     }
 }

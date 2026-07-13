@@ -141,7 +141,7 @@ private struct CaptureButtonStyle: ButtonStyle {
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .stroke(accentColor.opacity(configuration.isPressed ? 0.9 : 0.27), lineWidth: configuration.isPressed ? 1 : 0.5)
             )
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+            .animation(VociMotion.press, value: configuration.isPressed)
     }
 }
 
@@ -183,6 +183,6 @@ private struct SidebarItem: View {
         .background(active ? accentColors.surface : (isHovering ? Color.white.opacity(0.04) : .clear))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
-        .animation(.easeOut(duration: 0.1), value: isHovering)
+        .animation(VociMotion.hover, value: isHovering)
     }
 }

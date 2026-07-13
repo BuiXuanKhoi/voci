@@ -43,7 +43,7 @@ struct OnboardingView: View {
                 Capsule()
                     .fill(i == step ? accentColors.solid : Color.white.opacity(0.15))
                     .frame(width: i == step ? 18 : 6, height: 6)
-                    .animation(.easeOut(duration: 0.2), value: step)
+                    .animation(VociMotion.hover, value: step)
             }
         }
     }
