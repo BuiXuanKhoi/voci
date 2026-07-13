@@ -43,6 +43,7 @@ final class AppState {
     var captureState: CaptureState
     var liveTranscript: String
     var parsed: ParsedTask?
+    private(set) var captureErrorDetail: String?
 
     // Focus session
     var focusActive: Bool
@@ -178,6 +179,7 @@ final class AppState {
         captureState = .recording
         liveTranscript = ""
         parsed = nil
+        captureErrorDetail = nil
         captureSession += 1
         let session = captureSession
         // Kick off on-device recognition. Must qualify `_Concurrency.Task` because
@@ -190,12 +192,31 @@ final class AppState {
             // Stale? The hold ended (key-up/Esc/retry) while the permission flow was in flight.
             guard self.captureSession == session, self.captureState == .recording else { return }
             guard granted else {
+                self.captureErrorDetail = Self.describe(.authorizationDenied)
+                print("[Voci.Speech] onError -> \(self.captureErrorDetail ?? "")")
                 self.captureState = .error
                 return
             }
             self.speech.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
-            self.speech.onError = { [weak self] _ in self?.captureState = .error }
+            self.speech.onError = { [weak self] error in
+                guard let self else { return }
+                let detail = (error as? SpeechCaptureError).map(Self.describe) ?? error.localizedDescription
+                self.captureErrorDetail = detail
+                print("[Voci.Speech] onError -> \(detail)")
+                self.captureState = .error
+            }
             self.speech.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
+        }
+    }
+
+    /// Turns a `SpeechCaptureError` into a user-facing message for `captureErrorDetail` — surfaces
+    /// the real failure reason instead of the generic "Didn't catch that." copy (see
+    /// `PopoverView`'s `.error` state).
+    private static func describe(_ e: SpeechCaptureError) -> String {
+        switch e {
+        case .recognizerUnavailable: return "Speech recognizer unavailable on this Mac"
+        case .authorizationDenied: return "Microphone or Speech permission denied"
+        case .recognitionFailed(let msg): return msg
         }
     }
 

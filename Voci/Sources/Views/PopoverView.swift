@@ -106,7 +106,9 @@ struct PopoverView: View {
         case .done:
             Text("Saved").foregroundStyle(VociColor.done)
         case .error:
-            Text("Didn't catch that.").foregroundStyle(VociColor.destruct)
+            Text(appState.captureErrorDetail ?? "Didn't catch that.")
+                .foregroundStyle(VociColor.destruct)
+                .lineLimit(2)
         }
     }
 

@@ -87,6 +87,7 @@ final class SpeechCapture {
 
     init(locale: Locale = Locale(identifier: "en-US")) {
         self.recognizer = SFSpeechRecognizer(locale: locale)
+        print("[Voci.Speech] recognizer == nil: \(self.recognizer == nil)")
     }
 
     // MARK: - Authorization
@@ -114,11 +115,14 @@ final class SpeechCapture {
                 once.resume(status)
             }
         }
+        print("[Voci.Speech] speech auth = \(speechStatus.rawValue)")
         guard speechStatus == .authorized else { return false }
 
         // Native async variant (macOS 14+) — no completion handler, no continuation, and
         // therefore no isolation-inference hazard at all for the mic half.
-        return await AVAudioApplication.requestRecordPermission()
+        let micGranted = await AVAudioApplication.requestRecordPermission()
+        print("[Voci.Speech] mic granted = \(micGranted)")
+        return micGranted
     }
 
     // MARK: - Start / stop
@@ -134,6 +138,15 @@ final class SpeechCapture {
             onError?(SpeechCaptureError.recognizerUnavailable)
             return
         }
+        print("[Voci.Speech] recognizer.isAvailable=\(recognizer.isAvailable) supportsOnDevice=\(recognizer.supportsOnDeviceRecognition)")
+
+        // App is on-device-only by constitution (I) — if this Mac can't do on-device
+        // recognition, fail loudly instead of letting `recognitionTask` fail later with an
+        // opaque error. Never fall back to server-based recognition.
+        guard recognizer.supportsOnDeviceRecognition else {
+            onError?(SpeechCaptureError.recognitionFailed("On-device speech recognition is not available on this Mac (enable Dictation in System Settings, or the language model may need downloading)."))
+            return
+        }
 
         onPartialHandler = onPartial
 
@@ -145,12 +158,14 @@ final class SpeechCapture {
 
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
+        print("[Voci.Speech] input format sampleRate=\(format.sampleRate) channels=\(format.channelCount)")
 
         // With no usable input device (or the mic TCC grant not yet effective) the hardware
         // format comes back as 0 Hz / 0 channels — `installTap` then raises an ObjC exception
         // ("IsFormatSampleRateAndChannelCountValid(format)") and CoreAudio aborts the process.
         // Fail soft through `onError` instead.
         guard format.sampleRate > 0, format.channelCount > 0 else {
+            print("[Voci.Speech] aborting start: input format is 0 Hz / 0 channels (no usable audio input device)")
             request = nil
             onError?(SpeechCaptureError.recognitionFailed("No usable audio input device"))
             return
@@ -170,6 +185,7 @@ final class SpeechCapture {
         do {
             try audioEngine.start()
         } catch {
+            print("[Voci.Speech] audioEngine.start FAILED: \(error.localizedDescription)")
             inputNode.removeTap(onBus: 0)
             request = nil
             onError?(error)
@@ -189,6 +205,8 @@ final class SpeechCapture {
             let text = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
             let errorMessage = error?.localizedDescription
+            print("[Voci.Speech] recognitionTask error: \(errorMessage ?? "nil")")
+            print("[Voci.Speech] partial/final text len=\(text?.count ?? -1) isFinal=\(isFinal)")
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 if let text {
