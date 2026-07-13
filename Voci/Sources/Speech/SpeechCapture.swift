@@ -90,15 +90,19 @@ final class SpeechCapture {
     /// `start(...)` — the system only prompts the user once and returns the cached decision after.
     func requestAuthorization() async -> Bool {
         let speechStatus = await withCheckedContinuation { (continuation: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
+            // Some macOS builds invoke this completion handler more than once; a second resume
+            // of a checked continuation traps (EXC_BREAKPOINT). Guard so it resumes exactly once.
+            let once = ContinuationOnce(continuation)
             SFSpeechRecognizer.requestAuthorization { status in
-                continuation.resume(returning: status)
+                once.resume(status)
             }
         }
         guard speechStatus == .authorized else { return false }
 
         let micGranted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let once = ContinuationOnce(continuation)
             AVAudioApplication.requestRecordPermission { granted in
-                continuation.resume(returning: granted)
+                once.resume(granted)
             }
         }
         return micGranted
@@ -189,5 +193,26 @@ final class SpeechCapture {
         }
         audioEngine.inputNode.removeTap(onBus: 0)
         isRunning = false
+    }
+}
+
+/// Guards a `CheckedContinuation` so it is resumed at most once. Some system authorization
+/// callbacks (notably `SFSpeechRecognizer.requestAuthorization` on some macOS builds) invoke
+/// their completion handler more than once; a second resume of a checked continuation traps
+/// (EXC_BREAKPOINT). This box drops every resume after the first.
+private final class ContinuationOnce<T>: @unchecked Sendable {
+    private var continuation: CheckedContinuation<T, Never>?
+    private let lock = NSLock()
+
+    init(_ continuation: CheckedContinuation<T, Never>) {
+        self.continuation = continuation
+    }
+
+    func resume(_ value: T) {
+        lock.lock()
+        let c = continuation
+        continuation = nil
+        lock.unlock()
+        c?.resume(returning: value)
     }
 }
