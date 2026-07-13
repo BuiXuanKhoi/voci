@@ -171,10 +171,11 @@ final class AppState {
         captureState = .recording
         liveTranscript = ""
         parsed = nil
-        // Kick off on-device recognition. Explicitly hopping back onto @MainActor (rather than
-        // relying on Task's isolation inheritance) matches the convention already used elsewhere
-        // in this codebase (see AmbientSound.rampVolume's `Task { @MainActor [weak self] in ... }`).
-        Task { @MainActor [weak self] in
+        // Kick off on-device recognition. Must qualify `_Concurrency.Task` because
+        // `import VociCore` brings in `VociCore.Task` (the engine's model struct), which
+        // shadows `Swift.Task` in this file. Explicitly hopping back onto @MainActor is
+        // still intentional (matches AmbientSound.rampVolume's convention elsewhere).
+        _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
             if await self.speech.requestAuthorization() {
                 self.speech.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
