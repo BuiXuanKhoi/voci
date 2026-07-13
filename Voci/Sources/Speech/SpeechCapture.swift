@@ -67,7 +67,7 @@ enum SpeechCaptureError: Error, Sendable {
 @MainActor
 final class SpeechCapture {
     private let audioEngine = AVAudioEngine()
-    private let recognizer: SFSpeechRecognizer?
+    private var recognizer: SFSpeechRecognizer?
     private var request: SFSpeechAudioBufferRecognitionRequest?
     private var task: SFSpeechRecognitionTask?
 
@@ -101,6 +101,13 @@ final class SpeechCapture {
     init(locale: Locale = Locale(identifier: "en-US")) {
         self.recognizer = SFSpeechRecognizer(locale: locale)
         print("[Voci.Speech] recognizer == nil: \(self.recognizer == nil)")
+    }
+
+    /// Switch the recognition language at runtime (Settings ▸ Language). Recreates the underlying
+    /// recognizer; a nil result (unsupported locale) surfaces later as `.recognizerUnavailable`.
+    func setLocale(_ locale: Locale) {
+        recognizer = SFSpeechRecognizer(locale: locale)
+        print("[Voci.Speech] setLocale \(locale.identifier) -> recognizer nil: \(recognizer == nil)")
     }
 
     // MARK: - Authorization
@@ -162,6 +169,10 @@ final class SpeechCapture {
         let useOnDevice = !allowServerFallback
         newRequest.requiresOnDeviceRecognition = useOnDevice
         isOnDeviceAttempt = useOnDevice
+        newRequest.taskHint = .dictation          // free-form sentences, not search/confirmation
+        if #available(macOS 13.0, *) {
+            newRequest.addsPunctuation = true      // better readability + segmentation
+        }
         request = newRequest
 
         let inputNode = audioEngine.inputNode

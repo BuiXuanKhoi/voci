@@ -6,6 +6,7 @@
 // preferences, only `accent` and `density`, which this view binds for real via `@Bindable`.
 import SwiftUI
 import AppKit
+import Speech
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -114,8 +115,30 @@ struct SettingsView: View {
 
     // MARK: - General
 
+    /// All locales `SFSpeechRecognizer` supports on this Mac (includes vi-VN), sorted by their
+    /// localized display name so the picker below reads naturally instead of by raw identifier.
+    private var speechLocales: [(id: String, name: String)] {
+        SFSpeechRecognizer.supportedLocales()
+            .map { ($0.identifier, Locale.current.localizedString(forIdentifier: $0.identifier) ?? $0.identifier) }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
     private var generalTab: some View {
         VStack(spacing: 12) {
+            SettingsRow(label: "Recognition language", hint: "The language Voci listens for when you capture a task by voice, including Vietnamese.") {
+                Picker("", selection: Binding(
+                    get: { appState.recognitionLocaleID },
+                    set: { appState.setRecognitionLocale($0) }
+                )) {
+                    ForEach(speechLocales, id: \.id) { loc in
+                        Text(loc.name).tag(loc.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(accentColors.solid)
+                .frame(width: 200)
+            }
             SettingsRow(label: "Launch at login", hint: "Voci starts in the background and lives in your menu bar.") {
                 VociToggle(isOn: $launchAtLogin)
             }

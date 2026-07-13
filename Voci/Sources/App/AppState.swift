@@ -47,6 +47,9 @@ final class AppState {
     private(set) var captureErrorDetail: String?
     /// User consented to Apple server-based recognition (audio leaves the Mac). Persisted.
     private(set) var allowServerRecognition: Bool
+    /// Speech-recognition language, as a BCP-47/locale identifier (e.g. "en-US", "vi-VN").
+    /// Persisted; applied live to `speech` via `setRecognitionLocale`.
+    private(set) var recognitionLocaleID: String
     /// True when capture failed because on-device recognition is unavailable (Dictation off) and
     /// the user hasn't consented to server recognition yet — drives the popover's hint + consent UI.
     private(set) var pendingServerConsent = false
@@ -94,6 +97,7 @@ final class AppState {
     private static let ambientKey = "voci.ambient"
     private static let customImageKey = "voci.customImageURL"
     private static let allowServerRecognitionKey = "voci.allowServerRecognition"
+    private static let recognitionLocaleKey = "voci.recognitionLocale"
 
     init(
         store: TaskStore? = nil,
@@ -123,6 +127,7 @@ final class AppState {
             self.customImageURL = URL(fileURLWithPath: p)
         }
         self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
+        self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -133,6 +138,7 @@ final class AppState {
         self.focusIndex = 0
         self.parser = parser
         self.clock = clock
+        speech.setLocale(Locale(identifier: self.recognitionLocaleID))
     }
 
     // MARK: - Derived task groupings
@@ -309,6 +315,13 @@ final class AppState {
         UserDefaults.standard.set(true, forKey: Self.allowServerRecognitionKey)
         pendingServerConsent = false
         startCapture()
+    }
+
+    /// Change the speech-recognition language (Settings ▸ Language). Persists and applies live.
+    func setRecognitionLocale(_ id: String) {
+        recognitionLocaleID = id
+        UserDefaults.standard.set(id, forKey: Self.recognitionLocaleKey)
+        speech.setLocale(Locale(identifier: id))
     }
 
     /// Not part of the frozen §4 method list, but required to actually drive
