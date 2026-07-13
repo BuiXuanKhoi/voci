@@ -8,6 +8,7 @@ import AVFoundation
 enum SpeechCaptureError: Error, Sendable {
     case recognizerUnavailable
     case authorizationDenied
+    case recognitionFailed(String)
 }
 
 /// Bridges Apple's on-device Speech framework into a plain start/stop + callback API. Fully
@@ -79,6 +80,11 @@ final class SpeechCapture {
     /// `appState.captureState = .error` from it.
     var onError: ((Error) -> Void)?
 
+    /// Interim-result handler, stored (not just a `start` parameter) so the recognition-task
+    /// callback can reach it via `self` on the main actor instead of capturing a non-Sendable
+    /// closure into the `@MainActor` hop.
+    private var onPartialHandler: ((String) -> Void)?
+
     init(locale: Locale = Locale(identifier: "en-US")) {
         self.recognizer = SFSpeechRecognizer(locale: locale)
     }
@@ -122,6 +128,8 @@ final class SpeechCapture {
             return
         }
 
+        onPartialHandler = onPartial
+
         let newRequest = SFSpeechAudioBufferRecognitionRequest()
         newRequest.shouldReportPartialResults = true
         // On-device only — audio/transcript never leaves the machine (constitution I).
@@ -151,22 +159,26 @@ final class SpeechCapture {
         isRunning = true
 
         task = recognizer.recognitionTask(with: newRequest) { [weak self] result, error in
-            // Not guaranteed to run on the main actor — hop before touching `self` or invoking
-            // any of the AppState-bound closures.
-            Task { @MainActor in
+            // This handler runs on an arbitrary queue, and `result`/`error` are non-Sendable.
+            // Pull only Sendable primitives out here, then hop to the main actor with just those
+            // (never send SFSpeechRecognitionResult across the actor boundary). Mirrors the
+            // Sendable-primitive extraction pattern in HotkeyManager.
+            let text = result?.bestTranscription.formattedString
+            let isFinal = result?.isFinal ?? false
+            let errorMessage = error?.localizedDescription
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                if let result {
-                    let text = result.bestTranscription.formattedString
-                    if result.isFinal {
+                if let text {
+                    if isFinal {
                         self.teardown()
                         self.onFinal?(text)
                     } else {
-                        onPartial(text)
+                        self.onPartialHandler?(text)
                     }
                 }
-                if let error {
+                if let errorMessage {
                     self.teardown()
-                    self.onError?(error)
+                    self.onError?(SpeechCaptureError.recognitionFailed(errorMessage))
                 }
             }
         }
