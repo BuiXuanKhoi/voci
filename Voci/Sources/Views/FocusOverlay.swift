@@ -17,7 +17,13 @@ struct FocusOverlay: View {
     @Environment(AppState.self) private var appState: AppState
     @FocusState private var isFocused: Bool
 
-    private let ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
+    /// Stable 1s tick source. `@State` (not a plain `let`) is load-bearing: a `let` would mint a
+    /// NEW `Timer.publish` every time the parent re-creates this struct — which happens on every
+    /// `AppState` change — restarting the 1-second wait each time, so the countdown stalls
+    /// whenever anything else mutates state more often than once per second (e.g. live
+    /// transcript partials while capturing during a focus session). `@State` pins the first
+    /// publisher for the lifetime of the overlay's identity.
+    @State private var ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var accent: Accent { appState.accent.accent }
 

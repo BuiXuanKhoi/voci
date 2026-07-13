@@ -94,24 +94,31 @@ final class SpeechCapture {
     /// Requests both Speech-recognition and microphone authorization; returns `true` only if both
     /// are granted (recording is pointless with just one). Safe to call every time before
     /// `start(...)` — the system only prompts the user once and returns the cached decision after.
+    ///
+    /// IMPORTANT (Swift 6 dynamic isolation): this method lives on a `@MainActor` type, so any
+    /// non-`@Sendable` closure literal formed here is INFERRED to be MainActor-isolated. The
+    /// Speech framework's completion handler isn't `@Sendable` in the SDK and is invoked on a
+    /// background queue (`com.apple.root.default-qos`) — Swift 6 inserts a runtime
+    /// `dispatch_assert_queue(main)` check at the entry of MainActor-isolated closures, which
+    /// traps with EXC_BREAKPOINT *before the closure body even runs* (this is why the
+    /// `ContinuationOnce` double-resume guard alone could not stop the crash). The explicit
+    /// `@Sendable` below opts the closure out of MainActor inference so it may legally run on
+    /// any queue.
     func requestAuthorization() async -> Bool {
         let speechStatus = await withCheckedContinuation { (continuation: CheckedContinuation<SFSpeechRecognizerAuthorizationStatus, Never>) in
-            // Some macOS builds invoke this completion handler more than once; a second resume
-            // of a checked continuation traps (EXC_BREAKPOINT). Guard so it resumes exactly once.
+            // `@Sendable` is load-bearing — see the isolation note in the doc comment above.
+            // ContinuationOnce additionally guards against the handler firing more than once
+            // (a second resume of a checked continuation also traps).
             let once = ContinuationOnce(continuation)
-            SFSpeechRecognizer.requestAuthorization { status in
+            SFSpeechRecognizer.requestAuthorization { @Sendable status in
                 once.resume(status)
             }
         }
         guard speechStatus == .authorized else { return false }
 
-        let micGranted = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
-            let once = ContinuationOnce(continuation)
-            AVAudioApplication.requestRecordPermission { granted in
-                once.resume(granted)
-            }
-        }
-        return micGranted
+        // Native async variant (macOS 14+) — no completion handler, no continuation, and
+        // therefore no isolation-inference hazard at all for the mic half.
+        return await AVAudioApplication.requestRecordPermission()
     }
 
     // MARK: - Start / stop
@@ -139,10 +146,23 @@ final class SpeechCapture {
         let inputNode = audioEngine.inputNode
         let format = inputNode.outputFormat(forBus: 0)
 
+        // With no usable input device (or the mic TCC grant not yet effective) the hardware
+        // format comes back as 0 Hz / 0 channels — `installTap` then raises an ObjC exception
+        // ("IsFormatSampleRateAndChannelCountValid(format)") and CoreAudio aborts the process.
+        // Fail soft through `onError` instead.
+        guard format.sampleRate > 0, format.channelCount > 0 else {
+            request = nil
+            onError?(SpeechCaptureError.recognitionFailed("No usable audio input device"))
+            return
+        }
+
         // Realtime audio thread from here down: capture only the request (thread-safe `append`),
-        // never `self`. See the concurrency note in the type doc comment above.
+        // never `self`. `@Sendable` is load-bearing: without it this closure literal, formed in a
+        // `@MainActor` method, is inferred MainActor-isolated and Swift 6's runtime isolation
+        // check traps (EXC_BREAKPOINT) when the audio thread invokes it — same failure mode as
+        // the authorization callback (see `requestAuthorization`).
         nonisolated(unsafe) let tapRequest = newRequest
-        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
+        inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { @Sendable buffer, _ in
             tapRequest.append(buffer)
         }
 
@@ -158,7 +178,10 @@ final class SpeechCapture {
 
         isRunning = true
 
-        task = recognizer.recognitionTask(with: newRequest) { [weak self] result, error in
+        // `@Sendable` again load-bearing (arbitrary-queue callback; prevents MainActor inference
+        // + the Swift 6 runtime isolation trap). Capturing `self` weakly is fine — a @MainActor
+        // class is implicitly Sendable.
+        task = recognizer.recognitionTask(with: newRequest) { @Sendable [weak self] result, error in
             // This handler runs on an arbitrary queue, and `result`/`error` are non-Sendable.
             // Pull only Sendable primitives out here, then hop to the main actor with just those
             // (never send SFSpeechRecognitionResult across the actor boundary). Mirrors the

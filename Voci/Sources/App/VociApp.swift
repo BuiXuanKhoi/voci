@@ -39,7 +39,15 @@ struct VociApp: App {
 
                     // Daily morning-frog prompt: once per calendar day, once onboarding is done,
                     // and only when there's actually something open to pick from.
-                    let day = { let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; return f.string(from: Date()) }()
+                    // POSIX locale + Gregorian so the day key is stable even if the user's
+                    // system region uses a non-Gregorian calendar or changes over time.
+                    let day = {
+                        let f = DateFormatter()
+                        f.locale = Locale(identifier: "en_US_POSIX")
+                        f.calendar = Calendar(identifier: .gregorian)
+                        f.dateFormat = "yyyy-MM-dd"
+                        return f.string(from: Date())
+                    }()
                     if hasOnboarded, frogLastShown != day, !appState.openTasks.isEmpty {
                         appState.showMorningFrog = true
                         frogLastShown = day
@@ -120,10 +128,15 @@ private struct MenuBarMenuContent: View {
 /// hotkey is started from `AppState.activateServices()` (called from the main window's `.task`
 /// above) rather than here, since `AppState` — and its `HotkeyManager` — don't exist yet at
 /// `NSApplicationDelegate` construction time.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Best-effort; ignore the result/error — notifications are a nice-to-have, not required
         // for the app to function (see backlog: real notification scheduling not yet wired).
-        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
+        // `@Sendable` is load-bearing: without it, a closure literal formed in this @MainActor
+        // context is inferred MainActor-isolated, and Swift 6's runtime isolation check traps
+        // (EXC_BREAKPOINT) when UserNotifications invokes it on its background queue — the same
+        // failure mode as the SpeechCapture authorization callback.
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { @Sendable _, _ in }
     }
 }

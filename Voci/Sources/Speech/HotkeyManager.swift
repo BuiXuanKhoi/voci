@@ -73,14 +73,20 @@ final class HotkeyManager {
     }
 
     private func handle(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, isKeyDown: Bool, appState: AppState) {
-        guard keyCode == Self.hotkeyKeyCode, modifiers == Self.hotkeyModifiers else { return }
+        guard keyCode == Self.hotkeyKeyCode else { return }
 
         if isKeyDown {
+            guard modifiers == Self.hotkeyModifiers else { return }
             guard !isDown else { return } // ignore key-repeat while held
             isDown = true
             appState.startCapture()
             onKeyDown?()
         } else {
+            // Deliberately NOT re-checking modifiers on key-up: users routinely release ⌃/⌥ a
+            // beat before Space, so the Space key-up often arrives with the modifiers already
+            // gone. Requiring the full combo here would leave `isDown` stuck true and the
+            // hold-to-talk recording running forever. Any Space key-up while a hold is active
+            // ends the hold.
             guard isDown else { return }
             isDown = false
             onKeyUp?()

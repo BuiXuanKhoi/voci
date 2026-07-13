@@ -167,31 +167,59 @@ final class AppState {
     // MARK: - Capture / popover flow
     // CaptureState walks: .idle -> .recording -> .parsing -> .parsed -> .saving -> .done (or .error)
 
+    /// Monotonic token guarding the *deferred* part of `startCapture()`: authorization is async
+    /// (first run blocks on the TCC prompt), so by the time it resolves the user may already have
+    /// released the hotkey or hit Esc. Every start/stop/cancel bumps this; a pending start only
+    /// proceeds if its captured token is still current — otherwise the mic would be turned on
+    /// with nothing left to ever turn it off.
+    private var captureSession = 0
+
     func startCapture() {
         captureState = .recording
         liveTranscript = ""
         parsed = nil
+        captureSession += 1
+        let session = captureSession
         // Kick off on-device recognition. Must qualify `_Concurrency.Task` because
         // `import VociCore` brings in `VociCore.Task` (the engine's model struct), which
         // shadows `Swift.Task` in this file. Explicitly hopping back onto @MainActor is
         // still intentional (matches AmbientSound.rampVolume's convention elsewhere).
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
-            if await self.speech.requestAuthorization() {
-                self.speech.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
-                self.speech.onError = { [weak self] _ in self?.captureState = .error }
-                self.speech.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
-            } else {
+            let granted = await self.speech.requestAuthorization()
+            // Stale? The hold ended (key-up/Esc/retry) while the permission flow was in flight.
+            guard self.captureSession == session, self.captureState == .recording else { return }
+            guard granted else {
                 self.captureState = .error
+                return
             }
+            self.speech.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
+            self.speech.onError = { [weak self] _ in self?.captureState = .error }
+            self.speech.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
         }
     }
 
     func cancelCapture() {
+        captureSession += 1 // invalidate any authorization-pending start
         captureState = .idle
         liveTranscript = ""
         parsed = nil
         speech.stop()
+    }
+
+    /// Hotkey key-up ("hold to talk" released). If recognition is actually running, this just
+    /// ends the utterance (`SpeechCapture.stop()` flushes one final result -> `finishRecording`).
+    /// If the mic never started — authorization was still pending when the key came up — it
+    /// invalidates the deferred start and backs out to `.idle` so the mic is never left hot.
+    /// Additive method; the frozen §4 surface (`startCapture`/`cancelCapture`) is untouched.
+    func stopCapture() {
+        if speech.isRunning {
+            speech.stop()
+        } else if captureState == .recording {
+            captureSession += 1
+            captureState = .idle
+            liveTranscript = ""
+        }
     }
 
     /// Not part of the frozen §4 method list, but required to actually drive
@@ -225,6 +253,17 @@ final class AppState {
         speech.stop()
         if voiceFeedback {
             voice.speak("Added. \(item.title).")
+        }
+        // Transient "Saved" flash, then close the popover — without this the popover stayed
+        // stuck on "Saved" until the user clicked the scrim. Guarded by the session token so a
+        // new capture started within the window isn't dismissed by the stale timer.
+        captureSession += 1
+        let session = captureSession
+        _Concurrency.Task { @MainActor [weak self] in
+            try? await _Concurrency.Task.sleep(nanoseconds: 900_000_000)
+            guard let self, self.captureSession == session, self.captureState == .done else { return }
+            self.captureState = .idle
+            self.liveTranscript = ""
         }
     }
 
@@ -372,9 +411,10 @@ final class AppState {
     /// Starts the global ⌃⌥Space hold-to-talk hotkey. `HotkeyManager.start` already calls
     /// `appState.startCapture()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`),
     /// so `onKeyDown` is intentionally omitted here to avoid double-invoking `startCapture()`;
-    /// only `onKeyUp` is wired, to stop the in-flight `SpeechCapture` session. Safe to call even
+    /// only `onKeyUp` is wired, through `stopCapture()` (which both ends a running utterance AND
+    /// invalidates an authorization-pending start — see its doc comment). Safe to call even
     /// without Accessibility permission — `HotkeyManager` degrades to local-only monitoring.
     func activateServices() {
-        hotkey.start(appState: self, onKeyUp: { [weak self] in self?.speech.stop() })
+        hotkey.start(appState: self, onKeyUp: { [weak self] in self?.stopCapture() })
     }
 }
