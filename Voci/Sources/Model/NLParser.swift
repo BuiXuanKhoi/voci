@@ -8,6 +8,7 @@ import Foundation
 /// this same protocol (see backlog.md).
 struct ParsedTask: Sendable, Equatable {
     var title: String
+    var details: String
     var when: String
     var priority: Priority
     var durationMinutes: Int?
@@ -26,6 +27,7 @@ struct HeuristicNLParser: NLParser {
     func parse(_ transcript: String) -> ParsedTask {
         ParsedTask(
             title: Self.cleanTitle(from: transcript),
+            details: transcript.trimmingCharacters(in: .whitespacesAndNewlines),
             when: Self.detectWhen(in: transcript),
             priority: Self.detectPriority(in: transcript),
             durationMinutes: Self.detectDurationMinutes(in: transcript),

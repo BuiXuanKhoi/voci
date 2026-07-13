@@ -8,10 +8,6 @@ struct TaskRow: View {
 
     @Environment(AppState.self) private var appState: AppState
     @State private var isHovering = false
-    /// Local-only "selected" affordance for a plain row tap — the frozen `AppState` API has no
-    /// notion of row selection, so this stays a private UI detail (per Phase-2 instructions:
-    /// "Row tap → selection (local highlight ok)").
-    @State private var isSelected = false
 
     init(task: TaskItem, isActive: Bool) {
         self.task = task
@@ -80,7 +76,9 @@ struct TaskRow: View {
         )
         .contentShape(Rectangle())
         .onHover { isHovering = $0 }
-        .onTapGesture { isSelected.toggle() }
+        // Row tap opens the detail sheet (Phase 1); the checkbox above is its own `Button` and
+        // consumes its own tap first, so toggling done never also opens the sheet.
+        .onTapGesture { appState.openDetail(task.id) }
         .animation(.easeOut(duration: 0.12), value: isHovering)
         .animation(.easeOut(duration: 0.12), value: isActive)
         .contextMenu {

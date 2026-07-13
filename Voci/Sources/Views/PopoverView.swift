@@ -495,6 +495,7 @@ private struct BlinkingCaret: View {
     state.captureState = .parsed
     state.parsed = ParsedTask(
         title: "Customer call — Acme onboarding feedback",
+        details: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
         when: "Tomorrow · 2:00 PM",
         priority: .high,
         durationMinutes: 30,

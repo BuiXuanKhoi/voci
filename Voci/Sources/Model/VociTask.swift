@@ -11,6 +11,9 @@ import VociCore
 final class VociTask {
     @Attribute(.unique) var id: UUID
     var title: String
+    /// SwiftData needs a default for lightweight migration of existing stores created before
+    /// this field existed.
+    var details: String = ""
     var priorityRaw: Int
     var statusRaw: String
     var deadline: Date?
@@ -23,6 +26,7 @@ final class VociTask {
     init(
         id: UUID = UUID(),
         title: String,
+        details: String = "",
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
@@ -34,6 +38,7 @@ final class VociTask {
     ) {
         self.id = id
         self.title = title
+        self.details = details
         self.priorityRaw = priority.rawValue
         self.statusRaw = Self.rawValue(for: status)
         self.deadline = deadline
@@ -48,6 +53,7 @@ final class VociTask {
         TaskItem(
             id: id,
             title: title,
+            details: details,
             priority: Priority(rawValue: priorityRaw) ?? .medium,
             status: Self.status(from: statusRaw),
             deadline: deadline,
@@ -61,6 +67,7 @@ final class VociTask {
 
     func apply(_ item: TaskItem) {
         title = item.title
+        details = item.details
         priorityRaw = item.priority.rawValue
         statusRaw = Self.rawValue(for: item.status)
         deadline = item.deadline

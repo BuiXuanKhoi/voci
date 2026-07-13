@@ -82,6 +82,7 @@ enum SampleData {
             sentence: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
             parsed: ParsedTask(
                 title: "Customer call — Acme onboarding feedback",
+                details: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
                 when: "Tomorrow · 2:00 PM",
                 priority: .high,
                 durationMinutes: 30,
@@ -92,6 +93,7 @@ enum SampleData {
             sentence: "Remind me to push the TestFlight build at 7:30 tonight",
             parsed: ParsedTask(
                 title: "Push TestFlight build",
+                details: "Remind me to push the TestFlight build at 7:30 tonight",
                 when: "Today · 7:30 PM",
                 priority: .high,
                 durationMinutes: 15,
@@ -102,6 +104,7 @@ enum SampleData {
             sentence: "Reply to Mira from Lux Ventures by end of day, medium priority",
             parsed: ParsedTask(
                 title: "Reply to Mira — Lux Ventures",
+                details: "Reply to Mira from Lux Ventures by end of day, medium priority",
                 when: "Today · 6:00 PM",
                 priority: .medium,
                 durationMinutes: 20,

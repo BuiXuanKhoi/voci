@@ -37,6 +37,7 @@ final class TaskStore {
         let model = VociTask(
             id: item.id,
             title: item.title,
+            details: item.details,
             priority: item.priority,
             status: item.status,
             deadline: item.deadline,

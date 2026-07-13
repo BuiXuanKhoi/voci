@@ -84,6 +84,14 @@ struct VociApp: App {
                     .environment(appState)
                     .frame(minWidth: 480, minHeight: 560)
                 }
+                .sheet(isPresented: Binding(
+                    get: { appState.detailTaskID != nil },
+                    set: { presented in if !presented { appState.detailTaskID = nil } }
+                )) {
+                    TaskDetailView()
+                        .environment(appState)
+                        .frame(minWidth: 480, minHeight: 520)
+                }
         }
 
         Settings {

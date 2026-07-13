@@ -69,6 +69,9 @@ final class AppState {
     var showMorningFrog = false
     var showBreakdown = false
     var reminderBanner: ReminderBanner? = nil
+    /// The task currently shown in the detail sheet, by id — `nil` means the sheet is closed.
+    /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
+    var detailTaskID: UUID?
 
     // MARK: - Collaborators (implementation detail, not part of the frozen §4 surface)
 
@@ -140,6 +143,9 @@ final class AppState {
     var openTasks: [TaskItem] { nowTasks + laterTasks }
     var frogTask: TaskItem? { tasks.first { $0.frog && !$0.done } }
 
+    /// The task currently shown in the detail sheet (looked up live so edits/toggles reflect).
+    var detailTask: TaskItem? { detailTaskID.flatMap { id in tasks.first { $0.id == id } } }
+
     /// THE integration point with feature 001 (VociCore nextTask engine): recomputed from the
     /// live `tasks` snapshot on every access, so there is no cached "active" state that can drift
     /// out of sync with `tasks`.
@@ -171,6 +177,15 @@ final class AppState {
     func deleteTask(_ id: UUID) {
         tasks.removeAll { $0.id == id }
         store?.delete(id)
+    }
+
+    // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
+
+    func openDetail(_ id: UUID) { detailTaskID = id }
+    func closeDetail() { detailTaskID = nil }
+    /// Speaks a task's description (falls back to its title when there's no description).
+    func speakDetails(of task: TaskItem) {
+        voice.speak(task.details.isEmpty ? task.title : task.details)
     }
 
     // MARK: - Capture / popover flow
@@ -312,6 +327,7 @@ final class AppState {
         captureState = .saving
         let item = TaskItem(
             title: parsed.title,
+            details: parsed.details,
             priority: parsed.priority,
             status: .todo,
             deadline: nil,
@@ -325,9 +341,8 @@ final class AppState {
         captureState = .done
         self.parsed = nil
         speech.stop()
-        if voiceFeedback {
-            voice.speak("Added. \(item.title).")
-        }
+        // Read the captured description back so the user can confirm by ear (voice-first).
+        voice.speak(item.details.isEmpty ? item.title : item.details)
         // Transient "Saved" flash, then close the popover — without this the popover stayed
         // stuck on "Saved" until the user clicked the scrim. Guarded by the session token so a
         // new capture started within the window isn't dismissed by the stale timer.

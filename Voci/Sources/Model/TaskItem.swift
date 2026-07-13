@@ -25,6 +25,7 @@ enum When: Sendable, Equatable, Codable {
 struct TaskItem: Identifiable, Sendable, Equatable {
     let id: UUID
     var title: String
+    var details: String
     var priority: Priority
     var status: TaskStatus
     var deadline: Date?
@@ -37,6 +38,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     init(
         id: UUID = UUID(),
         title: String,
+        details: String = "",
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
@@ -48,6 +50,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     ) {
         self.id = id
         self.title = title
+        self.details = details
         self.priority = priority
         self.status = status
         self.deadline = deadline
