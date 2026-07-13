@@ -21,12 +21,11 @@ targets:
         excludes:
           - Info.plist
           - Voci.entitlements
-    info:
-      path: Resources/Info.plist
     entitlements:
       path: Resources/Voci.entitlements
     settings:
       base:
+        INFOPLIST_FILE: Resources/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: app.voci.Voci
         PRODUCT_NAME: Voci
         MACOSX_DEPLOYMENT_TARGET: "14.0"
