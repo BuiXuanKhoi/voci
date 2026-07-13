@@ -68,11 +68,11 @@ struct Sidebar: View {
 
     private var captureButton: some View {
         Button {
-            appState.startCapture()
+            appState.toggleCapture()
         } label: {
             HStack(spacing: 7) {
                 VocIcon(.mic, size: 13, color: accentColors.solid, weight: .semibold)
-                Text("Hold to speak")
+                Text(appState.captureState == .recording ? "Tap to stop" : "Tap to speak")
                     .font(.system(size: 12, weight: .medium))
                     .tracking(-0.06)
             }
@@ -87,7 +87,7 @@ struct Sidebar: View {
         HStack(spacing: 4) {
             KeyBadge("⌃")
             KeyBadge("⌥")
-            KeyBadge("Space")
+            KeyBadge("M")
         }
         .frame(maxWidth: .infinity)
     }
@@ -127,7 +127,7 @@ struct Sidebar: View {
     }
 }
 
-/// Gives the "Hold to speak" capture button a press-down highlight (mirrors the prototype's
+/// Gives the "Tap to speak" capture button a press-down highlight (mirrors the prototype's
 /// mousedown/up-driven `holdHint` inset glow) using `ButtonStyle`'s own `isPressed` state, rather
 /// than a second overlapping gesture recognizer that could compete with the button's tap.
 private struct CaptureButtonStyle: ButtonStyle {

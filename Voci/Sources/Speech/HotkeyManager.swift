@@ -1,20 +1,19 @@
-// Sources/Speech/HotkeyManager.swift — global ⌃⌥Space hold-to-talk hotkey monitor
+// Sources/Speech/HotkeyManager.swift — global ⌃⌥M toggle-to-talk hotkey monitor
 import AppKit
 
-/// Registers a system-wide "hold ⌃⌥Space to talk" hotkey using `NSEvent` global + local
-/// monitors: key-down starts capture, key-up stops/finishes it (hold-to-talk, per
-/// `app-architecture.md` §1).
+/// Registers a system-wide "press ⌃⌥M to toggle capture (press to start, press again to stop)"
+/// hotkey using `NSEvent` global + local monitors (toggle, per `app-architecture.md` §1).
 ///
 /// IMPORTANT — macOS **Accessibility permission**: `NSEvent.addGlobalMonitorForEvents` only
 /// delivers key events system-wide (i.e. while some *other* app is frontmost) once the user has
 /// granted this app access under System Settings → Privacy & Security → Accessibility. Without
-/// it, the *local* monitor still fires while a Voci window/menu is key, but the hold-to-talk
+/// it, the *local* monitor still fires while a Voci window/menu is key, but the toggle-capture
 /// gesture silently does nothing from anywhere else on the system — there is no API to detect or
 /// prompt for this ahead of time from a global monitor, so `start()` does not attempt to check or
 /// request it. This gap is tracked in `backlog.md`.
 @MainActor
 final class HotkeyManager {
-    private static let hotkeyKeyCode: UInt16 = 49 // kVK_Space
+    private static let hotkeyKeyCode: UInt16 = 46 // kVK_ANSI_M
     private static let hotkeyModifiers: NSEvent.ModifierFlags = [.control, .option]
 
     private var globalMonitor: Any?
@@ -24,10 +23,10 @@ final class HotkeyManager {
     private var onKeyDown: (() -> Void)?
     private var onKeyUp: (() -> Void)?
 
-    /// Starts monitoring for ⌃⌥Space. `appState.startCapture()` (frozen §4 API) is called
-    /// directly on key-down; `onKeyDown`/`onKeyUp` let the owner (Phase-3 app wiring) additionally
-    /// drive `SpeechCapture` without `HotkeyManager` needing to know that type. Safe to call again
-    /// without a prior `stop()` — any existing monitors are torn down first.
+    /// Starts monitoring for ⌃⌥M. `appState.toggleCapture()` (additive API, see `AppState.swift`)
+    /// is called directly on key-down; `onKeyDown`/`onKeyUp` let the owner (Phase-3 app wiring)
+    /// additionally drive `SpeechCapture` without `HotkeyManager` needing to know that type. Safe
+    /// to call again without a prior `stop()` — any existing monitors are torn down first.
     func start(appState: AppState, onKeyDown: (() -> Void)? = nil, onKeyUp: (() -> Void)? = nil) {
         stop()
         self.onKeyDown = onKeyDown
@@ -74,22 +73,14 @@ final class HotkeyManager {
 
     private func handle(keyCode: UInt16, modifiers: NSEvent.ModifierFlags, isKeyDown: Bool, appState: AppState) {
         guard keyCode == Self.hotkeyKeyCode else { return }
-
         if isKeyDown {
             guard modifiers == Self.hotkeyModifiers else { return }
-            guard !isDown else { return } // ignore key-repeat while held
+            guard !isDown else { return } // ignore auto-repeat while the combo is held
             isDown = true
-            appState.startCapture()
+            appState.toggleCapture()   // toggle: press to start, press again to stop+parse
             onKeyDown?()
         } else {
-            // Deliberately NOT re-checking modifiers on key-up: users routinely release ⌃/⌥ a
-            // beat before Space, so the Space key-up often arrives with the modifiers already
-            // gone. Requiring the full combo here would leave `isDown` stuck true and the
-            // hold-to-talk recording running forever. Any Space key-up while a hold is active
-            // ends the hold.
-            guard isDown else { return }
             isDown = false
-            onKeyUp?()
         }
     }
 }

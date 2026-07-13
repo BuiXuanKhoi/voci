@@ -162,8 +162,8 @@ struct SettingsView: View {
 
     private var hotkeysTab: some View {
         VStack(spacing: 12) {
-            SettingsRow(label: "Quick capture", hint: "Hold this combo from anywhere to start recording.") {
-                KeyRecorder(keys: ["\u{2303}", "\u{2325}", "Space"])
+            SettingsRow(label: "Quick capture", hint: "Press this combo from anywhere to toggle recording — press to start, press again to stop.") {
+                KeyRecorder(keys: ["\u{2303}", "\u{2325}", "M"])
             }
             SettingsRow(label: "Task breakdown (long press)", hint: "Hold the same hotkey \u{2265}1.5s to have AI split the task into steps.") {
                 HStack(spacing: 8) {
@@ -172,7 +172,7 @@ struct SettingsView: View {
                         .foregroundStyle(VociColor.textSec)
                     KeyBadge("\u{2303}")
                     KeyBadge("\u{2325}")
-                    KeyBadge("Space")
+                    KeyBadge("M")
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 28)

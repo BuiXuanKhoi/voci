@@ -72,16 +72,16 @@ struct MorningFrogView: View {
 
     private var voiceCTA: some View {
         Button {
-            // Answer by voice: kick off the real hold-to-talk capture flow, then dismiss this
-            // modal the same way "Skip today" does.
-            appState.startCapture()
+            // Answer by voice: kick off the real toggle-capture flow, then dismiss this modal
+            // the same way "Skip today" does.
+            appState.toggleCapture()
             onSkip()
         } label: {
             HStack(spacing: 10) {
                 VocIcon(.mic, size: 16, color: accentColors.solid, weight: .regular)
-                Text("Hold")
+                Text("Tap")
                     .font(.system(size: 14, weight: .medium))
-                KeyBadge("Space", accent: true)
+                KeyBadge("M", accent: true)
                 Text("to answer")
                     .font(.system(size: 14, weight: .medium))
             }

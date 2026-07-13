@@ -269,10 +269,10 @@ struct TodayView: View {
     private var hotkeyFooter: some View {
         HStack(spacing: 10) {
             VocIcon(.mic, size: 13, color: accentColors.solid, weight: .semibold)
-            Text("Hold")
+            Text("Press")
             KeyBadge("⌃", accent: true)
             KeyBadge("⌥", accent: true)
-            KeyBadge("Space", accent: true)
+            KeyBadge("M", accent: true)
             Text("and speak to add a task by voice.")
         }
         .font(.system(size: 12))
@@ -322,10 +322,10 @@ private struct EmptyTodayCard: View {
                 .foregroundStyle(VociColor.textPri)
 
             HStack(spacing: 4) {
-                Text("Hold")
+                Text("Press")
                 KeyBadge("⌃")
                 KeyBadge("⌥")
-                KeyBadge("Space")
+                KeyBadge("M")
                 Text("when you need to remember something.")
             }
             .font(.system(size: 13.5))

@@ -20,14 +20,14 @@ enum SpeechCaptureError: Error, Sendable {
 /// `SFSpeechRecognizer` + `AVAudioEngine` pair per keypress is wasteful and can hit rate limits).
 /// This type intentionally has **no dependency on `AppState`** — per the Phase 2 split in
 /// `docs/app-architecture.md`, `Speech/` stays decoupled from `App/`; the caller bridges partials
-/// and completion into `AppState`. Intended wiring, once the ⌃⌥Space hold-to-talk hotkey fires:
+/// and completion into `AppState`. Intended wiring, once the ⌃⌥M toggle-capture hotkey fires:
 ///
 /// ```swift
 /// // once, at HotkeyManager init:
 /// speechCapture.onFinal = { final in appState.finishRecording(transcript: final) }
 /// speechCapture.onError = { _ in appState.captureState = .error }
 ///
-/// // keyDown:
+/// // first press (toggle -> start):
 /// appState.startCapture()                       // -> .recording; clears liveTranscript/parsed
 /// Task {
 ///     guard await speechCapture.requestAuthorization() else {
@@ -37,7 +37,7 @@ enum SpeechCaptureError: Error, Sendable {
 ///     speechCapture.start(onPartial: { partial in appState.liveTranscript = partial })
 /// }
 ///
-/// // keyUp:
+/// // second press (toggle -> stop):
 /// speechCapture.stop()   // triggers one last final result -> onFinal -> finishRecording(transcript:)
 /// ```
 ///

@@ -106,12 +106,12 @@ struct OnboardingView: View {
                 .padding(.bottom, 28)
 
             HStack(spacing: 8) {
-                Text("Hold")
+                Text("Press")
                     .font(.system(size: 32, weight: .medium))
                     .foregroundStyle(VociColor.textPri)
                 KeyBadge("\u{2303}", accent: true)
                 KeyBadge("\u{2325}", accent: true)
-                KeyBadge("Space", accent: true)
+                KeyBadge("M", accent: true)
                 Text(".")
                     .font(.system(size: 32, weight: .medium))
                     .foregroundStyle(VociColor.textPri)
@@ -121,7 +121,7 @@ struct OnboardingView: View {
             title(Text("Speak. Done."))
                 .padding(.bottom, 14)
 
-            subtitle("Voci is a voice-first task manager. No typing, no menus — just hold the hotkey from anywhere on your Mac and say what you need to do.")
+            subtitle("Voci is a voice-first task manager. No typing, no menus — just press the hotkey from anywhere on your Mac and say what you need to do.")
                 .padding(.bottom, 30)
 
             Button {
@@ -219,7 +219,7 @@ struct OnboardingView: View {
             HStack(spacing: 8) {
                 KeyBadge("\u{2303}", accent: true)
                 KeyBadge("\u{2325}", accent: true)
-                KeyBadge("Space", accent: true)
+                KeyBadge("M", accent: true)
             }
             .padding(.horizontal, 18)
             .padding(.vertical, 14)
@@ -234,7 +234,7 @@ struct OnboardingView: View {
             title(Text("Try it now."))
                 .padding(.bottom, 14)
 
-            subtitle("Hold the hotkey and say your first task. We'll parse the time, priority, and project for you.")
+            subtitle("Press the hotkey and say your first task. We'll parse the time, priority, and project for you.")
                 .padding(.bottom, 22)
 
             VStack(alignment: .leading, spacing: 4) {

@@ -97,7 +97,7 @@ final class AppState {
         clock: @escaping () -> Date = Date.init
     ) {
         self.store = store
-        self.tasks = tasks ?? store?.loadOrSeed() ?? SampleData.tasks
+        self.tasks = tasks ?? store?.loadOrSeed() ?? []
         self.accent = accent
         self.density = density
         self.glass = glass
@@ -207,11 +207,12 @@ final class AppState {
         speech.stop()
     }
 
-    /// Hotkey key-up ("hold to talk" released). If recognition is actually running, this just
-    /// ends the utterance (`SpeechCapture.stop()` flushes one final result -> `finishRecording`).
-    /// If the mic never started — authorization was still pending when the key came up — it
-    /// invalidates the deferred start and backs out to `.idle` so the mic is never left hot.
-    /// Additive method; the frozen §4 surface (`startCapture`/`cancelCapture`) is untouched.
+    /// Stops an in-progress capture (called from `toggleCapture()`'s "stop" branch). If
+    /// recognition is actually running, this just ends the utterance (`SpeechCapture.stop()`
+    /// flushes one final result -> `finishRecording`). If the mic never started — authorization
+    /// was still pending — it invalidates the deferred start and backs out to `.idle` so the mic
+    /// is never left hot. Additive method; the frozen §4 surface (`startCapture`/`cancelCapture`)
+    /// is untouched.
     func stopCapture() {
         if speech.isRunning {
             speech.stop()
@@ -219,6 +220,17 @@ final class AppState {
             captureSession += 1
             captureState = .idle
             liveTranscript = ""
+        }
+    }
+
+    /// Toggle voice capture (⌃⌥M hotkey and the on-screen mic buttons use this): if we're
+    /// recording, stop and let the final transcript flow into parsing; otherwise start a fresh
+    /// capture. Additive — frozen §4 `startCapture`/`cancelCapture` untouched.
+    func toggleCapture() {
+        if captureState == .recording {
+            stopCapture()
+        } else {
+            startCapture()
         }
     }
 
@@ -408,13 +420,12 @@ final class AppState {
 
     // MARK: - Service activation (Phase 3: call once from the main window's `.task`)
 
-    /// Starts the global ⌃⌥Space hold-to-talk hotkey. `HotkeyManager.start` already calls
-    /// `appState.startCapture()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`),
-    /// so `onKeyDown` is intentionally omitted here to avoid double-invoking `startCapture()`;
-    /// only `onKeyUp` is wired, through `stopCapture()` (which both ends a running utterance AND
-    /// invalidates an authorization-pending start — see its doc comment). Safe to call even
-    /// without Accessibility permission — `HotkeyManager` degrades to local-only monitoring.
+    /// Starts the global ⌃⌥M toggle-capture hotkey. `HotkeyManager.start` already calls
+    /// `appState.toggleCapture()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`);
+    /// toggle mode has no use for key-up, so neither `onKeyDown` nor `onKeyUp` needs wiring here.
+    /// Safe to call even without Accessibility permission — `HotkeyManager` degrades to
+    /// local-only monitoring.
     func activateServices() {
-        hotkey.start(appState: self, onKeyUp: { [weak self] in self?.stopCapture() })
+        hotkey.start(appState: self)
     }
 }

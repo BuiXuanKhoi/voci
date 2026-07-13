@@ -13,7 +13,7 @@ struct VociApp: App {
 
     init() {
         // Degrade gracefully: if the SwiftData container fails to initialize for any reason,
-        // fall back to AppState's in-memory SampleData.tasks rather than crashing at launch.
+        // fall back to AppState's empty in-memory task list rather than crashing at launch.
         let store = try? TaskStore()
         _appState = State(initialValue: AppState(store: store))
     }
@@ -33,7 +33,7 @@ struct VociApp: App {
                 .environment(appState)
                 .frame(minWidth: 820, minHeight: 560)
                 .task {
-                    // Starts the global ⌃⌥Space hold-to-talk hotkey (degrades gracefully without
+                    // Starts the global ⌃⌥M toggle-capture hotkey (degrades gracefully without
                     // Accessibility permission — see AppState.activateServices).
                     appState.activateServices()
 
@@ -105,7 +105,7 @@ private struct MenuBarMenuContent: View {
             Button("Open Voci") {
                 openWindow(id: "main")
             }
-            Button("New task (\u{2303}\u{2325}Space)") {
+            Button("New task (\u{2303}\u{2325}M)") {
                 appState.startCapture()
                 openWindow(id: "main")
             }
@@ -124,7 +124,7 @@ private struct MenuBarMenuContent: View {
     }
 }
 
-/// Handles app-lifecycle setup an `LSUIElement` menu-bar app needs at launch. The global ⌃⌥Space
+/// Handles app-lifecycle setup an `LSUIElement` menu-bar app needs at launch. The global ⌃⌥M
 /// hotkey is started from `AppState.activateServices()` (called from the main window's `.task`
 /// above) rather than here, since `AppState` — and its `HotkeyManager` — don't exist yet at
 /// `NSApplicationDelegate` construction time.

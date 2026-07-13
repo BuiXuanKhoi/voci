@@ -7,7 +7,7 @@ import VociCore
 /// `VociTask`/`ModelContext` directly.
 ///
 /// `init()` can throw (container creation can fail); callers (see `VociApp.swift`) are expected
-/// to `try?` it and fall back to `AppState`'s in-memory `SampleData.tasks` when it does, per the
+/// to `try?` it and fall back to `AppState`'s empty in-memory task list when it does, per the
 /// architecture spec's "degrade gracefully if container init fails" requirement.
 @MainActor
 final class TaskStore {
@@ -21,14 +21,9 @@ final class TaskStore {
         context = ModelContext(container)
     }
 
-    /// Loads all persisted tasks, seeding the store with `SampleData.tasks` the first time it's
-    /// empty (first run / fresh container).
+    /// Loads all persisted tasks. (Previously seeded SampleData on first run; removed — the app
+    /// now starts empty so the user creates their own tasks.)
     func loadOrSeed() -> [TaskItem] {
-        let existing = fetchAll()
-        guard existing.isEmpty else { return existing }
-        for item in SampleData.tasks {
-            add(item)
-        }
         return fetchAll()
     }
 
