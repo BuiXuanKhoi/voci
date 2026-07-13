@@ -9,7 +9,6 @@ import SwiftUI
 
 struct MenuBarLabel: View {
     @Environment(AppState.self) private var appState
-    @State private var glow = false
 
     private var accentColors: Accent { appState.accent.accent }
 
@@ -21,11 +20,6 @@ struct MenuBarLabel: View {
                 listeningContent
             } else {
                 idleContent
-            }
-        }
-        .onAppear {
-            withAnimation(.easeInOut(duration: 1.4).repeatForever(autoreverses: true)) {
-                glow = true
             }
         }
     }
@@ -44,7 +38,7 @@ struct MenuBarLabel: View {
                 Circle()
                     .fill(accentColors.glow)
                     .frame(width: 16, height: 16)
-                    .opacity(glow ? 0.15 : 0.4)
+                    .opacity(0.3)
                     .blur(radius: 3)
                 VocIcon(.mic, size: 14, color: accentColors.solid, weight: .semibold)
             }
