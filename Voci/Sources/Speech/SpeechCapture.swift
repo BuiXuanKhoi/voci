@@ -9,11 +9,16 @@ enum SpeechCaptureError: Error, Sendable {
     case recognizerUnavailable
     case authorizationDenied
     case recognitionFailed(String)
+    /// On-device recognition couldn't run (Dictation is off on this Mac). Distinct from
+    /// `recognitionFailed` so the caller can offer "enable Dictation" / "use Apple's servers"
+    /// instead of a generic error.
+    case onDeviceUnavailable
 }
 
-/// Bridges Apple's on-device Speech framework into a plain start/stop + callback API. Fully
-/// on-device (`requiresOnDeviceRecognition = true`); no audio or transcript ever leaves the
-/// machine, no network calls (constitution I).
+/// Bridges Apple's Speech framework into a plain start/stop + callback API. Prefers on-device
+/// recognition (`requiresOnDeviceRecognition = true`, no audio/transcript ever leaves the
+/// machine — constitution I); falls back to Apple's server-based recognition only when the
+/// caller has explicitly set `allowServerFallback = true` (user consent, e.g. Dictation is off).
 ///
 /// ## Ownership & bridging (for Phase 2C `HotkeyManager` / Phase 3 `VociApp` wiring)
 /// `HotkeyManager` should own exactly one `SpeechCapture` for the app's lifetime (creating a new
@@ -85,6 +90,14 @@ final class SpeechCapture {
     /// closure into the `@MainActor` hop.
     private var onPartialHandler: ((String) -> Void)?
 
+    /// When false (default): force on-device recognition (private, needs Dictation enabled).
+    /// When true (user consented): allow Apple's server recognition (audio leaves the Mac).
+    var allowServerFallback = false
+
+    /// Tracks whether the in-flight attempt is on-device, so the `recognitionTask` error handler
+    /// can tell a Dictation-disabled failure apart from any other recognition failure.
+    private var isOnDeviceAttempt = false
+
     init(locale: Locale = Locale(identifier: "en-US")) {
         self.recognizer = SFSpeechRecognizer(locale: locale)
         print("[Voci.Speech] recognizer == nil: \(self.recognizer == nil)")
@@ -140,20 +153,15 @@ final class SpeechCapture {
         }
         print("[Voci.Speech] recognizer.isAvailable=\(recognizer.isAvailable) supportsOnDevice=\(recognizer.supportsOnDeviceRecognition)")
 
-        // App is on-device-only by constitution (I) — if this Mac can't do on-device
-        // recognition, fail loudly instead of letting `recognitionTask` fail later with an
-        // opaque error. Never fall back to server-based recognition.
-        guard recognizer.supportsOnDeviceRecognition else {
-            onError?(SpeechCaptureError.recognitionFailed("On-device speech recognition is not available on this Mac (enable Dictation in System Settings, or the language model may need downloading)."))
-            return
-        }
-
         onPartialHandler = onPartial
 
         let newRequest = SFSpeechAudioBufferRecognitionRequest()
         newRequest.shouldReportPartialResults = true
-        // On-device only — audio/transcript never leaves the machine (constitution I).
-        newRequest.requiresOnDeviceRecognition = true
+        // Prefer on-device (private). Only use Apple's servers when the user has explicitly
+        // consented (allowServerFallback) — audio leaves the Mac in that mode.
+        let useOnDevice = !allowServerFallback
+        newRequest.requiresOnDeviceRecognition = useOnDevice
+        isOnDeviceAttempt = useOnDevice
         request = newRequest
 
         let inputNode = audioEngine.inputNode
@@ -219,7 +227,12 @@ final class SpeechCapture {
                 }
                 if let errorMessage {
                     self.teardown()
-                    self.onError?(SpeechCaptureError.recognitionFailed(errorMessage))
+                    let lower = errorMessage.lowercased()
+                    if self.isOnDeviceAttempt, lower.contains("dictation") || lower.contains("siri") {
+                        self.onError?(SpeechCaptureError.onDeviceUnavailable)
+                    } else {
+                        self.onError?(SpeechCaptureError.recognitionFailed(errorMessage))
+                    }
                 }
             }
         }

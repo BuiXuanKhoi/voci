@@ -1,4 +1,5 @@
 // Sources/App/AppState.swift — central @Observable app state (frozen API, spec §4)
+import AppKit
 import Foundation
 import Observation
 import VociCore
@@ -44,6 +45,11 @@ final class AppState {
     var liveTranscript: String
     var parsed: ParsedTask?
     private(set) var captureErrorDetail: String?
+    /// User consented to Apple server-based recognition (audio leaves the Mac). Persisted.
+    private(set) var allowServerRecognition: Bool
+    /// True when capture failed because on-device recognition is unavailable (Dictation off) and
+    /// the user hasn't consented to server recognition yet — drives the popover's hint + consent UI.
+    private(set) var pendingServerConsent = false
 
     // Focus session
     var focusActive: Bool
@@ -84,6 +90,7 @@ final class AppState {
 
     private static let ambientKey = "voci.ambient"
     private static let customImageKey = "voci.customImageURL"
+    private static let allowServerRecognitionKey = "voci.allowServerRecognition"
 
     init(
         store: TaskStore? = nil,
@@ -112,6 +119,7 @@ final class AppState {
         if let p = UserDefaults.standard.string(forKey: Self.customImageKey) {
             self.customImageURL = URL(fileURLWithPath: p)
         }
+        self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -180,6 +188,7 @@ final class AppState {
         liveTranscript = ""
         parsed = nil
         captureErrorDetail = nil
+        pendingServerConsent = false
         captureSession += 1
         let session = captureSession
         // Kick off on-device recognition. Must qualify `_Concurrency.Task` because
@@ -200,11 +209,19 @@ final class AppState {
             self.speech.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
             self.speech.onError = { [weak self] error in
                 guard let self else { return }
+                if case SpeechCaptureError.onDeviceUnavailable = error {
+                    self.pendingServerConsent = true
+                    self.captureErrorDetail = "Dictation is off, so Voci can't recognize speech on-device. Turn on Dictation (System Settings ▸ Keyboard) to keep everything private and offline — or use Apple's servers, which needs internet and sends your audio to Apple."
+                    print("[Voci.Speech] onError -> onDeviceUnavailable (needs Dictation or server consent)")
+                    self.captureState = .error
+                    return
+                }
                 let detail = (error as? SpeechCaptureError).map(Self.describe) ?? error.localizedDescription
                 self.captureErrorDetail = detail
                 print("[Voci.Speech] onError -> \(detail)")
                 self.captureState = .error
             }
+            self.speech.allowServerFallback = self.allowServerRecognition
             self.speech.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
         }
     }
@@ -217,6 +234,9 @@ final class AppState {
         case .recognizerUnavailable: return "Speech recognizer unavailable on this Mac"
         case .authorizationDenied: return "Microphone or Speech permission denied"
         case .recognitionFailed(let msg): return msg
+        // The onError handler above sets a longer, actionable message for this case directly;
+        // this branch only exists so the switch stays exhaustive.
+        case .onDeviceUnavailable: return "On-device speech recognition is unavailable (Dictation is off)"
         }
     }
 
@@ -253,6 +273,27 @@ final class AppState {
         } else {
             startCapture()
         }
+    }
+
+    /// Opens System Settings so the user can enable Dictation (which downloads the on-device
+    /// speech model). Pane URL differs across macOS versions; falls back to opening System
+    /// Settings generally.
+    func openDictationSettings() {
+        let candidates = [
+            "x-apple.systempreferences:com.apple.Keyboard-Settings.extension",
+            "x-apple.systempreferences:com.apple.preference.keyboard"
+        ]
+        for s in candidates {
+            if let url = URL(string: s), NSWorkspace.shared.open(url) { return }
+        }
+    }
+
+    /// User consented to Apple server recognition. Persist it and immediately retry capture.
+    func useServerRecognition() {
+        allowServerRecognition = true
+        UserDefaults.standard.set(true, forKey: Self.allowServerRecognitionKey)
+        pendingServerConsent = false
+        startCapture()
     }
 
     /// Not part of the frozen §4 method list, but required to actually drive

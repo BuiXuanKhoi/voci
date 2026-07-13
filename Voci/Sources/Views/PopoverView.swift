@@ -294,32 +294,65 @@ struct PopoverView: View {
 
     // MARK: - Error retry
 
+    @ViewBuilder
     private func errorActionsRow(accent: Accent) -> some View {
-        HStack(spacing: 8) {
-            Button {
-                appState.cancelCapture()
-            } label: {
-                Text("Dismiss")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VociColor.textPri)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-            }
-            .buttonStyle(.plain)
-            .background(Color.white.opacity(0.06))
-            .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(VociColor.border, lineWidth: 0.5)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .keyboardShortcut(.cancelAction)
+        if appState.pendingServerConsent {
+            dictationConsentActionsRow(accent: accent)
+        } else {
+            HStack(spacing: 8) {
+                Button {
+                    appState.cancelCapture()
+                } label: {
+                    Text("Dismiss")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(VociColor.textPri)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(Color.white.opacity(0.06))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(VociColor.border, lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .keyboardShortcut(.cancelAction)
 
+                Button {
+                    appState.startCapture()
+                } label: {
+                    Text("Try again")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(accent.solid)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                )
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .keyboardShortcut(.defaultAction)
+            }
+            .padding(.top, 10)
+        }
+    }
+
+    /// Shown instead of the usual Dismiss/Try again pair when `appState.pendingServerConsent` —
+    /// on-device recognition failed because Dictation is off. Offers the private fix (enable
+    /// Dictation) alongside the explicit-consent escape hatch (Apple's servers); the warning copy
+    /// itself lives in `AppState.captureErrorDetail`, surfaced above by `leftHint`.
+    private func dictationConsentActionsRow(accent: Accent) -> some View {
+        VStack(spacing: 8) {
             Button {
-                appState.startCapture()
+                appState.openDictationSettings()
             } label: {
-                Text("Try again")
+                Text("Open Dictation Settings")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white)
+                    .lineLimit(1)
                     .frame(maxWidth: .infinity)
                     .frame(height: 34)
             }
@@ -331,6 +364,25 @@ struct PopoverView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .keyboardShortcut(.defaultAction)
+
+            Button {
+                appState.useServerRecognition()
+            } label: {
+                Text("Use Apple servers instead (sends audio online)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(VociColor.destruct)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(Color.white.opacity(0.06))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(VociColor.border, lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         }
         .padding(.top, 10)
     }
