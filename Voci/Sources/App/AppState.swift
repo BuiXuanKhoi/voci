@@ -24,6 +24,22 @@ enum AmbientMode: String, Sendable, Equatable, Hashable, CaseIterable, Identifia
     }
 }
 
+/// Which transcription engine drives the NEXT voice capture — the freemium speech tier picker
+/// (backlog "★ KIẾN TRÚC CHỐT"). String-backed + `CaseIterable`/`Identifiable` so Settings can
+/// drive it off a picker and persist the raw value to `UserDefaults`, same convention as
+/// `AmbientMode` above.
+enum SpeechEngineChoice: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case appleOnDevice, whisperKit, groq
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .appleOnDevice: return "Apple (on-device)"
+        case .whisperKit: return "WhisperKit (on-device)"
+        case .groq: return "Groq (cloud)"
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -50,6 +66,10 @@ final class AppState {
     /// Speech-recognition language, as a BCP-47/locale identifier (e.g. "en-US", "vi-VN").
     /// Persisted; applied live to `speech` via `setRecognitionLocale`.
     private(set) var recognitionLocaleID: String
+    /// Which transcription engine the user picked in Settings (freemium tier). Persisted; the
+    /// engine actually used for a given capture is further gated by `selectedEngine` (e.g.
+    /// WhisperKit falls back to Apple when unsupported or its model isn't loaded yet).
+    private(set) var speechEngineChoice: SpeechEngineChoice
     /// True when capture failed because on-device recognition is unavailable (Dictation off) and
     /// the user hasn't consented to server recognition yet — drives the popover's hint + consent UI.
     private(set) var pendingServerConsent = false
@@ -91,6 +111,15 @@ final class AppState {
     let ambientSound = AmbientSound()
     let hotkey = HotkeyManager()
     let speech = SpeechCapture()
+    /// Free on-device tier (backlog freemium split). Apple (`speech`) remains the default engine
+    /// and the fallback whenever WhisperKit isn't supported/ready.
+    let whisper = WhisperKitEngine()
+    /// Paid cloud tier.
+    let groq = GroqEngine()
+    /// The `SpeechEngine` actually driving the in-flight (or most recent) capture, so
+    /// `stopCapture`/`cancelCapture`/`confirmSave` can address whichever engine `startCapture`
+    /// routed to instead of hardcoding `speech`.
+    private var runningEngine: SpeechEngine?
 
     // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
 
@@ -98,6 +127,7 @@ final class AppState {
     private static let customImageKey = "voci.customImageURL"
     private static let allowServerRecognitionKey = "voci.allowServerRecognition"
     private static let recognitionLocaleKey = "voci.recognitionLocale"
+    private static let speechEngineKey = "voci.speechEngine"
 
     init(
         store: TaskStore? = nil,
@@ -128,6 +158,7 @@ final class AppState {
         }
         self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
+        self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .appleOnDevice
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -204,6 +235,16 @@ final class AppState {
     /// with nothing left to ever turn it off.
     private var captureSession = 0
 
+    /// Picks the engine for the NEXT capture based on user choice, with safe fallbacks:
+    /// WhisperKit only when supported AND its model is loaded, else Apple. Groq used as chosen.
+    private var selectedEngine: SpeechEngine {
+        switch speechEngineChoice {
+        case .appleOnDevice: return speech
+        case .whisperKit: return (WhisperKitEngine.isSupported && whisper.isModelReady) ? whisper : speech
+        case .groq: return groq
+        }
+    }
+
     func startCapture() {
         captureState = .recording
         liveTranscript = ""
@@ -212,39 +253,47 @@ final class AppState {
         pendingServerConsent = false
         captureSession += 1
         let session = captureSession
-        // Kick off on-device recognition. Must qualify `_Concurrency.Task` because
-        // `import VociCore` brings in `VociCore.Task` (the engine's model struct), which
-        // shadows `Swift.Task` in this file. Explicitly hopping back onto @MainActor is
-        // still intentional (matches AmbientSound.rampVolume's convention elsewhere).
+        let engine = selectedEngine
+        runningEngine = engine
+        // Kick off recognition. Must qualify `_Concurrency.Task` because `import VociCore` brings
+        // in `VociCore.Task` (the engine's model struct), which shadows `Swift.Task` in this file.
+        // Explicitly hopping back onto @MainActor is still intentional (matches
+        // AmbientSound.rampVolume's convention elsewhere).
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
-            let granted = await self.speech.requestAuthorization()
+            let granted = await engine.requestAuthorization()
             // Stale? The hold ended (key-up/Esc/retry) while the permission flow was in flight.
             guard self.captureSession == session, self.captureState == .recording else { return }
             guard granted else {
                 self.captureErrorDetail = Self.describe(.authorizationDenied)
-                print("[Voci.Speech] onError -> \(self.captureErrorDetail ?? "")")
                 self.captureState = .error
                 return
             }
-            self.speech.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
-            self.speech.onError = { [weak self] error in
-                guard let self else { return }
-                if case SpeechCaptureError.onDeviceUnavailable = error {
-                    self.pendingServerConsent = true
-                    self.captureErrorDetail = "Dictation is off, so Voci can't recognize speech on-device. Turn on Dictation (System Settings ▸ Keyboard) to keep everything private and offline — or use Apple's servers, which needs internet and sends your audio to Apple."
-                    print("[Voci.Speech] onError -> onDeviceUnavailable (needs Dictation or server consent)")
-                    self.captureState = .error
-                    return
-                }
-                let detail = (error as? SpeechCaptureError).map(Self.describe) ?? error.localizedDescription
-                self.captureErrorDetail = detail
-                print("[Voci.Speech] onError -> \(detail)")
-                self.captureState = .error
+            engine.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
+            engine.onError = { [weak self] error in self?.handleCaptureError(error) }
+            // Apple-only: server-consent + (locale already applied via setRecognitionLocale).
+            // WhisperKit/Groq auto-detect language, so there's nothing analogous to wire for them.
+            if let apple = engine as? SpeechCapture {
+                apple.allowServerFallback = self.allowServerRecognition
             }
-            self.speech.allowServerFallback = self.allowServerRecognition
-            self.speech.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
+            engine.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
         }
+    }
+
+    /// Shared `onError` handling for whichever engine `startCapture()` routed to — moved out of
+    /// the closure verbatim so `startCapture` doesn't have to special-case per-engine errors.
+    private func handleCaptureError(_ error: Error) {
+        if case SpeechCaptureError.onDeviceUnavailable = error {
+            pendingServerConsent = true
+            captureErrorDetail = "Dictation is off, so Voci can't recognize speech on-device. Turn on Dictation (System Settings ▸ Keyboard) to keep everything private and offline — or use Apple's servers, which needs internet and sends your audio to Apple."
+            print("[Voci.Speech] onError -> onDeviceUnavailable (needs Dictation or server consent)")
+            captureState = .error
+            return
+        }
+        let detail = (error as? SpeechCaptureError).map(Self.describe) ?? error.localizedDescription
+        captureErrorDetail = detail
+        print("[Voci.Speech] onError -> \(detail)")
+        captureState = .error
     }
 
     /// Turns a `SpeechCaptureError` into a user-facing message for `captureErrorDetail` — surfaces
@@ -266,7 +315,8 @@ final class AppState {
         captureState = .idle
         liveTranscript = ""
         parsed = nil
-        speech.stop()
+        runningEngine?.stop()
+        runningEngine = nil
     }
 
     /// Stops an in-progress capture (called from `toggleCapture()`'s "stop" branch). If
@@ -276,8 +326,9 @@ final class AppState {
     /// is never left hot. Additive method; the frozen §4 surface (`startCapture`/`cancelCapture`)
     /// is untouched.
     func stopCapture() {
-        if speech.isRunning {
-            speech.stop()
+        if let engine = runningEngine, engine.isRunning {
+            if !engine.supportsPartialResults { captureState = .parsing } // batch: show "working…" while it transcribes
+            engine.stop()
         } else if captureState == .recording {
             captureSession += 1
             captureState = .idle
@@ -324,6 +375,16 @@ final class AppState {
         speech.setLocale(Locale(identifier: id))
     }
 
+    /// Change the transcription engine (Settings). Persists; picking WhisperKit on Apple Silicon
+    /// kicks off the one-time model download/load so it's ready by the next capture.
+    func setSpeechEngine(_ choice: SpeechEngineChoice) {
+        speechEngineChoice = choice
+        UserDefaults.standard.set(choice.rawValue, forKey: Self.speechEngineKey)
+        if choice == .whisperKit, WhisperKitEngine.isSupported {
+            _Concurrency.Task { await whisper.prepare() }
+        }
+    }
+
     /// Not part of the frozen §4 method list, but required to actually drive
     /// `.recording -> .parsing -> .parsed`: Phase-2 `SpeechCapture` calls this once the
     /// on-device transcript settles. A pure addition — `startCapture`/`cancelCapture`/
@@ -353,7 +414,7 @@ final class AppState {
         addTask(item)
         captureState = .done
         self.parsed = nil
-        speech.stop()
+        runningEngine?.stop()
         // Read the captured description back so the user can confirm by ear (voice-first).
         voice.speak(item.details.isEmpty ? item.title : item.details)
         // Transient "Saved" flash, then close the popover — without this the popover stayed

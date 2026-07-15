@@ -123,8 +123,50 @@ struct SettingsView: View {
             .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
+    /// Short status text for the WhisperKit model row: download/load progress or the reason it
+    /// can't run, so picking the engine doesn't silently fall back to Apple with no explanation.
+    private var whisperKitStatusText: String {
+        guard WhisperKitEngine.isSupported else { return "Requires Apple Silicon" }
+        switch appState.whisper.state {
+        case .notReady: return "Not downloaded"
+        case .preparing: return "Downloading model…"
+        case .ready: return "Ready"
+        case .failed(let message): return message
+        }
+    }
+
+    private var whisperKitStatusHint: String {
+        WhisperKitEngine.isSupported
+            ? "First use downloads a small on-device model (~145MB) and caches it. Falls back to Apple until it's ready."
+            : "WhisperKit needs an Apple Silicon Mac. Voci will use Apple's on-device recognizer instead."
+    }
+
     private var generalTab: some View {
         VStack(spacing: 12) {
+            SettingsRow(label: "Speech engine", hint: "On-device (Apple, WhisperKit) stays private and free. Groq is cloud — it sends your audio for the best multilingual/Vietnamese accuracy.") {
+                // `SpeechEngineChoice` (AppState.swift) doesn't declare Hashable, so — same
+                // convention as the Density picker below — bind through its `String` rawValue
+                // instead of the enum itself.
+                Picker("", selection: Binding(
+                    get: { appState.speechEngineChoice.rawValue },
+                    set: { if let choice = SpeechEngineChoice(rawValue: $0) { appState.setSpeechEngine(choice) } }
+                )) {
+                    ForEach(SpeechEngineChoice.allCases) { choice in
+                        Text(choice.label).tag(choice.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(accentColors.solid)
+                .frame(width: 200)
+            }
+            if appState.speechEngineChoice == .whisperKit {
+                SettingsRow(label: "WhisperKit model", hint: whisperKitStatusHint) {
+                    Text(whisperKitStatusText)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VociColor.textSec)
+                }
+            }
             SettingsRow(label: "Recognition language", hint: "The language Voci listens for when you capture a task by voice, including Vietnamese.") {
                 Picker("", selection: Binding(
                     get: { appState.recognitionLocaleID },

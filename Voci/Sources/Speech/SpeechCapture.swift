@@ -293,3 +293,8 @@ private final class ContinuationOnce<T>: @unchecked Sendable {
         c?.resume(returning: value)
     }
 }
+
+extension SpeechCapture: SpeechEngine {
+    /// SFSpeechRecognizer streams interim results.
+    var supportsPartialResults: Bool { true }
+}

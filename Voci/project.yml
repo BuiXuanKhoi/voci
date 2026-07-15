@@ -10,6 +10,10 @@ configs:
 packages:
   VociCore:
     path: ../VociCore
+  # NOTE: WhisperKit version may need bumping on Mac (from: 0.9.0 is a floor).
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    from: "0.9.0"
 targets:
   Voci:
     type: application
@@ -37,3 +41,5 @@ targets:
     dependencies:
       - package: VociCore
         product: VociCore
+      - package: WhisperKit
+        product: WhisperKit

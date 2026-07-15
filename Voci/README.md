@@ -39,6 +39,17 @@ macOS will prompt for these the first time each feature is used:
   frontmost. Grant it under **System Settings → Privacy & Security → Accessibility**. Without it,
   the hotkey still works while a Voci window/menu is key, but not system-wide.
 
+## Speech engines (Settings → General → Speech engine)
+
+Three interchangeable `SpeechEngine` implementations (`Sources/Speech/`), freemium-tiered:
+
+- **Apple (on-device)** — `SpeechCapture`, `SFSpeechRecognizer`. Default; private, free, streams
+  partial results. Only engine that needs the Speech Recognition permission above.
+- **WhisperKit (on-device)** — `WhisperKitEngine`. Free tier alternative; private, batch (no
+  partials), Apple Silicon only — downloads/caches a small Whisper model on first use.
+- **Groq (cloud)** — `GroqEngine`. Paid tier; batch, sends audio to Groq for best multilingual/
+  Vietnamese accuracy. The only engine whose audio leaves the machine.
+
 ## Engine tests
 
 The pure `nextTask()` selection engine lives in the separate `../VociCore` package and has its own
