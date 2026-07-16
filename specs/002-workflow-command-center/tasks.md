@@ -66,16 +66,16 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 **Independent Test**: quickstart §3 — spoken utterance produces exactly the spoken attributes; dependency/defer/external/review/recurrence phrasings all land; cycle rejected with readable message.
 
-- [ ] T017 [US1] Extend `ParsedTask` in `Voci/Sources/Model/NLParser.swift`: v2 shape per data-model.md (conditions with confidence, estimateMinutes, recurrence, reminderOverride, kind, subtasks, followUpReview; max 10 tasks)
-- [ ] T018 [US1] Extend `HeuristicNLParser` in `Voci/Sources/Model/NLParser.swift`: resolve real `Date` deadlines (closes backlog "deadline: nil" item), defer phrases → `.afterDate`, "sau khi/xong A thì" → `.taskDone` candidate by fuzzy title, "chờ/đợi X" → `.external`, estimate phrases, recurrence phrases, reminder-override phrases
-- [ ] T019 [P] [US1] Create `Voci/Sources/Parsing/IntentParsing.swift`: protocol + router FM → Cloud (opt-in + online + quota) → Heuristic (R5); shared `ParsedTask` validation + title-only fallback (constitution II)
-- [ ] T020 [P] [US1] Create `Voci/Sources/Parsing/FoundationModelParser.swift`: `#available(macOS 26)` @Generable guided generation, capability probe, `// UNVERIFIED` markers for FM API surface
-- [ ] T021 [P] [US1] Create `Voci/Sources/Parsing/CloudParser.swift`: `/functions/v1/parse` client per contracts/parse-proxy.md — JWS or DeviceCheck auth headers, 429→typed quota fallback, text-only payload, ≤100 open-task titles only when dependency phrasing detected
+- [x] T017 [US1] Extend `ParsedTask` in `Voci/Sources/Model/NLParser.swift`: v2 shape per data-model.md (conditions with confidence, estimateMinutes, recurrence, reminderOverride, kind, subtasks, followUpReview; max 10 tasks)
+- [x] T018 [US1] Extend `HeuristicNLParser` in `Voci/Sources/Model/NLParser.swift`: resolve real `Date` deadlines (closes backlog "deadline: nil" item), defer phrases → `.afterDate`, "sau khi/xong A thì" → `.taskDone` candidate by fuzzy title, "chờ/đợi X" → `.external`, estimate phrases, recurrence phrases, reminder-override phrases
+- [x] T019 [P] [US1] Create `Voci/Sources/Parsing/IntentParsing.swift`: protocol + router FM → Cloud (opt-in + online + quota) → Heuristic (R5); shared `ParsedTask` validation + title-only fallback (constitution II)
+- [x] T020 [P] [US1] Create `Voci/Sources/Parsing/FoundationModelParser.swift`: `#available(macOS 26)` @Generable guided generation, capability probe, `// UNVERIFIED` markers for FM API surface
+- [x] T021 [P] [US1] Create `Voci/Sources/Parsing/CloudParser.swift`: `/functions/v1/parse` client per contracts/parse-proxy.md — JWS or DeviceCheck auth headers, 429→typed quota fallback, text-only payload, ≤100 open-task titles only when dependency phrasing detected
 - [~] T022 [US1] Implement `supabase/functions/parse/index.ts`: JWS/DeviceCheck verification, per-device daily counter (Postgres), Gemini Flash call with JSON-schema output, 10-task cap, no transcript logging (contract obligations 1–5) — PARTIAL: code + migration + README done and Opus-reviewed (paid JWS path + quota + Gemini + hardening all present); free-tier App Attest key store is stubbed (fails closed 503) → completing it needs an `/attest/register` endpoint + key table (backlog, not blocking since client T021 not built yet)
-- [ ] T023 [US1] Add DeviceCheck token generation in `Voci/Sources/Parsing/DeviceCheckProvider.swift` (DCDevice; graceful nil on unsupported/simulator → heuristic)
-- [ ] T024 [US1] Rework confirm card in `Voci/Sources/Views/PopoverView.swift`: chips v2 for all attributes, uncertain (<0.7) dashed chips, dependency picker instead of auto-attach, multi-task confirm (≤10), one-time cloud-parse opt-in sheet
-- [ ] T025 [US1] Wire `AppState.confirmSave()` in `Voci/Sources/App/AppState.swift`: materialize tasks + conditions + review follow-ups through TaskStore validation; persist `sourceTranscript` always
-- [ ] T026 [P] [US1] Create `Voci/Sources/Model/ParseCorrection.swift`: @Model correction log (attribute, parsed, corrected, transcript) + hook into chip edits (FR-044, local-only)
+- [x] T023 [US1] Add DeviceCheck token generation in `Voci/Sources/Parsing/DeviceCheckProvider.swift` (DCDevice; graceful nil on unsupported/simulator → heuristic)
+- [x] T024 [US1] Rework confirm card in `Voci/Sources/Views/PopoverView.swift`: chips v2 for all attributes, uncertain (<0.7) dashed chips, dependency picker instead of auto-attach, multi-task confirm (≤10), one-time cloud-parse opt-in sheet
+- [x] T025 [US1] Wire `AppState.confirmSave()` in `Voci/Sources/App/AppState.swift`: materialize tasks + conditions + review follow-ups through TaskStore validation; persist `sourceTranscript` always
+- [x] T026 [P] [US1] Create `Voci/Sources/Model/ParseCorrection.swift`: @Model correction log (attribute, parsed, corrected, transcript) + hook into chip edits (FR-044, local-only)
 
 **Checkpoint**: US1 fully functional — capture by voice/type works on all three parser routes
 
