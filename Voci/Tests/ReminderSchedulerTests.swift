@@ -4,13 +4,14 @@
 // UNVERIFIED (written entirely on Windows — no Xcode/xcodegen/simulator available here):
 //   1. This is a NEW test target (`VociTests` in `Voci/project.yml`) — confirm on Mac that
 //      `xcodegen generate` followed by `xcodebuild test` actually builds and runs it.
-//   2. `TaskStore()` (Sources/Model/TaskStore.swift, not owned by this task) always opens its
-//      REAL default on-disk SwiftData store — there's no in-memory constructor to inject here.
-//      Every test below uses a freshly-`UUID()`-suffixed task title/id to avoid cross-test
-//      collisions, but repeated local test runs will accumulate rows in that store rather than
-//      starting clean. A `TaskStore.init(inMemory:)` parameter would fix this properly — flagged
-//      in this task's final report as a backlog candidate for whoever owns TaskStore.swift,
-//      rather than added here (out of this task's file ownership).
+//   2. M-4: `makeScheduler()` now uses `TaskStore(inMemory: true)` so the `TaskStore` side no
+//      longer accumulates on-disk rows across repeated local runs. `ReminderScheduler`'s OWN
+//      `ModelContainer` (`ReminderScheduler.swift`'s `makeContext()`, named store
+//      `"VociReminders"`) is still on-disk — threading an in-memory option through there would
+//      require adding a parameter to the frozen `ReminderScheduler.init(store:voice:gate:)`
+//      seam (contract §A), which this fix does not touch. `ReminderRecord` rows in that store
+//      still accumulate across runs; every test below already uses a freshly-`UUID()`-suffixed
+//      task id, so this is cosmetic (disk growth), not a correctness risk for these assertions.
 //   3. `ReminderScheduler.rebuildFromStorage()`/`scheduleReminders`/etc. each spawn a
 //      fire-and-forget `Task { ... await UNUserNotificationCenter... }` for system-request
 //      registration. None of it is awaited by these tests (every assertion below only reads
@@ -25,7 +26,7 @@ final class ReminderSchedulerTests: XCTestCase {
     // MARK: - Fixtures
 
     private func makeScheduler() throws -> (ReminderScheduler, TaskStore) {
-        let store = try TaskStore()
+        let store = try TaskStore(inMemory: true)
         let voice = VoiceReminderChannel(playback: VoicePlayback())
         let gate = ReminderContextGate()
         let scheduler = ReminderScheduler(store: store, voice: voice, gate: gate)
@@ -80,22 +81,44 @@ final class ReminderSchedulerTests: XCTestCase {
 
     // MARK: - done-task suppression
 
+    /// SB-2 fix: the original version of this test added an ALREADY-`.done` task and asserted
+    /// records existed — but `rebuildFromStorage()`'s derive loop only considers OPEN dated tasks
+    /// (`status == .todo || .inProgress`), so a `.done` task never gets anything derived for it in
+    /// the first place. That made the original assertion (`records.allSatisfy { $0.state ==
+    /// "satisfied" }` over an EMPTY array) trivially true for the wrong reason, while the real
+    /// suppression path — derive while open, complete afterward, THEN fire — went completely
+    /// untested. This version drives that real path: derive with the task still open (records
+    /// land `.scheduled`), mark it done in the store, then explicitly fire each record via
+    /// `handleFire` (mirrors what a due system notification / due-but-missed recovery would
+    /// trigger) and asserts fresh-reload suppression actually kicks in (constitution IV).
     func testDoneTaskSuppressesFire() throws {
         let (scheduler, store) = try makeScheduler()
-        let deadline = Date().addingTimeInterval(-3600) // already due
-        var item = TaskItem(
+        let deadline = Date().addingTimeInterval(3600) // due in an hour — not yet due
+        let item = TaskItem(
             title: "Done test \(UUID())", priority: .medium, deadline: deadline, when: .later
         )
-        item.status = .done
         store.add(item)
 
         scheduler.rebuildFromStorage()
+        let scheduled = scheduler.recordsForTask(item.id)
+        XCTAssertFalse(scheduled.isEmpty, "an open, dated task must get reminders derived while still open")
+        XCTAssertTrue(scheduled.allSatisfy { $0.state == "scheduled" }, "nothing is due yet")
 
-        let records = scheduler.recordsForTask(item.id)
-        XCTAssertFalse(records.isEmpty)
+        // Complete it in the store — the derived records themselves are untouched by this call;
+        // constitution IV's fresh reload at FIRE time is what's supposed to catch this, not
+        // completion itself reaching in to cancel rows.
+        store.toggle(item.id, now: Date())
+
+        // Drive the real fire path for every derived record (as due-but-missed recovery or a live
+        // system notification would).
+        for record in scheduled {
+            scheduler.handleFire(recordId: record.id)
+        }
+
+        let afterFire = scheduler.recordsForTask(item.id)
         XCTAssertTrue(
-            records.allSatisfy { $0.state == "satisfied" },
-            "a done task's fresh-reloaded reminder must resolve to satisfied with no delivery"
+            afterFire.allSatisfy { $0.state == "satisfied" },
+            "a done task's fresh-reloaded reminder must resolve to satisfied, never delivered/spoken"
         )
     }
 

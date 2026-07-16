@@ -247,11 +247,6 @@ final class AppState {
     let voiceChannel: VoiceReminderChannel
     let reminderGate: ReminderContextGate
     let scheduler: ReminderScheduler?
-    /// `NotificationActions.swift`'s own doc comment names this exact seam: construct one instance
-    /// after the scheduler and assign it as `UNUserNotificationCenter.current().delegate` — kept
-    /// as a strong reference here for the app's lifetime (the `delegate` property itself is
-    /// `weak`, so nothing else may retain it). Wired in `activateServices()` below.
-    let notificationDelegate: ReminderNotificationDelegate?
 
     // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
 
@@ -340,13 +335,22 @@ final class AppState {
         // instance's construction before any of this init's own statements run.
         self.voiceChannel = VoiceReminderChannel(playback: self.voice)
         self.reminderGate = ReminderContextGate()
+        // M-1 (constitution I): wire the one cheaply-detectable, no-extra-entitlement signal this
+        // file has direct access to — our own `AmbientSound` instance's public `isPlaying` flag —
+        // so a voice reminder never talks over ambient sound already playing. Mic contention is
+        // already wired unconditionally inside `ReminderContextGate` itself
+        // (`AVCaptureDevice.isInUseByAnotherApplication`); DND/screen-share have no public,
+        // unprivileged API on macOS (see `ReminderContextGate.swift`'s own doc comment) and are
+        // deliberately left non-suppressing rather than failing the whole gate open silently.
+        // // UNVERIFIED: this only covers OUR OWN ambient playback, not other apps' audio in
+        // general (no public system-wide "is any app playing audio" API without an entitlement)
+        // — calendar-busy (P3) + call/mic remain the real guards for that case.
+        self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
         if let store {
             let realScheduler = ReminderScheduler(store: store, voice: self.voiceChannel, gate: self.reminderGate)
             self.scheduler = realScheduler
-            self.notificationDelegate = ReminderNotificationDelegate(scheduler: realScheduler)
         } else {
             self.scheduler = nil
-            self.notificationDelegate = nil
         }
         speech.setLocale(Locale(identifier: self.recognitionLocaleID))
     }
@@ -377,6 +381,9 @@ final class AppState {
         let before = tasks
         tasks.insert(t, at: 0)
         store?.add(t)
+        // WG-1 (constitution IV): every newly created dated task must actually get its reminders
+        // scheduled — a no-op for an undated task (`ReminderRecord.derive` returns empty).
+        scheduler?.scheduleReminders(taskId: t.id)
         notifyEligibilityAndScheduleResurface(before: before, now: clock())
     }
 
@@ -403,6 +410,19 @@ final class AppState {
         let now = clock()
         store.toggle(id, now: now)
         tasks = store.fetchAll()
+        // WG-2 (constitution IV): a backgrounded reminder delivery bypasses `willPresent`, so a
+        // completed/archived task must have its outstanding reminders actively cancelled here
+        // rather than relying solely on the fire-time fresh-reload suppression. The flip side also
+        // applies: `TaskStore.toggle` can REOPEN a task (un-marking done) or reset a recurring
+        // task back to `.todo` in place with a fresh deadline — either way it needs its reminders
+        // re-derived, not left cancelled.
+        if let toggled = tasks.first(where: { $0.id == id }) {
+            if toggled.status == .done || toggled.status == .archived {
+                scheduler?.cancelReminders(taskId: id)
+            } else {
+                scheduler?.scheduleReminders(taskId: id)
+            }
+        }
         notifyEligibilityAndScheduleResurface(before: before, now: now)
     }
 
@@ -422,6 +442,11 @@ final class AppState {
         // "performance": exactly one `eligibilityDiff` per mutation).
         let newlyEligible = store.delete(id, now: now)
         tasks = store.fetchAll()
+        // WG-2 (constitution IV): cascade cancellation — a deleted task's reminders must never
+        // orphan-fire (the fresh-reload guard in `evaluate(_:snapshot:)` treats "not found" as
+        // "nothing to show," but the durable rows/system requests should still be reaped promptly
+        // rather than waiting for the next due-but-missed sweep).
+        scheduler?.cancelReminders(taskId: id)
         if !newlyEligible.isEmpty {
             scheduler?.notifyUnblocked(taskIds: newlyEligible)
         }
@@ -871,6 +896,7 @@ final class AppState {
             // no-store branch: in-memory only, no validation (there is no store to validate against).
             tasks.insert(contentsOf: itemsToSave.reversed(), at: 0)
             notifyEligibilityAndScheduleResurface(before: before, now: now)
+            scheduleRemindersForSavedItems(itemsToSave) // no-op: `scheduler` is nil without a store
             finishSaveUI(titles: itemsToSave.map(\.title))
             return
         }
@@ -897,6 +923,7 @@ final class AppState {
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
+            scheduleRemindersForSavedItems(itemsToSave)
             finishSaveUI(titles: itemsToSave.map(\.title))
         } catch {
             // Cycle rejection / batch-too-large / any other `TaskStoreError` surfaces its
@@ -907,8 +934,21 @@ final class AppState {
             // that did save — the user only re-confirms what's genuinely still outstanding.
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
+            scheduleRemindersForSavedItems(itemsToSave)
             captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             captureState = .error
+        }
+    }
+
+    /// WG-1 (constitution IV): schedules reminders for exactly the drafts that actually made it
+    /// into `tasks` — filtering against the just-refreshed `tasks` snapshot (rather than assuming
+    /// every item in `items` saved) so a partial-chunk failure in `confirmSave`'s catch branch
+    /// never schedules a reminder for a task that was never actually persisted.
+    private func scheduleRemindersForSavedItems(_ items: [TaskItem]) {
+        guard let scheduler else { return }
+        let savedIds = Set(tasks.map(\.id))
+        for item in items where savedIds.contains(item.id) {
+            scheduler.scheduleReminders(taskId: item.id)
         }
     }
 
@@ -1326,6 +1366,8 @@ final class AppState {
         let before = tasks
         try? store.addCondition(.afterDate(now.addingTimeInterval(Self.triageDeferInterval)), to: item.id)
         tasks = store.fetchAll()
+        // WG-1: re-derive this task's reminders (deadline/condition state just changed).
+        scheduler?.scheduleReminders(taskId: item.id)
         notifyEligibilityAndScheduleResurface(before: before, now: now)
     }
 
@@ -1368,17 +1410,48 @@ final class AppState {
     func activateServices() {
         hotkey.start(appState: self)
         // T033 (constitution IV): rebuild the reminder heap from durable storage on every
-        // launch — no reminder may exist only in memory. Sleep/wake recovery is ALSO wired here
-        // (redundantly-but-safely) in `VociApp.swift` via `NSWorkspace.shared.notificationCenter`
-        // — see that file's `.onReceive` for why: `ReminderScheduler.init` already registers its
-        // own wake observer, but on `NotificationCenter.default` rather than
-        // `NSWorkspace.shared.notificationCenter`, which is where `NSWorkspace.didWakeNotification`
-        // actually posts (self-review "conflict", flagged in this task's final report — not this
-        // file's bug to fix, since `ReminderScheduler.swift` is sibling-owned).
+        // launch — no reminder may exist only in memory. Sleep/wake recovery is handled by
+        // `VociApp.swift`'s `.onReceive(NSWorkspace.shared.notificationCenter.publisher(for:
+        // .didWakeNotification))`, which calls `scheduler?.rebuildFromStorage()` directly on wake
+        // (m-2: `ReminderScheduler.init` used to register its OWN wake observer, but on the wrong
+        // notification center — `NotificationCenter.default` instead of
+        // `NSWorkspace.shared.notificationCenter`, where `didWakeNotification` actually posts —
+        // so it never fired; that dead observer has been deleted from `ReminderScheduler.swift`,
+        // leaving `VociApp.swift`'s correct path as the only wake trigger).
         scheduler?.rebuildFromStorage()
-        // NotificationActions.swift's documented seam: assign the action-routing delegate once a
-        // real scheduler/store exists (nil in the no-store fallback, matching `scheduler` itself).
-        UNUserNotificationCenter.current().delegate = notificationDelegate
+        // CB-1: `ReminderScheduler` self-assigns as `UNUserNotificationCenter.current().delegate`
+        // inside its own `init` (`ReminderScheduler.swift`) — there is no separate
+        // `ReminderNotificationDelegate` type for this file to construct/assign (that symbol was
+        // referenced here but never defined anywhere in the codebase; removed rather than
+        // resurrected, per this fix's instruction). Reassigning it a second time here would only
+        // double-assign the same delegate, so this call is deleted, not replaced.
+        offerRescheduleForOverdueTasks(now: clock())
+    }
+
+    // MARK: - Phase 4: overdue-reschedule scan (WG-3, FR-016)
+
+    /// FR-016: on launch, offer a reschedule nudge once per overdue open task — deduped against
+    /// any already-outstanding resurface/reschedule record for that task so a re-run of this scan
+    /// doesn't pile up a second offer on top of one the user hasn't acted on yet (`offsetKind ==
+    /// "resurface"` covers both `scheduleResurface`'s FR-017 afterDate path and
+    /// `offerReschedule`'s own records — either way, an outstanding one already covers this task).
+    ///
+    /// // UNVERIFIED / known gap: this is only reachable from `activateServices()` (launch).
+    /// `VociApp.swift`'s wake handler calls `scheduler?.rebuildFromStorage()` directly rather than
+    /// routing back through `AppState` (see that file's own comment on the wake path), and
+    /// `VociApp.swift` is outside this fix's 5 owned files — so a wake-triggered rescan for
+    /// newly-overdue tasks isn't wired. Flagged for whoever next touches `VociApp.swift`'s wake
+    /// observer, not written to `backlog.md` per this task's own "do not edit backlog" constraint.
+    private func offerRescheduleForOverdueTasks(now: Date) {
+        guard let scheduler else { return }
+        for task in openTasks {
+            guard let deadline = task.deadline, deadline < now else { continue }
+            let alreadyOutstanding = scheduler.recordsForTask(task.id).contains {
+                $0.offsetKind == "resurface" && $0.state != "satisfied"
+            }
+            guard !alreadyOutstanding else { continue }
+            scheduler.offerReschedule(taskId: task.id)
+        }
     }
 }
 

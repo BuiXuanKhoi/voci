@@ -270,8 +270,6 @@ struct PopoverView: View {
     private func conflictAdvisoryRow(_ draft: ConfirmDraft) -> some View {
         if let conflict = draft.conflicts.first, !draft.conflictDismissed {
             HStack(alignment: .top, spacing: 6) {
-                Text("\u{26A0}\u{FE0F}")
-                    .font(.system(size: 11))
                 Text(conflictAdvisoryText(conflict))
                     .font(.system(size: 11.5))
                     .foregroundStyle(VociColor.textSec)

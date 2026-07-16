@@ -14,7 +14,11 @@
 import Foundation
 import SwiftData
 import UserNotifications
-import AppKit
+// i-2: this file uses `TaskStatus`/`TaskItem` (both re-exported via the `Voci` module's own
+// `Sources/Model/TaskItem.swift`, which itself does `import VociCore`) — importing VociCore
+// directly here too, rather than relying on the same-module typealias visibility, so this
+// compiles even if that indirection is ever narrowed.
+import VociCore
 
 // `NSObject` inheritance is load-bearing, not decorative: this class self-assigns as
 // `UNUserNotificationCenter.current().delegate` in `init` (see below) and conforms to
@@ -50,16 +54,15 @@ final class ReminderScheduler: NSObject {
         // this file.
         UNUserNotificationCenter.current().delegate = self
 
-        // Constitution IV: rebuild on wake as well as launch. Wake is wired here since it has no
-        // other natural call site; LAUNCH is the constructing caller's responsibility — call
-        // `rebuildFromStorage()` once right after building this scheduler (kept out of `init`
-        // itself so the initializer stays synchronous/side-effect-light and testable) — see final
-        // report.
-        NotificationCenter.default.addObserver(
-            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in self?.rebuildFromStorage() }
-        }
+        // Constitution IV: rebuild on wake as well as launch. LAUNCH is the constructing caller's
+        // responsibility — call `rebuildFromStorage()` once right after building this scheduler
+        // (kept out of `init` itself so the initializer stays synchronous/side-effect-light and
+        // testable). WAKE recovery is intentionally NOT wired here (m-2): this used to register an
+        // observer on `NotificationCenter.default`, but `NSWorkspace.didWakeNotification` actually
+        // posts on `NSWorkspace.shared.notificationCenter` — that observer never fired and was
+        // deleted rather than fixed in place, since `VociApp.swift` (App-wiring, sibling-owned)
+        // already has the correct wake path wired via `NSWorkspace.shared.notificationCenter` and
+        // calls `scheduler?.rebuildFromStorage()` from there.
     }
 
     // MARK: - Contract §A
@@ -95,10 +98,33 @@ final class ReminderScheduler: NSObject {
     /// this only ever touches `.scheduled` rows. A closed (`done`/`archived`) task gets no
     /// reminders at all.
     func scheduleReminders(for task: VociTask) {
-        clearScheduled(taskId: task.id)
-        guard task.status == .todo || task.status == .inProgress else { return }
+        deriveAndSchedule(
+            taskId: task.id, status: task.status, deadline: task.deadline, reminderOverride: task.reminderOverride
+        )
+    }
+
+    /// WG-1/M-3 (constitution IV, ship-blocker): `scheduleReminders(for: VociTask)` above can't
+    /// actually be called from `AppState` — `VociTask` is the SwiftData persistence model this
+    /// file/`TaskStore` own; `AppState` only ever holds `TaskItem` snapshots and has no way to
+    /// obtain a live `VociTask` instance (`TaskStore.fetchModel` is private). This is the real
+    /// seam the App-wiring agent needs: resolve the task fresh from `store` by id (same "read
+    /// `TaskItem`, not `VociTask`" convention every other method on this class already uses — see
+    /// `evaluate(_:snapshot:)`) and derive from that. A missing/deleted id is treated as "nothing
+    /// to schedule," not an error — mirrors every other not-found fallback in this subsystem.
+    func scheduleReminders(taskId: UUID) {
+        guard let task = store.fetchAll().first(where: { $0.id == taskId }) else { return }
+        deriveAndSchedule(
+            taskId: taskId, status: task.status, deadline: task.deadline, reminderOverride: task.reminderOverride
+        )
+    }
+
+    /// Shared body for both `scheduleReminders` overloads above, so the derive logic can't drift
+    /// apart between them.
+    private func deriveAndSchedule(taskId: UUID, status: TaskStatus, deadline: Date?, reminderOverride: ReminderPolicy?) {
+        clearScheduled(taskId: taskId)
+        guard status == .todo || status == .inProgress else { return }
         let records = ReminderRecord.derive(
-            taskId: task.id, deadline: task.deadline, reminderOverride: task.reminderOverride,
+            taskId: taskId, deadline: deadline, reminderOverride: reminderOverride,
             globalPolicy: Self.currentGlobalReminderPolicy()
         )
         for record in records { context.insert(record) }

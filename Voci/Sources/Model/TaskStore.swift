@@ -65,6 +65,17 @@ final class TaskStore {
         context = ModelContext(container)
     }
 
+    /// M-4 (test hygiene): in-memory variant (`ModelConfiguration(isStoredInMemoryOnly:)`) so
+    /// callers like `ReminderSchedulerTests` don't accumulate/pollute rows in the real on-disk
+    /// store across repeated local runs. Functionally identical to `init()` otherwise — same
+    /// schema, same validated CRUD surface.
+    init(inMemory: Bool) throws {
+        let schema = Schema([VociTask.self, CompletionEvent.self, ParseCorrection.self])
+        let configuration = ModelConfiguration(schema: schema, isStoredInMemoryOnly: inMemory)
+        container = try ModelContainer(for: schema, configurations: [configuration])
+        context = ModelContext(container)
+    }
+
     /// Loads all persisted tasks. (Previously seeded SampleData on first run; removed — the app
     /// now starts empty so the user creates their own tasks.)
     func loadOrSeed() -> [TaskItem] {
