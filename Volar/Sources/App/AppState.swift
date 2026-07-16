@@ -131,6 +131,12 @@ struct ConfirmDraft: Identifiable, Equatable {
 enum VoiceDoneAction: Sendable, Equatable {
     case complete
     case clearExternal
+    /// T042 (phase6-contract.md §C, US4): "giao cho Claude rồi" / "handed to Claude" — routes
+    /// through `AppState.delegateTask` via `confirmVoiceDone`, reusing the SAME one-tap confirm
+    /// card `VoiceDoneConfirm` already provides rather than inventing a parallel UI surface.
+    /// `checkBackMinutes` is whatever `AppState.classifyDelegationIntent` parsed out of the
+    /// utterance (e.g. "check sau 10 phút"), defaulting to `DelegationTracker`'s own 10'.
+    case delegate(checkBackMinutes: Int)
 }
 
 /// The pending glance-and-dismiss confirm for a `.complete`/`.clearExternal` voice-done match
@@ -295,6 +301,35 @@ final class AppState {
     let reminderGate: ReminderContextGate
     let scheduler: ReminderScheduler?
 
+    // MARK: - Phase 6 (US4): AI-delegation orchestrator subsystem (phase6-contract.md §A/§B,
+    // Volar/Sources/Orchestrator/*.swift, sibling-owned/landed). `delegation`/`appLinkHandler`
+    // degrade to `nil` in the no-store fallback (mirrors `scheduler` above), since
+    // `DelegationTracker.init(store:)` requires a real `TaskStore` — delegation state has nowhere
+    // durable to live without one. `claudeConnector` is self-contained (file I/O only, no store
+    // dependency per its own doc comment), so it's always constructed.
+    let delegation: DelegationTracker?
+    let appLinkHandler: AppLinkHandler?
+    let claudeConnector = ClaudeCodeConnector()
+
+    /// T043: tasks whose delegated check-back came due — THE ambient menu-bar queue (constitution
+    /// I: never a system notification). Refreshed by `refreshDelegationQueue()` off a minute-scale
+    /// timer (`startDelegationTimer()`, started from `activateServices()`) and after any mutation
+    /// that could change due-ness. `TodayView` renders this as an ordinary, dismissible in-app card.
+    var dueDelegationRechecks: [UUID] = []
+    /// Mirrors `AppLinkHandler.pendingDisambiguation` into an `@Observable`-tracked property —
+    /// `AppLinkHandler` itself is a plain (non-`@Observable`) class per its frozen contract seam, so
+    /// SwiftUI can't react to its internal mutations directly. `onAppLinkHandled()` (called from
+    /// `VolarApp.swift`'s `.onOpenURL`) and `resolveAppLinkDisambiguation`/
+    /// `dismissAppLinkDisambiguation` below keep this in lockstep — same bridging idiom this file
+    /// already uses for `ReminderScheduler`'s out-of-band mutations (`refreshFromStore()`/
+    /// `.volarTasksDidChange`).
+    var pendingDisambiguationTaskIDs: [UUID] = []
+    /// Bumped whenever `.onOpenURL` routes an inbound `volar://` link, purely so Settings' "Connect
+    /// Claude Code" test-signal round trip (T044) can observe a real receipt instead of a fake
+    /// timed flash.
+    private(set) var lastAppLinkAt: Date?
+    private var delegationTimer: Timer?
+
     // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
 
     private static let ambientKey = "volar.ambient"
@@ -399,7 +434,31 @@ final class AppState {
         } else {
             self.scheduler = nil
         }
+        // Phase 6 (US4): construct the delegation subsystem once `store` is settled, same
+        // conditional-construction convention as `scheduler` immediately above.
+        if let store {
+            let tracker = DelegationTracker(store: store)
+            self.delegation = tracker
+            self.appLinkHandler = AppLinkHandler(store: store, delegation: tracker)
+        } else {
+            self.delegation = nil
+            self.appLinkHandler = nil
+        }
         speech.setLocale(Locale(identifier: self.recognitionLocaleID))
+        // CAPTURE SEAM (AppLinkHandler.swift's own file header): wire `volar://capture?text=...`
+        // into the SAME confirm-card-gated pipeline every other capture uses — never a bypass.
+        // Assigned last (after every stored property above is set) since the closure captures
+        // `self` and calls an instance method (`proceedToCapture`). `source` (FR-040's optional
+        // origin reference) is folded into the transcript itself rather than a separate `notes`
+        // field — `proceedToCapture`'s only parameter is the transcript, and the parser's own
+        // `ParsedTask.notes` is what actually ends up in `TaskItem.notes`/`sourceTranscript`, so
+        // this is the closest available seam to "stored in notes" without widening
+        // `proceedToCapture`'s frozen-adjacent signature. // UNVERIFIED
+        appLinkHandler?.onCapture = { [weak self] text, source in
+            guard let self else { return }
+            let transcript = source.map { "\(text) (via \($0))" } ?? text
+            self.proceedToCapture(transcript: transcript)
+        }
     }
 
     // MARK: - Derived task groupings
@@ -719,6 +778,13 @@ final class AppState {
     /// FIRST time this ever runs, per contract R5 ("Cloud ... IF: user opted in").
     func finishRecording(transcript: String) {
         liveTranscript = transcript
+        // T042 (phase6-contract.md §C): classify a delegation-handoff utterance BEFORE the T036
+        // voice-done classification below — "giao cho Claude rồi" is neither a completion nor a
+        // new-task capture, and must never fall through to either.
+        if let minutes = classifyDelegationIntent(transcript) {
+            presentDelegationConfirm(checkBackMinutes: minutes)
+            return
+        }
         // T036 (phase5-contract.md §C): classify BEFORE treating this as new-task capture.
         // `voiceDoneOpenTasks` is rebuilt fresh from the live `tasks` snapshot on every call (never
         // cached) so a completion classified here always reflects the CURRENT open-task list, and
@@ -793,6 +859,74 @@ final class AppState {
         captureState = .parsed
     }
 
+    // MARK: - T042: voice delegation intent (phase6-contract.md §C, US4)
+
+    /// Trigger phrases for "I handed this off to Claude" (Vietnamese + English), matched via
+    /// `Self.foldForMatch`'s diacritic/case-insensitive folding. Deliberately name-scoped ("...
+    /// claude") rather than a bare "delegated"/"giao việc" to keep the false-positive rate low — an
+    /// unrelated utterance (e.g. "giao hàng", deliver goods) must not be swallowed as a delegation
+    /// intent. // UNVERIFIED: a fixed phrase list, same class of heuristic as `VoiceDone`'s own cue
+    /// words — not exercised against real ASR output on this machine (Windows, no Xcode).
+    private static let delegationTriggerPhrases = [
+        "giao cho claude", "giao viec cho claude", "da giao cho claude", "chuyen cho claude",
+        "gui cho claude", "nho claude lam", "handed to claude", "handed off to claude",
+        "gave it to claude", "gave this to claude", "delegated to claude", "delegated this to claude",
+        "assigned to claude", "assigned this to claude",
+    ]
+
+    /// Detects a delegation-handoff phrase and, if present, the spoken check-back interval ("check
+    /// sau 10 phút" / "check back in 15 minutes") — defaulting to `DelegationTracker`'s own 10'
+    /// when no interval is spoken. `nil` = not a delegation utterance at all (falls through to the
+    /// normal `VoiceDone`/new-task classification in `finishRecording`).
+    private func classifyDelegationIntent(_ transcript: String) -> Int? {
+        let folded = Self.foldForMatch(transcript)
+        guard Self.delegationTriggerPhrases.contains(where: { folded.contains(Self.foldForMatch($0)) }) else {
+            return nil
+        }
+        return Self.extractCheckBackMinutes(from: folded) ?? 10
+    }
+
+    private static func foldForMatch(_ s: String) -> String {
+        s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
+    }
+
+    /// Pulls the first "<N> phut/minutes/min" style interval out of an already-folded transcript.
+    /// Defensive cap (self-review "client-exploit"): clamps to 1...240 minutes so a garbled/
+    /// adversarial ASR result (e.g. a stray huge number) can never schedule a wildly-out-of-range
+    /// check-back — mirrors `presentVoiceDoneConfirm`'s own defensive cap on candidate count.
+    private static func extractCheckBackMinutes(from folded: String) -> Int? {
+        guard let regex = try? NSRegularExpression(pattern: "(\\d{1,4})\\s*(phut|minutes?|mins?|min)\\b") else {
+            return nil
+        }
+        let range = NSRange(folded.startIndex..<folded.endIndex, in: folded)
+        guard let match = regex.firstMatch(in: folded, range: range),
+              let numberRange = Range(match.range(at: 1), in: folded),
+              let value = Int(folded[numberRange]) else { return nil }
+        return min(max(value, 1), 240)
+    }
+
+    /// Routes a detected delegation utterance to the SAME glance-and-dismiss confirm surface
+    /// `presentVoiceDoneConfirm` uses (constitution II applies to every voice action, not only
+    /// completions — never silently act). Always targets the current `activeTask`: a bare "giao
+    /// cho Claude rồi" names no task, and the single NOW slot IS the thing the user is working on
+    /// — same "act on the one active task" convention as `startFocus`/`completeFocusTask` and the
+    /// `TodayView` delegate button (`delegateTask`), rather than fuzzy-matching the utterance
+    /// against every open title the way `VoiceDone` does for actual completion phrasing.
+    private func presentDelegationConfirm(checkBackMinutes: Int) {
+        guard let active = activeTask else {
+            // Nothing to delegate — state it (constitution II: never guess), reusing the same
+            // "no matching task" row `presentVoiceDoneConfirm` already renders.
+            voiceDoneNoMatchTranscript = liveTranscript
+            captureState = .parsed
+            return
+        }
+        voiceDoneConfirm = VoiceDoneConfirm(
+            action: .delegate(checkBackMinutes: checkBackMinutes),
+            candidates: [VoiceMatch(taskId: active.id, title: active.title, score: 1.0)]
+        )
+        captureState = .parsed
+    }
+
     /// User tapped the one-tap confirm, or picked one candidate from the disambiguation list.
     /// `.complete` routes through `toggleDone` — the SAME funnel every other completion source
     /// uses (T037/FR-020: one consolidated completion+advance path, no divergent refresh logic) —
@@ -813,6 +947,8 @@ final class AppState {
             toggleDone(taskId)
         case .clearExternal:
             clearExternalCondition(taskId: taskId, now: clock())
+        case .delegate(let minutes):
+            delegateTask(taskId, checkBackMinutes: minutes)
         }
         finishVoiceDoneUI(action: action)
     }
@@ -872,7 +1008,13 @@ final class AppState {
     private func finishVoiceDoneUI(action: VoiceDoneAction) {
         captureState = .done
         runningEngine?.stop()
-        voice.speak(action == .complete ? "Done." : "Cleared.")
+        let spoken: String
+        switch action {
+        case .complete: spoken = "Done."
+        case .clearExternal: spoken = "Cleared."
+        case .delegate: spoken = "Handed off."
+        }
+        voice.speak(spoken)
         captureSession += 1
         let session = captureSession
         _Concurrency.Task { @MainActor [weak self] in
@@ -1753,6 +1895,8 @@ final class AppState {
         // resurrected, per this fix's instruction). Reassigning it a second time here would only
         // double-assign the same delegate, so this call is deleted, not replaced.
         offerRescheduleForOverdueTasks(now: clock())
+        // T043 (phase6-contract.md §C): starts the minute-scale ambient recheck timer.
+        startDelegationTimer()
     }
 
     // MARK: - Phase 4: overdue-reschedule scan (WG-3, FR-016)
@@ -1779,6 +1923,121 @@ final class AppState {
             guard !alreadyOutstanding else { continue }
             scheduler.offerReschedule(taskId: task.id)
         }
+    }
+
+    // MARK: - Phase 6 (US4): AI-delegation orchestrator (phase6-contract.md §C, T042/T043/T044)
+
+    /// T043: minute-scale ambient recheck timer (constitution I — the resurface queue is an
+    /// in-app ambient card, NEVER a `UNUserNotificationCenter` notification). Idempotent:
+    /// invalidates any previous timer first so a second `activateServices()` call can't leak a
+    /// duplicate `Timer` (self-review "runtime"). No-op when there's no `delegation` tracker
+    /// (no-store fallback) beyond the one immediate `refreshDelegationQueue()` call, which itself
+    /// no-ops the same way.
+    private func startDelegationTimer() {
+        delegationTimer?.invalidate()
+        refreshDelegationQueue()
+        guard delegation != nil else { return }
+        // `Timer(timeInterval:repeats:block:)`'s block is `@Sendable` — capturing `[weak self]`
+        // (a plain reference, not touching actor-isolated state) is safe, but actually CALLING
+        // `refreshDelegationQueue()` must hop back onto `@MainActor` explicitly, exactly like
+        // `AppDelegate.applicationDidFinishLaunching`'s own documented `@Sendable`/MainActor note
+        // (UserNotifications invoking a MainActor-inferred closure off-main traps at runtime under
+        // Swift 6's isolation checking) — this timer callback is the same failure class.
+        let timer = Timer(timeInterval: 60, repeats: true) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.refreshDelegationQueue()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        delegationTimer = timer
+    }
+
+    /// Refreshes the ambient "needs review" queue from `DelegationTracker.dueForRecheck` — called
+    /// by the minute-scale timer, once at `activateServices()`, and after any mutation here that
+    /// could change due-ness (`delegateTask`/`resolveDelegation*`/`onAppLinkHandled`). Never a
+    /// system notification (constitution I) — `TodayView` renders `dueDelegationRechecks` as an
+    /// ordinary, dismissible in-app card.
+    func refreshDelegationQueue(now: Date? = nil) {
+        dueDelegationRechecks = delegation?.dueForRecheck(now: now ?? clock()) ?? []
+    }
+
+    /// T042: `TodayView`'s delegate affordance on the NOW spotlight, and `confirmVoiceDone`'s
+    /// `.delegate` action — delegates task `id` (there is only ever one NOW slot at a time, so
+    /// both call sites already know exactly which task). No-op if there's no `delegation` tracker
+    /// (no-store fallback) or `store` — delegation state has nowhere durable to live without one.
+    /// Mirrors `triageDefer`/`clearExternalCondition`'s existing "mutate via store, refresh
+    /// `tasks`, re-derive reminders, run the shared eligibility/resurface tail" pattern: adding the
+    /// unsatisfied `.external` waiting-condition makes this task INELIGIBLE for
+    /// `VolarCore.nextTask()`, which is what actually moves it out of the active slot and lets the
+    /// next eligible task advance in — the SAME `tasks = store.fetchAll()` funnel every other
+    /// mutation here uses, no bespoke advance logic needed.
+    func delegateTask(_ id: UUID, label: String? = nil, checkBackMinutes: Int = 10) {
+        guard let delegation, let store else { return }
+        let before = tasks
+        let resolvedLabel = label ?? tasks.first { $0.id == id }?.title ?? "Claude"
+        delegation.delegate(taskId: id, label: resolvedLabel, checkBackMinutes: checkBackMinutes, cwdHint: nil)
+        tasks = store.fetchAll()
+        let now = clock()
+        // WG-1: this task's condition state just changed — re-derive its reminders, same as every
+        // other condition-adding path.
+        scheduler?.scheduleReminders(taskId: id)
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        refreshDelegationQueue(now: now)
+    }
+
+    /// T043 ambient card action: [Done] — routes through the SAME completion funnel as every other
+    /// completion source (T037/FR-020), never a bespoke completion path.
+    func resolveDelegationDone(_ id: UUID) {
+        toggleDone(id)
+        refreshDelegationQueue()
+    }
+
+    /// T043 ambient card action: [Still waiting] — the user looked and it's genuinely still in
+    /// flight; bumps backoff (10' -> 30' -> batch-only) rather than re-asking every minute.
+    func resolveDelegationStillWaiting(_ id: UUID) {
+        delegation?.bumpBackoff(taskId: id)
+        refreshDelegationQueue()
+    }
+
+    /// T043 ambient card action: [Check later] — an explicit user-directed snooze (never a silent
+    /// auto-reschedule): re-delegates the SAME task under its current title and cwd hint with a
+    /// fresh check-back. `DelegationTracker.delegate` is documented idempotent for an
+    /// already-waiting task (updates the schedule in place rather than piling up a second
+    /// condition), so this is safe to call on a task that's already mid-delegation.
+    func resolveDelegationCheckLater(_ id: UUID, minutes: Int = 10) {
+        guard let delegation else { return }
+        let label = tasks.first { $0.id == id }?.title ?? "Claude"
+        delegation.delegate(taskId: id, label: label, checkBackMinutes: minutes, cwdHint: delegation.cwdHint(for: id))
+        refreshDelegationQueue()
+    }
+
+    /// `VolarApp.swift`'s `.onOpenURL` calls this right after `appLinkHandler?.handle(url)` —
+    /// `AppLinkHandler` is a plain (non-`@Observable`) class, so this is what actually makes its
+    /// resulting state changes visible to SwiftUI: mirrors `pendingDisambiguation` into this file's
+    /// own `@Observable` `pendingDisambiguationTaskIDs`, stamps `lastAppLinkAt` (Settings' test-
+    /// signal "✓ received" confirmation, T044), and refreshes the ambient queue (an `ai-done` match
+    /// can clear a delegation, which changes what's due).
+    func onAppLinkHandled() {
+        lastAppLinkAt = clock()
+        pendingDisambiguationTaskIDs = appLinkHandler?.pendingDisambiguation ?? []
+        refreshDelegationQueue()
+    }
+
+    /// One-tap disambiguation resolve (`TodayView`'s ambient card) — delegates straight to
+    /// `AppLinkHandler.resolveDisambiguation`, which itself routes through
+    /// `DelegationTracker.markNeedsReview` (never completes, per constitution II), then
+    /// re-syncs the mirrored `pendingDisambiguationTaskIDs`/queue exactly like `onAppLinkHandled`.
+    func resolveAppLinkDisambiguation(taskId: UUID) {
+        appLinkHandler?.resolveDisambiguation(taskId: taskId)
+        pendingDisambiguationTaskIDs = appLinkHandler?.pendingDisambiguation ?? []
+        refreshDelegationQueue()
+    }
+
+    /// "None of these" — purely local UI state, no task touched (mirrors
+    /// `AppLinkHandler.dismissDisambiguation`'s own doc comment).
+    func dismissAppLinkDisambiguation() {
+        appLinkHandler?.dismissDisambiguation()
+        pendingDisambiguationTaskIDs = []
     }
 }
 

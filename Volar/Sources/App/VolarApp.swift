@@ -92,6 +92,19 @@ struct VolarApp: App {
                     // `refreshFromStore()` (itself `@MainActor`) is safe without an extra dispatch.
                     appState.refreshFromStore()
                 }
+                .onOpenURL { url in
+                    // Phase 6 (US4, phase6-contract.md §C): inbound `volar://` app links
+                    // (`ai-done`/`capture`) — routed through `AppLinkHandler.handle(_:)`
+                    // (Orchestrator/AppLinkHandler.swift, sibling-owned/landed), which is
+                    // inbound-only/idempotent/non-destructive per contracts/app-links.md.
+                    // `AppState.onAppLinkHandled()` mirrors the handler's resulting state
+                    // (pending disambiguation, ambient recheck queue, test-signal receipt) into
+                    // `AppState`'s own `@Observable` surface so the UI actually reacts to it.
+                    // `?.` degrades gracefully in the no-store fallback (`appLinkHandler` is `nil`
+                    // there, same as `scheduler`). // UNVERIFIED
+                    appState.appLinkHandler?.handle(url)
+                    appState.onAppLinkHandled()
+                }
                 .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
                     // Constitution IV: sleep/wake recovery re-evaluates overdue `.scheduled`
                     // reminders and fires immediately if still due. `ReminderScheduler.init`

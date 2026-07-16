@@ -13,15 +13,44 @@ struct MenuBarLabel: View {
     private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
-        Group {
-            if appState.focusActive {
-                focusLockContent
-            } else if appState.captureState == .recording {
-                listeningContent
-            } else {
-                idleContent
+        HStack(spacing: 6) {
+            Group {
+                if appState.focusActive {
+                    focusLockContent
+                } else if appState.captureState == .recording {
+                    listeningContent
+                } else {
+                    idleContent
+                }
+            }
+            if wipCount > 0 {
+                wipBadge
             }
         }
+    }
+
+    // MARK: - T043: WIP counter (phase6-contract.md §C)
+
+    /// `DelegationTracker.wipCount()` derives live from `TaskStore.fetchAll()`, not from
+    /// `appState.tasks` — `TaskStore` isn't itself `@Observable`, so without reading SOME
+    /// `@Observable` property here, SwiftUI would have no Observation dependency to re-render this
+    /// badge on. `appState.tasks` is the same underlying store snapshot, refreshed on every
+    /// delegation mutation (`AppState.delegateTask`/`resolveDelegation*`), so touching it here
+    /// (self-review "conflict"/"runtime") gives this computed property a real live dependency
+    /// without duplicating `DelegationTracker`'s own counting logic.
+    private var wipCount: Int {
+        _ = appState.tasks
+        return appState.delegation?.wipCount() ?? 0
+    }
+
+    /// "⏳ N" in-flight delegation counter — mono instrument face (`Font.volarMono` + the cool
+    /// `.instrument` tint), deliberately NOT the reserved warm `nowAccent` (informational, not the
+    /// NOW spotlight). Shown in every label state (idle/listening/focus-lock) so it stays visible
+    /// regardless of what else the menu bar is doing. UNVERIFIED (not rendered).
+    private var wipBadge: some View {
+        Text("\u{23F3} \(wipCount)")
+            .font(Font.volarMono(size: 10.5, weight: .medium))
+            .foregroundStyle(VolarColor.instrument)
     }
 
     // MARK: - Idle

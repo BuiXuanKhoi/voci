@@ -106,6 +106,12 @@ struct TodayView: View {
                     VStack(alignment: .leading, spacing: appState.density.sectionGap) {
                         nowSpotlight
 
+                        // T043 (phase6-contract.md §C): ambient needs-review / WIP soft-limit /
+                        // ai-done disambiguation — renders nothing when there's genuinely nothing
+                        // to show (glance-and-dismiss, constitution V), so it's always safe to
+                        // include unconditionally here.
+                        DelegationAmbientSection()
+
                         if let peek = peekTask {
                             NextPeekRow(task: peek)
                         }
@@ -248,6 +254,33 @@ struct TodayView: View {
                         RoundedRectangle(cornerRadius: 9, style: .continuous)
                             .stroke(VolarColor.borderHi, lineWidth: 0.5)
                     )
+
+                    // T042 (phase6-contract.md §C): delegate affordance on the current (NOW) task
+                    // — `AppState.delegateTask` adds the unsatisfied "waiting on AI" condition,
+                    // which is what actually moves it out of this slot (constitution II: a
+                    // delegation is never a completion). Cool `.instrument` tint (not the reserved
+                    // NOW amber) since this is an instrument-class action, not the spotlight itself.
+                    if !active.done {
+                        Button {
+                            appState.delegateTask(active.id)
+                        } label: {
+                            HStack(spacing: 6) {
+                                VolarIcon(.bolt, size: 11, color: VolarColor.instrument, weight: .semibold)
+                                Text("Delegate to Claude")
+                                    .font(.system(size: 13, weight: .medium))
+                                    .foregroundStyle(VolarColor.textPri)
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .background(VolarColor.instrumentDim.opacity(0.18))
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
+                        )
+                    }
                 }
                 .padding(.top, 4)
             }
@@ -274,6 +307,9 @@ struct TodayView: View {
             .contextMenu {
                 Button("Break down into steps…") { appState.showBreakdown = true }
                 Button(active.done ? "Mark not done" : "Mark done") { appState.toggleDone(active.id) }
+                if !active.done {
+                    Button("Delegate to Claude…") { appState.delegateTask(active.id) }
+                }
                 Divider()
                 Button("Delete", role: .destructive) { appState.deleteTask(active.id) }
             }
@@ -757,5 +793,164 @@ private struct CollapsibleTaskSection: View {
         }
         .padding(.horizontal, 18)
         .padding(.vertical, 13)
+    }
+}
+
+/// T043 (phase6-contract.md §C): the ambient "needs review" surface for the AI-delegation
+/// orchestrator — resurfaced delegations whose check-back came due
+/// (`AppState.dueDelegationRechecks`, refreshed off a minute-scale timer/app activation;
+/// constitution I: an ordinary in-app card, NEVER a system notification), the one-tap
+/// ambiguous-`ai-done`-signal disambiguation card (`AppState.pendingDisambiguationTaskIDs`,
+/// mirroring `AppLinkHandler.pendingDisambiguation`), and a gentle dismissible soft-limit hint once
+/// too many delegations are in flight at once. Self-contained (reads `appState` via environment) so
+/// `TodayView.mainColumn` only has to decide WHERE it sits. Renders zero height when there's
+/// nothing to show — never a permanent fixture (constitution V, glance-and-dismiss).
+private struct DelegationAmbientSection: View {
+    @Environment(AppState.self) private var appState: AppState
+    /// Session-local dismiss (not persisted): "gentle, dismissible" per the contract, not "never
+    /// show again forever" — a genuinely large WIP count is worth re-surfacing on a fresh session.
+    @State private var wipHintDismissed = false
+
+    private static let wipSoftLimit = 4
+
+    private var wipCount: Int { appState.delegation?.wipCount() ?? 0 }
+
+    private var dueTasks: [TaskItem] {
+        appState.dueDelegationRechecks.compactMap { id in appState.tasks.first { $0.id == id } }
+    }
+
+    private var disambiguationCandidates: [TaskItem] {
+        appState.pendingDisambiguationTaskIDs.compactMap { id in appState.tasks.first { $0.id == id } }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if wipCount > Self.wipSoftLimit, !wipHintDismissed {
+                softLimitHint
+            }
+            if !disambiguationCandidates.isEmpty {
+                disambiguationCard
+            }
+            ForEach(dueTasks) { task in
+                needsReviewCard(task)
+            }
+        }
+    }
+
+    // MARK: - Soft-limit hint
+
+    private var softLimitHint: some View {
+        HStack(spacing: 10) {
+            VolarIcon(.bolt, size: 12, color: VolarColor.instrument, weight: .semibold)
+            Text("\(wipCount) tasks are out with Claude right now — review before delegating more?")
+                .font(.system(size: 12.5))
+                .foregroundStyle(VolarColor.textSec)
+                .lineLimit(2)
+            Spacer(minLength: 8)
+            Button {
+                wipHintDismissed = true
+            } label: {
+                VolarIcon(.x, size: 9, color: VolarColor.textMut)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(VolarColor.instrumentDim.opacity(0.14))
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
+        )
+    }
+
+    // MARK: - Disambiguation (`ai-done` matched more than one waiting task)
+
+    private var disambiguationCard: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("An AI run finished — which task was it?")
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(disambiguationCandidates) { task in
+                    Button {
+                        appState.resolveAppLinkDisambiguation(taskId: task.id)
+                    } label: {
+                        Text(task.title)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(VolarColor.textPri)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 9)
+                            .frame(height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .background(VolarColor.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(VolarColor.border, lineWidth: 0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+            }
+            Button("None of these") {
+                appState.dismissAppLinkDisambiguation()
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(VolarColor.textMut)
+        }
+        .padding(12)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    // MARK: - Needs-review card ([Done] / [Still waiting] / [Check later])
+
+    private func needsReviewCard(_ task: TaskItem) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 6) {
+                VolarIcon(.clock, size: 11, color: VolarColor.instrument, weight: .semibold)
+                Text("Check-in: \(task.title)")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            HStack(spacing: 8) {
+                ambientButton("Done", solid: true) { appState.resolveDelegationDone(task.id) }
+                ambientButton("Still waiting") { appState.resolveDelegationStillWaiting(task.id) }
+                ambientButton("Check later") { appState.resolveDelegationCheckLater(task.id) }
+            }
+        }
+        .padding(12)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(VolarColor.border, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func ambientButton(_ title: String, solid: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(solid ? Color.white : VolarColor.textPri)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+        }
+        .buttonStyle(.plain)
+        .background(solid ? VolarColor.instrument : VolarColor.surfaceHi)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(solid ? Color.clear : VolarColor.borderHi, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }

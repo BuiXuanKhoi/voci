@@ -1,6 +1,14 @@
 # Backlog — voci
 
-- [ ] **★★ PROGRESS 2026-07-16 tối (session limit — TIẾP TỪ ĐÂY):** Feature 002 tiến rất xa, TẤT CẢ CHƯA build/test Mac. Commit gần nhất `6f4f116`. Trạng thái:
+- [ ] **★★★ PROGRESS 2026-07-17 (TIẾP TỪ ĐÂY — supersedes các mục ★★/★ cũ bên dưới):** Feature 002 gần xong ship-gate P1+P2. Đã push remote. **RENAME: Voci→Volar** (paths `Volar/`, `VolarCore`, tokens `Volar*`, scheme `volar://`; repo path vẫn `C:\projects\voci`). Trạng thái:
+  - ✅ **Phase 1–5** code-complete + Opus review + fix + committed + pushed (P1/2 engine+persistence, P3 capture, P3b conflict, P4 reminders+spoken-delivery, P5 voice-done+auto-advance+sweep). TẤT CẢ CHƯA build Mac.
+  - ⏳ **Phase 6** (orchestrator US4): subsystem xong commit `a2a066f` (DelegationTracker/AppLinkHandler/ClaudeCodeConnector); **app-wiring agent ĐANG CHẠY** (AppState/VolarApp/MenuBarLabel/TodayView/PopoverView/SettingsView). Xong → Opus review → fix → đóng.
+  - ✅ **Studio Dark restyle**: Theme tokens + MenuBarLabel + PopoverView + TodayView xong. CHƯA: FocusOverlay/Settings/sheets.
+  - ✅ **Design v2 nâng tầm + logo refined** trên Claude Design project `b2f396b8`; logo repo commit `a171134`.
+  - ✅ **Supabase**: migration `parse_quota` applied (project nuzrpipwacravfgsiacv, ref). CHỜ anh Khôi: `supabase functions deploy parse` (CLI — config.toml verify_jwt=false sẵn) + set secret `GEMINI_API_KEY`. Advisor WARN có sẵn `rls_auto_enable()` (không phải của mình).
+  - **CÒN LẠI:** (a) đóng Phase 6; (b) **VERIFY HẾT** — Opus review chéo toàn P1–6 (nhất quán liên phase sau rename) + tổng hợp checklist Mac build/test; (c) restyle nốt FocusOverlay/Settings/sheets; (d) **BUILD MAC** — rủi ro: Carbon hotkey, SwiftData migration + 2 container, FoundationModels @Generable, nonisolated(unsafe), volar:// onOpenURL, Deno npm imports khi deploy. **Follow-up:** `TaskStore.setDelegation(_:on:)` để DelegationMeta sống trong store thay vì UserDefaults shadow (6a flag). (2026-07-17)
+
+- [ ] **[SUPERSEDED bởi ★★★ ở trên] ★★ PROGRESS 2026-07-16 tối (session limit):** Feature 002 tiến rất xa, TẤT CẢ CHƯA build/test Mac. Commit gần nhất `6f4f116`. Trạng thái:
   - ✅ **Phase 1+2** (setup/engine/persistence) + fixes — commit tới `b7a3372`.
   - ✅ **Phase 3** (US1 voice capture) + Opus review + fix — `dbfdfce`/`54ea5b0`.
   - ✅ **Phase 3b** (conflict advisory FR-011c, ConflictCheck engine) — trong Phase 4 batch.

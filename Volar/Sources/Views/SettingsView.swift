@@ -11,7 +11,7 @@ import UniformTypeIdentifiers
 
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
-        case general, hotkeys, notifications, appearance, about
+        case general, hotkeys, notifications, appearance, integrations, about
         var id: String { rawValue }
 
         var icon: VolarIconName {
@@ -20,6 +20,7 @@ struct SettingsView: View {
             case .hotkeys: return .cmd
             case .notifications: return .bell
             case .appearance: return .sparkle
+            case .integrations: return .bolt
             case .about: return .project
             }
         }
@@ -30,6 +31,7 @@ struct SettingsView: View {
             case .hotkeys: return "Hotkeys"
             case .notifications: return "Notifications"
             case .appearance: return "Appearance"
+            case .integrations: return "Integrations"
             case .about: return "About"
             }
         }
@@ -66,6 +68,7 @@ struct SettingsView: View {
                     case .hotkeys: hotkeysTab
                     case .notifications: notificationsTab
                     case .appearance: appearanceTab(appState: appState)
+                    case .integrations: integrationsTab
                     case .about: aboutTab
                     }
                 }
@@ -447,6 +450,177 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - Integrations (T044, phase6-contract.md §C: "Connect Claude Code")
+
+    /// `true` once `ClaudeCodeConnector.detect()` finds `~/.claude` — the contract's "show only if
+    /// Claude Code present" gate. Re-checked on `.task` (tab first shown) rather than cached across
+    /// the whole Settings window session, so re-opening Settings after installing the CLI picks it
+    /// up without relaunching Volar.
+    @State private var claudeDetected = false
+    /// Local UI-only "did THIS UI successfully connect" bookkeeping — `ClaudeCodeConnector` keeps
+    /// no app-facing connect/disconnect state of its own (its doc comment: "the caller composes
+    /// [State] from detect() plus its own bookkeeping"). Initialized from whether
+    /// `ClaudeDirBookmark` has a saved grant, so it survives Settings being reopened.
+    @State private var claudeConnected = false
+    @State private var claudeConnectError: String?
+    /// Set right before `sendTestSignal()` fires; cleared (and flips `testSignalReceived` on) the
+    /// next time `appState.lastAppLinkAt` changes — see the `.onChange` below.
+    @State private var testSignalAwaitingReceipt = false
+    @State private var testSignalReceived = false
+
+    private var integrationsTab: some View {
+        VStack(spacing: 12) {
+            if claudeDetected {
+                claudeCodeCard
+            } else {
+                SettingsRow(
+                    label: "Claude Code",
+                    hint: "Volar didn't find a ~/.claude folder on this Mac. Install the Claude Code CLI, then reopen Settings."
+                ) {
+                    Text("Not found")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VolarColor.textMut)
+                }
+            }
+        }
+        .task {
+            claudeDetected = appState.claudeConnector.detect()
+            claudeConnected = ClaudeDirBookmark.resolve() != nil
+        }
+        .onChange(of: appState.lastAppLinkAt) { _, _ in
+            guard testSignalAwaitingReceipt else { return }
+            testSignalAwaitingReceipt = false
+            testSignalReceived = true
+        }
+    }
+
+    /// The full "Connect Claude Code" card: preview → connect/disconnect → test-signal, all in one
+    /// `VolarColor.card` block (rather than several `SettingsRow`s) since the preview code block
+    /// and multi-step connect flow don't fit that row's fixed label/hint/control shape.
+    private var claudeCodeCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Connect Claude Code")
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                Text("Installs a Stop hook so Claude Code tells Volar when an agent run finishes — Volar never reads Claude Code's own state, only receives this one signal (contracts/app-links.md).")
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineSpacing(2)
+            }
+
+            Text(appState.claudeConnector.previewHookEntry())
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(VolarColor.instrument)
+                .textSelection(.enabled)
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.black.opacity(0.25))
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .volarHairline(cornerRadius: 8)
+
+            if let claudeConnectError {
+                Text(claudeConnectError)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.reschedule)
+                    .lineLimit(3)
+            }
+
+            HStack(spacing: 8) {
+                if claudeConnected {
+                    settingsPillButton("Send test signal", solid: true) { sendClaudeTestSignal() }
+                    settingsPillButton("Disconnect") { disconnectClaudeCode() }
+                } else {
+                    settingsPillButton("Connect…", solid: true) { connectClaudeCode() }
+                }
+            }
+
+            if testSignalAwaitingReceipt {
+                Text("Signal sent — waiting…")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textMut)
+            } else if testSignalReceived {
+                Text("\u{2713} received")
+                    .font(.system(size: 11.5, weight: .medium))
+                    .foregroundStyle(VolarColor.done)
+            }
+        }
+        .padding(16)
+        .background(VolarColor.card)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .volarHairline(cornerRadius: 11)
+    }
+
+    private func settingsPillButton(_ title: String, solid: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12.5, weight: .medium))
+                .foregroundStyle(solid ? .white : VolarColor.textPri)
+                .padding(.horizontal, 14)
+                .frame(height: 30)
+        }
+        .buttonStyle(.plain)
+        .background(solid ? accentColors.solid : VolarColor.surfaceHi)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(solid ? Color.white.opacity(0.18) : VolarColor.borderHi, lineWidth: 0.5)
+        )
+    }
+
+    /// NSOpenPanel pre-targeted at `~/.claude`, granting the security-scoped bookmark
+    /// `ClaudeCodeConnector.connect(bookmarkedClaudeDir:)` needs (App Sandbox). Mirrors
+    /// `chooseImage`'s existing picker pattern above. `ClaudeDirBookmark.save` persists the grant
+    /// under THIS file's own key (distinct from — and in addition to — the connector's own
+    /// internal `detect()` bookkeeping bookmark, which is `private` to `ClaudeCodeConnector` and
+    /// therefore unreachable from here; see `ClaudeDirBookmark`'s doc comment below for why a
+    /// second bookmark store is the correct call, not duplication for its own sake).
+    private func connectClaudeCode() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
+        panel.message = "Choose your ~/.claude folder so Volar can install the Claude Code hook."
+        panel.prompt = "Grant Access"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try appState.claudeConnector.connect(bookmarkedClaudeDir: url)
+            ClaudeDirBookmark.save(for: url)
+            claudeConnected = true
+            claudeConnectError = nil
+        } catch {
+            claudeConnectError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    private func disconnectClaudeCode() {
+        guard let url = ClaudeDirBookmark.resolve() else {
+            claudeConnectError = "Volar lost access to ~/.claude — reconnect once to disconnect cleanly."
+            claudeConnected = false
+            return
+        }
+        do {
+            try appState.claudeConnector.disconnect(bookmarkedClaudeDir: url)
+            ClaudeDirBookmark.clear()
+            claudeConnected = false
+            claudeConnectError = nil
+        } catch {
+            claudeConnectError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// Fires `ClaudeCodeConnector.sendTestSignal()` (opens `volar://ai-done?cwd=...` via
+    /// `NSWorkspace`, per contract B), then waits for the real inbound round trip —
+    /// `appState.lastAppLinkAt` is stamped by `AppState.onAppLinkHandled()`, called from
+    /// `VolarApp.swift`'s `.onOpenURL` right after `AppLinkHandler.handle(_:)` processes it — so
+    /// "✓ received" reflects an actual signal, not a fixed timer.
+    private func sendClaudeTestSignal() {
+        testSignalReceived = false
+        testSignalAwaitingReceipt = true
+        appState.claudeConnector.sendTestSignal()
+    }
+
     // MARK: - About
 
     private var aboutTab: some View {
@@ -639,6 +813,58 @@ private struct KeyRecorder: View {
         .background(Color.black.opacity(0.25))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .volarHairline(cornerRadius: 8)
+    }
+}
+
+/// Security-scoped bookmark for the user-granted `~/.claude` directory (T044, App Sandbox), used
+/// ONLY so this Settings UI can re-obtain a `URL` for `ClaudeCodeConnector.disconnect(
+/// bookmarkedClaudeDir:)` across relaunches — `connect(bookmarkedClaudeDir:)` already persists its
+/// OWN bookmark internally (`Orchestrator/ClaudeCodeConnector.swift`'s `persistBookmark`, under a
+/// `private` UserDefaults key) purely for its own `detect()` fallback, but never exposes a way to
+/// resolve that bookmark back to a `URL` for a later `disconnect` call. Mirrors
+/// `AmbientBackground.swift`'s `SecureImageBookmark` byte-for-byte (same save/resolve/clear shape,
+/// same `.withSecurityScope` bookmark options, same stale-bookmark re-mint-on-resolve behavior) —
+/// a second small bookmark store, not a refactor of that one, since `SecureImageBookmark` is scoped
+/// to the ambient-background image and this is a different grant entirely.
+private enum ClaudeDirBookmark {
+    private static let key = "volar.claudeDirBookmarkData.settingsUI"
+
+    static func save(for url: URL) {
+        do {
+            let data = try url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            UserDefaults.standard.set(data, forKey: key)
+        } catch {
+            // Best-effort only, mirrors `SecureImageBookmark.save`: `connect(bookmarkedClaudeDir:)`
+            // above already succeeded by the time this runs, so a save failure here only means a
+            // later `disconnect` will need the user to reconnect first — never lost/corrupted state.
+            print("[Volar.SettingsView.ClaudeDirBookmark] save failed: \(error)")
+        }
+    }
+
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: key)
+    }
+
+    /// Resolves the saved bookmark back to a `URL`, re-minting it if stale. Never throws: any
+    /// failure (missing bookmark, moved/deleted folder, tampered UserDefaults data) returns `nil`
+    /// so callers fall back to "reconnect" rather than crashing.
+    static func resolve() -> URL? {
+        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
+        var isStale = false
+        guard let url = try? URL(
+            resolvingBookmarkData: data,
+            options: .withSecurityScope,
+            relativeTo: nil,
+            bookmarkDataIsStale: &isStale
+        ) else { return nil }
+        if isStale {
+            save(for: url)
+        }
+        return url
     }
 }
 
