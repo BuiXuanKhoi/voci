@@ -1,0 +1,235 @@
+<!-- @dsCard group="Brand" -->
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Volar — Identity</title>
+<style>
+  :root{
+    --ink-0:#0B0D11; --ink-1:#0E1116; --surface-1:#15181E; --surface-2:#1B1F26;
+    --hairline:rgba(255,255,255,.07); --hairline-strong:rgba(255,255,255,.11);
+    --tx-1:#EAECEF; --tx-2:#9BA3AE; --tx-3:#5D646E;
+    --amber:#E8B25A; --amber-soft:#F0C67E; --amber-glow:rgba(232,178,90,.18);
+    --ui:-apple-system,BlinkMacSystemFont,"SF Pro Display","Inter","Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:radial-gradient(1200px 700px at 50% -10%, #12161d 0%, var(--ink-0) 60%), var(--ink-0);
+    color:var(--tx-1); font-family:var(--ui); line-height:1.5;
+    -webkit-font-smoothing:antialiased; letter-spacing:.01em;
+  }
+  .wrap{max-width:1040px;margin:0 auto;padding:64px 32px 120px}
+  .kicker{font-family:var(--mono);font-size:.6875rem;letter-spacing:.18em;text-transform:uppercase;color:var(--tx-3);margin:0 0 14px}
+  h1.page{font-size:1.5rem;letter-spacing:-.02em;margin:0 0 8px;font-weight:600}
+  .lede{color:var(--tx-2);max-width:70ch;margin:0;font-size:.9375rem}
+  .rationale{margin:22px 0 0;display:flex;gap:10px;align-items:flex-start;font-size:.9375rem;color:var(--tx-2);
+    background:linear-gradient(180deg,var(--amber-glow),transparent);border:1px solid var(--hairline);
+    border-left:2px solid var(--amber);border-radius:8px;padding:14px 16px;max-width:78ch}
+  .rationale b{color:var(--amber-soft);font-weight:600}
+
+  section{margin-top:52px;border-top:1px solid var(--hairline);padding-top:26px}
+  .sec-head{display:flex;align-items:baseline;gap:12px;margin-bottom:22px}
+  .sec-head h2{font-size:1.125rem;margin:0;letter-spacing:-.01em;font-weight:600}
+  .sec-head .num{font-family:var(--mono);font-size:.6875rem;color:var(--tx-3)}
+  .note{color:var(--tx-3);font-size:.8125rem;max-width:64ch;margin:0 0 20px}
+
+  .row{display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end}
+  .tile{border:1px solid var(--hairline);border-radius:14px;background:var(--ink-1);
+    display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+  .tile .cap{position:absolute;bottom:8px;left:0;right:0;text-align:center;
+    font-family:var(--mono);font-size:.625rem;color:var(--tx-3);letter-spacing:.08em}
+  .markwell{color:var(--tx-1)}        /* currentColor drives the monochrome mark */
+  .markwell.dim{color:var(--tx-2)}
+
+  .sizes{display:flex;gap:22px;align-items:flex-end;flex-wrap:wrap}
+  .size-item{display:flex;flex-direction:column;align-items:center;gap:10px}
+  .size-item .lbl{font-family:var(--mono);font-size:.625rem;color:var(--tx-3)}
+  .chkbg{background:
+      linear-gradient(45deg,#20242c 25%,transparent 25%,transparent 75%,#20242c 75%),
+      linear-gradient(45deg,#20242c 25%,transparent 25%,transparent 75%,#20242c 75%),
+      var(--ink-1);
+    background-size:12px 12px;background-position:0 0,6px 6px}
+
+  /* faux macOS menu bar */
+  .menubar{display:flex;align-items:center;gap:18px;justify-content:flex-end;
+    background:rgba(20,23,29,.9);border:1px solid var(--hairline);border-radius:10px;
+    padding:0 16px;height:30px;backdrop-filter:blur(10px)}
+  .menubar .grp{display:flex;align-items:center;gap:16px;color:var(--tx-2)}
+  .menubar .volar{color:var(--tx-1);display:flex;align-items:center}
+  .menubar .txt{font-size:12px;color:var(--tx-2);letter-spacing:.02em}
+  .menubar .ic{color:var(--tx-2);display:flex}
+  .menubar .spacer{flex:1}
+
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:20px}
+  .appwrap{display:flex;gap:26px;align-items:flex-end;flex-wrap:wrap}
+  .appdesc{color:var(--tx-2);font-size:.8125rem;max-width:34ch}
+  .dock{display:flex;align-items:flex-end;gap:14px;padding:12px 16px;border-radius:18px;
+    background:rgba(255,255,255,.05);border:1px solid var(--hairline);backdrop-filter:blur(8px)}
+  .dock .slot{width:52px;height:52px;border-radius:12px;background:var(--surface-2)}
+  .dock .slot.self{background:transparent;border:none}
+
+  .foot{margin-top:64px;border-top:1px solid var(--hairline);padding-top:18px;color:var(--tx-3);
+    font-size:.6875rem;font-family:var(--mono);letter-spacing:.08em}
+  svg{display:block}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="kicker">Volar · Brand Identity</p>
+  <h1 class="page">The Upbeat V</h1>
+  <p class="lede">An executive-function assistant for ADHD professionals. One mark, one idea: a wing-stroke that lifts a single spark into the light.</p>
+  <div class="rationale">
+    <span>◆</span>
+    <div><b>Concept.</b> "Volar" means <i>to fly</i>. The mark is the letter <b>V</b> reimagined as a wing on the upbeat — a curved stroke that sweeps forward and lifts one spark off its tip into the light. That spark is Volar's promise: the <b>one lit thing</b> to do now, carried upward, forward. Flight + the studio spotlight, in a single geometric gesture.</div>
+  </div>
+
+  <!-- MARK / MONOCHROME -->
+  <section>
+    <div class="sec-head"><span class="num">01</span><h2>The mark — monochrome, one fill</h2></div>
+    <p class="note">Single <code style="font-family:var(--mono)">currentColor</code> fill so it tints anywhere. It must survive from 96px down to the 16px menu-bar glyph.</p>
+    <div class="sizes markwell">
+      <div class="size-item">
+        <svg viewBox="0 0 32 32" width="96" height="96" fill="none"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="2.3" fill="currentColor"/></svg>
+        <span class="lbl">96</span>
+      </div>
+      <div class="size-item">
+        <svg viewBox="0 0 32 32" width="48" height="48" fill="none"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="2.3" fill="currentColor"/></svg>
+        <span class="lbl">48</span>
+      </div>
+      <div class="size-item">
+        <svg viewBox="0 0 32 32" width="24" height="24" fill="none"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="2.3" fill="currentColor"/></svg>
+        <span class="lbl">24</span>
+      </div>
+      <div class="size-item">
+        <!-- the dedicated 16px glyph -->
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><path d="M3.5 7 Q5 9.5 6.5 10.75 Q8.25 8 11.5 3.75" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12.8" cy="2.05" r="1.5" fill="currentColor"/></svg>
+        <span class="lbl">16 · glyph</span>
+      </div>
+      <div class="size-item">
+        <svg viewBox="0 0 16 16" width="32" height="32" fill="none" style="image-rendering:pixelated"><path d="M3.5 7 Q5 9.5 6.5 10.75 Q8.25 8 11.5 3.75" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12.8" cy="2.05" r="1.5" fill="currentColor"/></svg>
+        <span class="lbl">16 · 2×</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- MENU BAR PROOF -->
+  <section>
+    <div class="sec-head"><span class="num">02</span><h2>Reads in the menu bar</h2></div>
+    <p class="note">The 16px glyph sitting where users actually meet it first — a monochrome template icon among the system items.</p>
+    <div class="menubar">
+      <div class="grp txt" style="margin-right:auto">
+        <b style="color:var(--tx-1);font-weight:600">Volar</b><span>File</span><span>Edit</span><span>View</span>
+      </div>
+      <span class="ic"><svg viewBox="0 0 24 24" width="15" height="15"><path d="M12 3v18M5 12h14" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></span>
+      <span class="volar" title="Volar">
+        <svg viewBox="0 0 16 16" width="16" height="16" fill="none"><path d="M3.5 7 Q5 9.5 6.5 10.75 Q8.25 8 11.5 3.75" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/><circle cx="12.8" cy="2.05" r="1.5" fill="currentColor"/></svg>
+      </span>
+      <span class="txt" style="color:var(--tx-1)">100%</span>
+      <span class="ic"><svg viewBox="0 0 24 24" width="15" height="15"><path d="M4 9.5v5h3.5L12 18.5v-13L7.5 9.5H4z" fill="currentColor"/></svg></span>
+      <span class="txt" style="color:var(--tx-1)">Wed 9:41</span>
+    </div>
+  </section>
+
+  <!-- AMBER TREATMENT -->
+  <section>
+    <div class="sec-head"><span class="num">03</span><h2>Amber on ink — the lit treatment</h2></div>
+    <p class="note">The colorway for surfaces that can carry depth. The wing is warm; the spark is the brightest point, sitting in a soft pool of the one reserved amber (#E8B25A).</p>
+    <div class="row">
+      <div class="tile" style="width:180px;height:180px;padding:0">
+        <svg viewBox="0 0 32 32" width="160" height="160">
+          <defs>
+            <radialGradient id="s-studio" cx="50%" cy="14%" r="95%"><stop offset="0%" stop-color="#161b22"/><stop offset="62%" stop-color="#0B0D11"/><stop offset="100%" stop-color="#08090C"/></radialGradient>
+            <radialGradient id="s-spot" cx="50%" cy="20%" r="55%"><stop offset="0%" stop-color="#E8B25A" stop-opacity="0.28"/><stop offset="55%" stop-color="#E8B25A" stop-opacity="0.08"/><stop offset="100%" stop-color="#E8B25A" stop-opacity="0"/></radialGradient>
+            <filter id="s-glow" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="0.7"/></filter>
+          </defs>
+          <rect width="32" height="32" rx="7.4" fill="url(#s-studio)"/>
+          <rect width="32" height="32" rx="7.4" fill="url(#s-spot)"/>
+          <g filter="url(#s-glow)" opacity="0.55"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="2.9" fill="#F0C67E"/></g>
+          <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="25.6" cy="4.1" r="2.3" fill="#F6EAD6"/><circle cx="25.6" cy="4.1" r="2.3" fill="#F0C67E" opacity="0.5"/>
+          <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="none" stroke="#ffffff" stroke-opacity="0.06"/>
+        </svg>
+      </div>
+      <div class="tile chkbg" style="width:120px;height:120px;padding:0" title="on transparent, amber solid">
+        <svg viewBox="0 0 32 32" width="88" height="88" fill="none"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="2.3" fill="#E8B25A"/></svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- WORDMARK + LOCKUP -->
+  <section>
+    <div class="sec-head"><span class="num">04</span><h2>Wordmark &amp; lockup</h2></div>
+    <p class="note">System grotesk, tight tracking, weight 600. One restrained detail — in the standalone wordmark the initial V catches the amber light; in the lockup, discipline holds to a single warm point (the spark), so the word stays neutral.</p>
+    <div style="display:flex;flex-direction:column;gap:26px">
+      <div class="tile" style="padding:34px 40px;justify-content:flex-start">
+        <svg viewBox="0 0 236 88" height="64"><text x="6" y="62" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Display','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="66" font-weight="600" letter-spacing="-2.4"><tspan fill="#E8B25A">V</tspan><tspan fill="#EAECEF">olar</tspan></text></svg>
+      </div>
+      <div class="tile" style="padding:30px 40px;justify-content:flex-start">
+        <svg viewBox="0 0 250 88" height="60">
+          <g transform="translate(-1.35,17.9) scale(1.7)"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#EAECEF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="2.3" fill="#E8B25A"/></g>
+          <text x="64" y="62" font-family="-apple-system,BlinkMacSystemFont,'SF Pro Display','Inter','Segoe UI',Helvetica,Arial,sans-serif" font-size="66" font-weight="600" letter-spacing="-2.4" fill="#EAECEF">Volar</text>
+        </svg>
+      </div>
+    </div>
+  </section>
+
+  <!-- APP ICON -->
+  <section>
+    <div class="sec-head"><span class="num">05</span><h2>App icon — in the studio</h2></div>
+    <p class="note">macOS Big Sur rounded-rect on the deep-ink studio background, the spark catching the amber key light from above. Shown at icon sizes and in a dock.</p>
+    <div class="appwrap">
+      <div class="size-item">
+        <svg viewBox="0 0 1024 1024" width="176" height="176" style="border-radius:38px">
+          <defs>
+            <radialGradient id="i1-studio" cx="50%" cy="8%" r="105%"><stop offset="0%" stop-color="#171d26"/><stop offset="46%" stop-color="#0E1116"/><stop offset="100%" stop-color="#080A0D"/></radialGradient>
+            <radialGradient id="i1-spot" cx="60.5%" cy="37%" r="42%"><stop offset="0%" stop-color="#E8B25A" stop-opacity="0.34"/><stop offset="46%" stop-color="#E8B25A" stop-opacity="0.11"/><stop offset="100%" stop-color="#E8B25A" stop-opacity="0"/></radialGradient>
+            <linearGradient id="i1-wing" x1="20%" y1="90%" x2="80%" y2="10%"><stop offset="0%" stop-color="#C68A3A"/><stop offset="55%" stop-color="#E8B25A"/><stop offset="100%" stop-color="#F0C67E"/></linearGradient>
+            <filter id="i1-glow" x="-80%" y="-80%" width="260%" height="260%"><feGaussianBlur stdDeviation="26"/></filter>
+            <clipPath id="i1-clip"><rect width="1024" height="1024" rx="224"/></clipPath>
+          </defs>
+          <g clip-path="url(#i1-clip)">
+            <rect width="1024" height="1024" fill="url(#i1-studio)"/>
+            <rect width="1024" height="1024" fill="url(#i1-spot)"/>
+            <g filter="url(#i1-glow)" opacity="0.7"><g transform="translate(178,280) scale(20)"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/><circle cx="25.6" cy="4.1" r="3.4" fill="#F0C67E"/></g></g>
+            <g transform="translate(178,280) scale(20)"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="url(#i1-wing)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></g>
+            <circle cx="690" cy="362" r="52" fill="#F0C67E"/><circle cx="690" cy="362" r="52" fill="none" stroke="#F6EAD6" stroke-width="6" stroke-opacity="0.9"/><circle cx="684" cy="354" r="20" fill="#FBF3E4" opacity="0.85"/>
+            <rect width="1024" height="1024" rx="224" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+          </g>
+        </svg>
+        <span class="lbl">1024 → 176</span>
+      </div>
+
+      <!-- dock context -->
+      <div class="dock">
+        <div class="slot"></div>
+        <div class="slot"></div>
+        <div class="slot self">
+          <svg viewBox="0 0 1024 1024" width="52" height="52" style="border-radius:12px">
+            <defs>
+              <radialGradient id="i2-studio" cx="50%" cy="8%" r="105%"><stop offset="0%" stop-color="#171d26"/><stop offset="46%" stop-color="#0E1116"/><stop offset="100%" stop-color="#080A0D"/></radialGradient>
+              <radialGradient id="i2-spot" cx="60.5%" cy="37%" r="42%"><stop offset="0%" stop-color="#E8B25A" stop-opacity="0.34"/><stop offset="46%" stop-color="#E8B25A" stop-opacity="0.11"/><stop offset="100%" stop-color="#E8B25A" stop-opacity="0"/></radialGradient>
+              <linearGradient id="i2-wing" x1="20%" y1="90%" x2="80%" y2="10%"><stop offset="0%" stop-color="#C68A3A"/><stop offset="55%" stop-color="#E8B25A"/><stop offset="100%" stop-color="#F0C67E"/></linearGradient>
+              <clipPath id="i2-clip"><rect width="1024" height="1024" rx="224"/></clipPath>
+            </defs>
+            <g clip-path="url(#i2-clip)">
+              <rect width="1024" height="1024" fill="url(#i2-studio)"/>
+              <rect width="1024" height="1024" fill="url(#i2-spot)"/>
+              <g transform="translate(178,280) scale(20)"><path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="url(#i2-wing)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></g>
+              <circle cx="690" cy="362" r="52" fill="#F0C67E"/><circle cx="684" cy="354" r="20" fill="#FBF3E4" opacity="0.85"/>
+            </g>
+          </svg>
+        </div>
+        <div class="slot"></div>
+        <div class="slot"></div>
+      </div>
+      <p class="appdesc">Sitting in the dock, the ink tile recedes and the single warm spark reads as the app's signal — the one lit thing, waiting.</p>
+    </div>
+  </section>
+
+  <p class="foot">volar · the-upbeat-v · flight + one-lit-thing · brand v1</p>
+</div>
+</body>
+</html>

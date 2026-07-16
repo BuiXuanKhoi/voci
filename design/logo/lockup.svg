@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 250 88" width="250" height="88" role="img" aria-label="Volar">
+  <!-- Horizontal lockup: mark + wordmark. Exactly one warm point — the lifted spark. -->
+  <g transform="translate(-1.35,17.9) scale(1.7)">
+    <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5"
+          fill="none" stroke="#EAECEF" stroke-width="3"
+          stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="25.6" cy="4.1" r="2.3" fill="#E8B25A"/>
+  </g>
+  <text x="64" y="62"
+        font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif"
+        font-size="66" font-weight="600" letter-spacing="-2.4" fill="#EAECEF">Volar</text>
+</svg>

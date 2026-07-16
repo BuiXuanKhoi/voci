@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" fill="none" role="img" aria-label="Volar">
+  <!-- The Upbeat V: a wing-stroke lifting one spark into the light. Single fill, tint via currentColor. -->
+  <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5"
+        fill="none" stroke="currentColor" stroke-width="3"
+        stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="25.6" cy="4.1" r="2.3" fill="currentColor"/>
+</svg>

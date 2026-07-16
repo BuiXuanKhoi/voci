@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Volar mark, amber on ink">
+  <defs>
+    <radialGradient id="va-studio" cx="50%" cy="14%" r="95%">
+      <stop offset="0%" stop-color="#161b22"/>
+      <stop offset="62%" stop-color="#0B0D11"/>
+      <stop offset="100%" stop-color="#08090C"/>
+    </radialGradient>
+    <radialGradient id="va-spot" cx="50%" cy="20%" r="55%">
+      <stop offset="0%" stop-color="#E8B25A" stop-opacity="0.28"/>
+      <stop offset="55%" stop-color="#E8B25A" stop-opacity="0.08"/>
+      <stop offset="100%" stop-color="#E8B25A" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="va-glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="0.7"/>
+    </filter>
+  </defs>
+  <rect x="0" y="0" width="32" height="32" rx="7.4" fill="url(#va-studio)"/>
+  <rect x="0" y="0" width="32" height="32" rx="7.4" fill="url(#va-spot)"/>
+  <!-- soft bloom under the mark -->
+  <g filter="url(#va-glow)" opacity="0.55">
+    <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round"/>
+    <circle cx="25.6" cy="4.1" r="2.9" fill="#F0C67E"/>
+  </g>
+  <!-- the wing -->
+  <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- the one lit thing, brightest point -->
+  <circle cx="25.6" cy="4.1" r="2.3" fill="#F6EAD6"/>
+  <circle cx="25.6" cy="4.1" r="2.3" fill="#F0C67E" opacity="0.5"/>
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7.0" fill="none" stroke="#ffffff" stroke-opacity="0.06"/>
+</svg>
