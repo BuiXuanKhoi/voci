@@ -317,6 +317,19 @@ struct PopoverView: View {
                     onDismiss: { appState.dismissAttribute(.kind, forDraft: draft.id) }
                 )
             }
+            // Mi-1 (constitution II): `followUpReview` used to silently materialize an extra
+            // `.review` task with no confirm-card representation at all. Defaults ON (matching the
+            // parser's signal) but glance-and-dismiss like every other chip — dismissing it here
+            // is what `confirmSave` reads to skip creating the derived task.
+            if draft.task.followUpReview, !draft.dismissed.contains(.followUpReview) {
+                Chip(
+                    label: "+ Review after done",
+                    uncertain: false,
+                    accepted: true,
+                    onAccept: nil,
+                    onDismiss: { appState.dismissAttribute(.followUpReview, forDraft: draft.id) }
+                )
+            }
         }
     }
 

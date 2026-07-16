@@ -273,7 +273,12 @@ struct HeuristicNLParser: NLParser {
 
     // MARK: - Estimate ("45 min", "1 hr", "nửa tiếng", "~30 phút", "chắc 30 phút")
 
-    private static let estimateRegex = try? NSRegularExpression(
+    // UNVERIFIED: no-op if the pinned SDK marks these Sendable — `nonisolated(unsafe)` matches
+    // this codebase's own convention for caching non-Sendable system types in a `static let`
+    // (see `SpeechCapture.swift:198`'s `nonisolated(unsafe) let tapRequest`); under Swift 6
+    // strict concurrency, `NSRegularExpression`/`NSDataDetector` statics are otherwise flagged
+    // "not concurrency-safe" even though both are immutable-after-init and safe to share.
+    nonisolated(unsafe) private static let estimateRegex = try? NSRegularExpression(
         pattern: #"(\d+)\s*(minutes?|mins?|hours?|hrs?|phút|tiếng|giờ)"#,
         options: [.caseInsensitive]
     )
@@ -333,7 +338,7 @@ struct HeuristicNLParser: NLParser {
         var isExplicitTime: Bool
     }
 
-    private static let dateDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue)
+    nonisolated(unsafe) private static let dateDetector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.date.rawValue)
 
     /// Vietnamese + English weekday keywords → `Calendar.component(.weekday)` values
     /// (Sunday = 1 ... Saturday = 7, matching `Calendar`'s own convention).
@@ -396,7 +401,7 @@ struct HeuristicNLParser: NLParser {
 
     // MARK: - Defer phrasing → ParsedCondition.afterDate
 
-    private static let deferCueRegex = try? NSRegularExpression(
+    nonisolated(unsafe) private static let deferCueRegex = try? NSRegularExpression(
         pattern: #"\bstart(?:ing)?\s+(?:on\s+)?(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday|next\s+week)\b"#,
         options: [.caseInsensitive]
     )
@@ -430,7 +435,7 @@ struct HeuristicNLParser: NLParser {
 
     // MARK: - Dependency phrasing → ParsedCondition.taskDone
 
-    private static let dependencyPatterns: [NSRegularExpression] = [
+    nonisolated(unsafe) private static let dependencyPatterns: [NSRegularExpression] = [
         #"(?:after|once)\s+(.+?)\s+is\s+done"#,
         #"when\s+(.+?)\s+is\s+done"#,
         #"sau\s+khi\s+(.+?)\s+xong"#,
@@ -473,7 +478,7 @@ struct HeuristicNLParser: NLParser {
 
     // MARK: - Wait phrasing → ParsedCondition.external
 
-    private static let externalPatterns: [NSRegularExpression] = [
+    nonisolated(unsafe) private static let externalPatterns: [NSRegularExpression] = [
         #"waiting\s+(?:for|on)\s+(.+?)(?=,|\.|$)"#,
         #"(?:chờ|đợi)\s+(.+?)(?=,|\.|$)"#
     ].compactMap { try? NSRegularExpression(pattern: $0, options: [.caseInsensitive]) }
@@ -489,7 +494,7 @@ struct HeuristicNLParser: NLParser {
 
     // MARK: - Recurrence
 
-    private static let everyNDaysRegex = try? NSRegularExpression(
+    nonisolated(unsafe) private static let everyNDaysRegex = try? NSRegularExpression(
         pattern: #"(?:every|mỗi|cứ)\s+(\d+)\s+(?:days?|ngày)"#,
         options: [.caseInsensitive]
     )
@@ -523,7 +528,7 @@ struct HeuristicNLParser: NLParser {
 
     // MARK: - Reminder override ("remind me every 30 minutes", "nhắc mỗi 30 phút")
 
-    private static let reminderIntervalRegex = try? NSRegularExpression(
+    nonisolated(unsafe) private static let reminderIntervalRegex = try? NSRegularExpression(
         pattern: #"(?:remind(?:\s+me)?(?:\s+every)?|nhắc(?:\s+lại)?\s+mỗi)\s+(\d+)\s*(minutes?|mins?|hours?|hrs?|phút|giờ)"#,
         options: [.caseInsensitive]
     )
@@ -564,5 +569,31 @@ struct HeuristicNLParser: NLParser {
             "xong thì xem lại", "làm xong thì xem lại", "xong rồi xem lại"
         ]
         return phrases.contains { lower.contains($0) }
+    }
+}
+
+// MARK: - IntentParser conformance (parsing-contract.md)
+
+/// `HeuristicNLParser` already implements `parse(_:now:openTaskTitles:)` above, matching
+/// `IntentParser.parse` exactly. This adds the other required method so the type can serve as
+/// `IntentRouter`'s always-available floor route (`IntentParsing.swift`'s `heuristic: IntentParser`
+/// default arg + `heuristic.breakdown(...)` call).
+extension HeuristicNLParser: IntentParser {
+    /// Template floor for breakdown mode: no real step-by-step reasoning (this parser is pure
+    /// keyword/regex text-in/`ParsedTask`-out, per its own header comment — it has no model to ask
+    /// "what are the steps?"), just a generic 5-step scaffold shaped to satisfy the contract's
+    /// "3…9 step titles" bound so the confirm card always has SOMETHING to show even when FM and
+    /// Cloud both fell through. Never crashes; an empty/whitespace-only title yields `[]` rather
+    /// than fabricating steps for nothing (constitution II — never silently guess).
+    func breakdown(title: String, notes: String?) async -> [String] {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return [] }
+        return [
+            "Gather what's needed for \(trimmedTitle)",
+            "Start the first small piece",
+            "Work through the middle of it",
+            "Check the result",
+            "Wrap up \(trimmedTitle)"
+        ]
     }
 }

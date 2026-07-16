@@ -48,6 +48,12 @@ enum SpeechEngineChoice: String, Sendable, Equatable, CaseIterable, Identifiable
 /// `resolvedTaskDone`, keyed by index, since a task can carry several).
 enum ChipKind: String, CaseIterable, Hashable, Sendable {
     case deadline, estimate, priority, reminder, recurrence, kind
+    /// Mi-1 (constitution II): `ParsedTask.followUpReview` used to materialize a second `.review`
+    /// task in `confirmSave` with no confirm-card representation at all — an unconfirmed task the
+    /// user never explicitly saw or could dismiss. This chip makes it visible and dismissible like
+    /// every other attribute, defaulting ON (dismissing it is the exception, not the rule) but
+    /// removable before Save.
+    case followUpReview
 }
 
 /// One confirmed task's editable confirm-card state, layered OVER a router-parsed `ParsedTask`
@@ -692,6 +698,7 @@ final class AppState {
         case .reminder: return task.reminderOverride.map { "\($0.value)" } ?? ""
         case .recurrence: return task.recurrence.map { "\($0.value)" } ?? ""
         case .kind: return task.kind.rawValue
+        case .followUpReview: return "\(task.followUpReview)"
         case nil: return "" // condition corrections describe themselves via `attribute`
         }
     }
@@ -710,7 +717,10 @@ final class AppState {
         for draft in confirmDrafts {
             let item = materialize(draft, now: now)
             itemsToSave.append(item)
-            if draft.task.followUpReview {
+            // Mi-1: the "+ review after done" chip is dismissible (defaults on, per
+            // `ChipKind.followUpReview`'s doc comment) — only materialize the derived `.review`
+            // task when the user hasn't dismissed it.
+            if draft.task.followUpReview, !draft.dismissed.contains(.followUpReview) {
                 itemsToSave.append(materializeFollowUpReview(for: item, now: now))
             }
         }
@@ -723,8 +733,25 @@ final class AppState {
             return
         }
 
+        // M-1: a `followUpReview` draft appends a SECOND item (the derived `.review` task), so
+        // `itemsToSave.count` can exceed `TaskStore.maxBatchSize` even though the parse itself
+        // stayed within the FR-012 ≤10-PARSED-tasks cap (e.g. 6 parsed tasks each with a
+        // follow-up review = 12 items). `addBatch` throws `.batchTooLarge` above that limit, so a
+        // single call here would make an otherwise-valid parse unsaveable. Splitting into
+        // sequential ≤`maxBatchSize` chunks — each committed via its own `addBatch` call, in
+        // order — fixes that without raising the parse cap itself. Order is preserved across
+        // chunks, so a parent always commits at or before the chunk containing its dependent
+        // review: if a chunk boundary falls between them, the parent's chunk has already `save()`d
+        // by the time the review's chunk builds its `allEngineSnapshot()`, so the review's
+        // `.taskDone(parent.id)` condition still validates correctly.
+        let chunks = stride(from: 0, to: itemsToSave.count, by: TaskStore.maxBatchSize).map {
+            Array(itemsToSave[$0..<min($0 + TaskStore.maxBatchSize, itemsToSave.count)])
+        }
+
         do {
-            try store.addBatch(itemsToSave)
+            for chunk in chunks {
+                try store.addBatch(chunk)
+            }
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
             tasks = store.fetchAll()
             finishSaveUI(titles: itemsToSave.map(\.title))
@@ -732,6 +759,10 @@ final class AppState {
             // Cycle rejection / batch-too-large / any other `TaskStoreError` surfaces its
             // human-readable message instead of crashing; `confirmDrafts` is left intact so the
             // user can adjust (e.g. drop a condition) and retry rather than losing the capture.
+            // A failure on a LATER chunk (after earlier chunks already committed) is refreshed
+            // from the store here too, so the UI never shows stale/duplicate state for the part
+            // that did save — the user only re-confirms what's genuinely still outstanding.
+            tasks = store.fetchAll()
             captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             captureState = .error
         }

@@ -59,7 +59,7 @@ final class TaskStore {
     static let maxBatchSize = 10
 
     init() throws {
-        let schema = Schema([VociTask.self, CompletionEvent.self])
+        let schema = Schema([VociTask.self, CompletionEvent.self, ParseCorrection.self])
         let configuration = ModelConfiguration(schema: schema)
         container = try ModelContainer(for: schema, configurations: [configuration])
         context = ModelContext(container)

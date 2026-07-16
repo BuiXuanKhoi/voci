@@ -1,13 +1,5 @@
-// Sources/Model/SampleData.swift — ports SAMPLE_TASKS / SAMPLE_TRANSCRIPT_PARSED (design/tokens.jsx)
+// Sources/Model/SampleData.swift — ports SAMPLE_TASKS (design/tokens.jsx)
 import Foundation
-
-/// A sample voice transcript paired with its expected parse — mirrors one entry of
-/// `SAMPLE_TRANSCRIPT_PARSED` in `design/tokens.jsx`. Used for `PopoverView` previews (Phase 2)
-/// and to sanity-check `HeuristicNLParser` against the design's expected outputs.
-struct SampleTranscript: Sendable {
-    let sentence: String
-    let parsed: ParsedTask
-}
 
 /// Static sample data for previews and first-run seeding (`TaskStore.loadOrSeed()`). Deadlines
 /// are built from a fixed reference day — never `Date.now` — so every preview/snapshot is
@@ -73,43 +65,6 @@ enum SampleData {
             title: "Post launch teaser on X", priority: .low, status: .done,
             deadline: time(8, 50), conditions: [], createdAt: time(7, 6),
             when: .later, durationMinutes: nil
-        ),
-    ]
-
-    /// Ported from `SAMPLE_TRANSCRIPT_PARSED`.
-    static let transcripts: [SampleTranscript] = [
-        SampleTranscript(
-            sentence: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
-            parsed: ParsedTask(
-                title: "Customer call — Acme onboarding feedback",
-                details: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
-                when: "Tomorrow · 2:00 PM",
-                priority: .high,
-                durationMinutes: 30,
-                context: "Created in Cursor"
-            )
-        ),
-        SampleTranscript(
-            sentence: "Remind me to push the TestFlight build at 7:30 tonight",
-            parsed: ParsedTask(
-                title: "Push TestFlight build",
-                details: "Remind me to push the TestFlight build at 7:30 tonight",
-                when: "Today · 7:30 PM",
-                priority: .high,
-                durationMinutes: 15,
-                context: "Created in Xcode"
-            )
-        ),
-        SampleTranscript(
-            sentence: "Reply to Mira from Lux Ventures by end of day, medium priority",
-            parsed: ParsedTask(
-                title: "Reply to Mira — Lux Ventures",
-                details: "Reply to Mira from Lux Ventures by end of day, medium priority",
-                when: "Today · 6:00 PM",
-                priority: .medium,
-                durationMinutes: 20,
-                context: "Created in Mail"
-            )
         ),
     ]
 }
