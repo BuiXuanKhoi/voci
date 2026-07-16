@@ -131,3 +131,41 @@ auto-committed (constitution II). Decode failure anywhere → title-only + trans
    item — absorbed into this feature).
 5. Completing last open child ⇒ auto-complete parent (append both events).
 6. Max 10 tasks materialized per utterance/batch confirm.
+
+## Addendum 2026-07-16 — spoken reminders + capture-time conflict check
+
+**Engine (VociCore) — conflict check (pure, FR-011c)**
+
+```swift
+public enum TaskConflict: Sendable, Equatable {
+    case deadlineCapacity(existingCount: Int, estimatedMinutes: Int, windowEnd: Date)
+    case deadlineCollision(withTaskId: UUID, title: String)
+    case dependsOnBlocked(taskId: UUID, title: String)   // candidate depends on an overdue/blocked task
+    case competesWithFrog(taskId: UUID, title: String)
+    case possibleDuplicate(taskId: UUID, title: String, score: Double)
+}
+
+/// Pure. `busyIntervals` (from EventKit) are passed IN — the engine never reads a calendar.
+/// Returns only high-signal conflicts (empty = clean capture). Deterministic, testable.
+public func conflicts(forAdding candidate: Task,
+                      into snapshot: [Task],
+                      now: Date,
+                      calendar: Calendar,
+                      busyIntervals: [DateInterval],
+                      frogId: UUID?) -> [TaskConflict]
+```
+
+App layer renders at most ONE advisory line on the confirm card; never blocks save, never
+auto-modifies (constitution II/V). Calendar integration is P3 — until then `busyIntervals: []`
+(capacity still works from task estimates alone).
+
+**Persisted layer additions**
+- `VociTask.isSensitive: Bool` (default `false`) — sensitive tasks are spoken only as a generic
+  phrase (FR-014b), detail visual-only.
+- Settings: `VoiceDeliveryMode` (`visualOnly` / `visualPlusVoice` (default) / `voiceOnly`) —
+  global, in `UserDefaults`.
+
+**Reminder delivery (FR-014b)** — `ReminderScheduler` gains a spoken channel (on-device
+`AVSpeechSynthesizer` via the existing `VoicePlayback`) gated by a `ReminderContextGate`:
+suppress voice when calendar-busy / call or mic active / screen-shared / DND / other audio
+playing. Voice is a high escalation rung, not per-event narration. No egress (constitution I).

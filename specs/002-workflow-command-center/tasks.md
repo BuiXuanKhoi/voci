@@ -100,8 +100,18 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 - [ ] T032 [US2] Wire afterDate resurfacing: schedule a timer/notification at `nextResurfaceDate` (no polling), refresh menu bar on fire (FR-017)
 - [ ] T033 [US2] Add global `ReminderPolicy` defaults + editor row in `Voci/Sources/Views/SettingsView.swift`; replace `AppDelegate` "auth-only" notification setup with category registration in `Voci/Sources/App/VociApp.swift`
 - [ ] T034 [US2] Implement stale-task weekly triage batch card (keep/break down/defer/drop, no badges) in `Voci/Sources/Views/TriageView.swift` + scheduling in AppState (FR-018)
+- [ ] T072 [US2] Spoken reminder delivery (FR-014b, added 2026-07-16): `Voci/Sources/Reminders/VoiceReminderChannel.swift` (on-device `AVSpeechSynthesizer` via existing `VoicePlayback`, one calm sentence, sensitive→generic phrase) + `ReminderContextGate.swift` (suppress when calendar-busy/call/mic-active/screen-shared/DND/other-audio); wire as a HIGH escalation rung in `ReminderScheduler`; global `VoiceDeliveryMode` setting (visualOnly/visual+voice default/voiceOnly) in `SettingsView`; `VociTask.isSensitive` field. No egress (constitution I).
 
 **Checkpoint**: US2 independently testable — the app's reminder promise is real
+
+---
+
+## Phase 3b: Capture-time conflict advisory (FR-011c, added 2026-07-16)
+
+**Goal**: Adding a task by voice → engine checks it against the existing timeline/tasks; a calm one-line advisory when there's a real conflict. Never blocks, never friction on clean captures.
+
+- [ ] T073 [P] Create `VociCore/Sources/VociCore/ConflictCheck.swift`: pure `conflicts(forAdding:into:now:calendar:busyIntervals:frogId:) -> [TaskConflict]` (deadline-capacity / deadline-collision / depends-on-blocked / competes-with-frog / possible-duplicate) + `VociCore/Tests/VociCoreTests/ConflictCheckTests.swift`. Deterministic, `busyIntervals` injected (constitution III). High-signal only (empty = clean).
+- [ ] T074 Surface the advisory on the confirm card: after parse, before save, run `conflicts(...)` and render at most ONE calm advisory line in `PopoverView.swift` (ignore-with-Enter or act); wire in `AppState.confirmSave` path. Never auto-modify (constitution II/V). Calendar busyIntervals `[]` until P3 calendar lands.
 
 ---
 
