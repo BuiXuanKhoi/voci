@@ -6,6 +6,17 @@ import Observation
 import UserNotifications
 import VolarCore
 
+/// WG-C (FR-020 gap fix): posted by `ReminderScheduler.handleAction` (`Sources/Reminders/
+/// ReminderScheduler.swift`) right after a notification action mutates `TaskStore` state (e.g. the
+/// "Done" action's `store.toggle(...)`), since that path deliberately bypasses `AppState` entirely
+/// (FR-014/015/016 forbid a notification action from touching the app window/state directly).
+/// `VolarApp.swift` observes this and calls `AppState.refreshFromStore()` so `tasks` — and
+/// `MenuBarLabel.activeTask`, derived from it — catch back up without the app needing to be
+/// foregrounded first.
+extension Notification.Name {
+    static let volarTasksDidChange = Notification.Name("volarTasksDidChange")
+}
+
 /// Ambient visual mode — mirrors the prototype's `ambient` prop
 /// ('none' | 'rain' | 'snow' | 'embers' | 'custom') from `volar-ambient.jsx`.
 /// String-backed + `CaseIterable`/`Identifiable` so Settings → Appearance can drive it straight
@@ -504,6 +515,21 @@ final class AppState {
             scheduler?.notifyUnblocked(taskIds: newlyEligible)
         }
         scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: now)
+    }
+
+    /// WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done" action calls
+    /// `store.toggle(...)` directly rather than routing through this file's `toggleDone` funnel (by
+    /// design — FR-014/015/016 forbid the notification path from touching the app/AppState
+    /// directly). That leaves `tasks` — and therefore `MenuBarLabel.activeTask`, which re-derives
+    /// `VolarCore.nextTask` from `tasks` on every read — stale until some other mutation happens to
+    /// refresh it. `ReminderScheduler` now posts `.volarTasksDidChange` after any such store
+    /// mutation; `VolarApp.swift` observes it and calls this to catch `tasks` back up. Mirrors the
+    /// exact `tasks = store.fetchAll()` refresh every other store-backed mutation above already
+    /// does — no-op (not an error) when there's no store, same as every other no-store fallback in
+    /// this file.
+    func refreshFromStore() {
+        guard let store else { return }
+        tasks = store.fetchAll()
     }
 
     // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
@@ -1592,16 +1618,19 @@ final class AppState {
     // MARK: - Phase 5 (T038): evening sweep (contract B `SweepView`, sibling-owned, landed)
 
     /// Drives `SweepView`'s presentation — mirrors `VolarApp.swift`'s `showTriage` pattern
-    /// (day-gated flag owned here, actual `.sheet` mount point lives in `VolarApp.swift`, which is
-    /// OUTSIDE this task's 3 owned files — see `maybeShowEveningSweep`'s doc comment for the exact
-    /// one-time wiring the next touch of `VolarApp.swift` needs to actually surface this).
+    /// (day-gated flag owned here, actual `.sheet` mount point lives in `VolarApp.swift`). WG-A/B
+    /// ship-blocker fix: now actually mounted + triggered there (see `VolarApp.swift`'s main-window
+    /// `.sheet`/`.task`) — was previously wired here but never surfaced.
     var showSweep = false
 
     private static let sweepLastShownDayKey = "volar.sweepLastShownDay"
 
-    /// `SweepView.items`: "today's open/in-progress tasks" (contract B) — this app's existing
-    /// "today" bucket is exactly `nowTasks` (`when == .now`).
-    var sweepItems: [TaskItem] { nowTasks }
+    /// `SweepView.items`: "today's open/in-progress tasks" (contract B) — MINORS fix: was
+    /// `nowTasks` only, which silently dropped every `.later`-bucket open task from the evening
+    /// sweep. `openTasks` (`nowTasks + laterTasks`) is this app's full still-open set, matching the
+    /// contract's "today's open/in-progress tasks" wording without inventing a narrower notion of
+    /// "today" than the rest of the app already uses.
+    var sweepItems: [TaskItem] { openTasks }
 
     /// T038: once-daily schedule (ISO-day gate, mirroring `VolarApp.swift`'s `frogLastShown`/
     /// `triageLastShownWeek` `@AppStorage` pattern — kept here as plain `UserDefaults` instead
@@ -1610,14 +1639,13 @@ final class AppState {
     /// (`sweepItems.isEmpty` — `SweepView` itself also self-guards on an empty `items` as a second
     /// line of defense per its own doc comment).
     ///
-    /// *** WIRING STILL NEEDED IN `VolarApp.swift` (outside this task's 3 owned files; flagged in
-    /// the final report rather than fixed here, same as the pre-existing FR-016 wake-observer gap
-    /// noted in `offerRescheduleForOverdueTasks` above) ***. Call this once from the main window's
-    /// `.task`, alongside the existing morning-frog/triage checks:
+    /// WG-A/B ship-blocker fix: `VolarApp.swift`'s main-window `.task` now calls this (gated to
+    /// evening hours ≥18:00 at that call site — this method itself only self-gates on ISO-day +
+    /// non-empty `sweepItems`) and mounts a `.sheet` presenting `SweepView` bound to `showSweep`,
+    /// mirroring `showTriage`'s exact shape:
     /// ```swift
     /// appState.maybeShowEveningSweep()
     /// ```
-    /// and add a `.sheet` mirroring `showTriage`'s exactly:
     /// ```swift
     /// .sheet(isPresented: Binding(
     ///     get: { appState.showSweep },

@@ -228,6 +228,13 @@ final class ReminderScheduler: NSObject {
         case ReminderAction.done:
             store.toggle(record.taskId, now: now)
             record.state = "satisfied"
+            // WG-C (FR-020 gap fix): this path deliberately bypasses `AppState.toggleDone` (its own
+            // doc comment explains why — FR-014/015/016 forbid a notification action from touching
+            // the app/window directly), which otherwise refreshes `AppState.tasks` atomically after
+            // every store mutation. Post the fact instead: `VolarApp.swift` observes
+            // `.volarTasksDidChange` and calls `AppState.refreshFromStore()` on the main actor, so
+            // `MenuBarLabel.activeTask` catches up without needing the window foregrounded first.
+            NotificationCenter.default.post(name: .volarTasksDidChange, object: nil)
         case ReminderAction.snooze10:
             reschedule(record, to: now.addingTimeInterval(10 * 60))
         case ReminderAction.tomorrow, ReminderAction.rescheduleTomorrow:

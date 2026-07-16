@@ -71,6 +71,26 @@ struct VolarApp: App {
                         appState.showTriage = true
                         triageLastShownWeek = weekKey
                     }
+
+                    // WG-B (ship-blocker, FR-021): evening sweep — `maybeShowEveningSweep()` itself
+                    // already self-gates on ISO-day (once/day, via `sweepLastShownDayKey`) and a
+                    // non-empty `sweepItems`; this call site adds the one gate it can't do on its
+                    // own — only offer the sweep in the evening (hour >= 18), so it's never sprung
+                    // on someone opening the window at 9am.
+                    let hour = Calendar.current.component(.hour, from: Date())
+                    if hasOnboarded, hour >= 18 {
+                        appState.maybeShowEveningSweep()
+                    }
+                }
+                .onReceive(NotificationCenter.default.publisher(for: .volarTasksDidChange)) { _ in
+                    // WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done"
+                    // action mutates `TaskStore` directly (bypassing `AppState.toggleDone` by
+                    // design — FR-014/015/016 forbid that path from touching the app/window), which
+                    // otherwise left `appState.tasks` — and `MenuBarLabel.activeTask`, derived from
+                    // it — stale until some unrelated mutation refreshed it. `.onReceive` on a
+                    // SwiftUI view body already runs on the main actor, so this hop to
+                    // `refreshFromStore()` (itself `@MainActor`) is safe without an extra dispatch.
+                    appState.refreshFromStore()
                 }
                 .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
                     // Constitution IV: sleep/wake recovery re-evaluates overdue `.scheduled`
@@ -132,6 +152,19 @@ struct VolarApp: App {
                         onBreakdown: { appState.triageBreakdown($0) },
                         onDefer: { appState.triageDefer($0) },
                         onDrop: { appState.triageDrop($0) }
+                    )
+                    .environment(appState)
+                    .frame(minWidth: 560, minHeight: 480)
+                }
+                .sheet(isPresented: Binding(
+                    get: { appState.showSweep },
+                    set: { presented in if !presented { appState.dismissSweep() } }
+                )) {
+                    SweepView(
+                        items: appState.sweepItems,
+                        onComplete: { appState.sweepComplete($0) },
+                        onSkip: { appState.sweepSkip($0) },
+                        onDismiss: { appState.dismissSweep() }
                     )
                     .environment(appState)
                     .frame(minWidth: 560, minHeight: 480)
