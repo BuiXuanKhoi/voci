@@ -89,18 +89,18 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 ### Recovery tests first (constitution IV)
 
-- [ ] T027 [P] [US2] Reminder recovery tests in `Voci/Tests/ReminderSchedulerTests.swift` (new XCTest target in `Voci/project.yml`): rebuild-from-storage on launch, overdue-while-closed fires once, done-task suppression, policy escalation offsets, nearest-N refill under the 64-request cap
+- [x] T027 [P] [US2] Reminder recovery tests in `Voci/Tests/ReminderSchedulerTests.swift` (new XCTest target in `Voci/project.yml`): rebuild-from-storage on launch, overdue-while-closed fires once, done-task suppression, policy escalation offsets, nearest-N refill under the 64-request cap
 
 ### Implementation
 
-- [ ] T028 [US2] Create `Voci/Sources/Model/ReminderRecord.swift`: @Model per data-model.md + derivation from task deadline × (global policy | reminderOverride)
-- [ ] T029 [US2] Create `Voci/Sources/Reminders/ReminderScheduler.swift`: storage-rebuilt scheduler, launch + `NSWorkspace.didWakeNotification` recovery, fire-time fresh reload & suppression, nearest-N windowing (R2)
-- [ ] T030 [US2] Create `Voci/Sources/Reminders/NotificationActions.swift`: UNNotificationCategory set — deadline (Done/Snooze 10m/Tomorrow), unblocked-ready, overdue-reschedule (tonight/tomorrow/weekend); delegate routes actions to TaskStore mutations without opening the window (FR-014/015/016)
-- [ ] T031 [US2] Wire auto-unblock notifications in `Voci/Sources/App/AppState.swift`: run `eligibilityDiff` after every mutation → "X is now ready" notification per newly eligible task
-- [ ] T032 [US2] Wire afterDate resurfacing: schedule a timer/notification at `nextResurfaceDate` (no polling), refresh menu bar on fire (FR-017)
-- [ ] T033 [US2] Add global `ReminderPolicy` defaults + editor row in `Voci/Sources/Views/SettingsView.swift`; replace `AppDelegate` "auth-only" notification setup with category registration in `Voci/Sources/App/VociApp.swift`
-- [ ] T034 [US2] Implement stale-task weekly triage batch card (keep/break down/defer/drop, no badges) in `Voci/Sources/Views/TriageView.swift` + scheduling in AppState (FR-018)
-- [ ] T072 [US2] Spoken reminder delivery (FR-014b, added 2026-07-16): `Voci/Sources/Reminders/VoiceReminderChannel.swift` (on-device `AVSpeechSynthesizer` via existing `VoicePlayback`, one calm sentence, sensitive→generic phrase) + `ReminderContextGate.swift` (suppress when calendar-busy/call/mic-active/screen-shared/DND/other-audio); wire as a HIGH escalation rung in `ReminderScheduler`; global `VoiceDeliveryMode` setting (visualOnly/visual+voice default/voiceOnly) in `SettingsView`; `VociTask.isSensitive` field. No egress (constitution I).
+- [x] T028 [US2] Create `Voci/Sources/Model/ReminderRecord.swift`: @Model per data-model.md + derivation from task deadline × (global policy | reminderOverride)
+- [x] T029 [US2] Create `Voci/Sources/Reminders/ReminderScheduler.swift`: storage-rebuilt scheduler, launch + `NSWorkspace.didWakeNotification` recovery, fire-time fresh reload & suppression, nearest-N windowing (R2)
+- [x] T030 [US2] Create `Voci/Sources/Reminders/NotificationActions.swift`: UNNotificationCategory set — deadline (Done/Snooze 10m/Tomorrow), unblocked-ready, overdue-reschedule (tonight/tomorrow/weekend); delegate routes actions to TaskStore mutations without opening the window (FR-014/015/016)
+- [x] T031 [US2] Wire auto-unblock notifications in `Voci/Sources/App/AppState.swift`: run `eligibilityDiff` after every mutation → "X is now ready" notification per newly eligible task
+- [x] T032 [US2] Wire afterDate resurfacing: schedule a timer/notification at `nextResurfaceDate` (no polling), refresh menu bar on fire (FR-017)
+- [x] T033 [US2] Add global `ReminderPolicy` defaults + editor row in `Voci/Sources/Views/SettingsView.swift`; replace `AppDelegate` "auth-only" notification setup with category registration in `Voci/Sources/App/VociApp.swift`
+- [x] T034 [US2] Implement stale-task weekly triage batch card (keep/break down/defer/drop, no badges) in `Voci/Sources/Views/TriageView.swift` + scheduling in AppState (FR-018)
+- [x] T072 [US2] Spoken reminder delivery (FR-014b, added 2026-07-16): `Voci/Sources/Reminders/VoiceReminderChannel.swift` (on-device `AVSpeechSynthesizer` via existing `VoicePlayback`, one calm sentence, sensitive→generic phrase) + `ReminderContextGate.swift` (suppress when calendar-busy/call/mic-active/screen-shared/DND/other-audio); wire as a HIGH escalation rung in `ReminderScheduler`; global `VoiceDeliveryMode` setting (visualOnly/visual+voice default/voiceOnly) in `SettingsView`; `VociTask.isSensitive` field. No egress (constitution I).
 
 **Checkpoint**: US2 independently testable — the app's reminder promise is real
 
@@ -110,8 +110,8 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 **Goal**: Adding a task by voice → engine checks it against the existing timeline/tasks; a calm one-line advisory when there's a real conflict. Never blocks, never friction on clean captures.
 
-- [ ] T073 [P] Create `VociCore/Sources/VociCore/ConflictCheck.swift`: pure `conflicts(forAdding:into:now:calendar:busyIntervals:frogId:) -> [TaskConflict]` (deadline-capacity / deadline-collision / depends-on-blocked / competes-with-frog / possible-duplicate) + `VociCore/Tests/VociCoreTests/ConflictCheckTests.swift`. Deterministic, `busyIntervals` injected (constitution III). High-signal only (empty = clean).
-- [ ] T074 Surface the advisory on the confirm card: after parse, before save, run `conflicts(...)` and render at most ONE calm advisory line in `PopoverView.swift` (ignore-with-Enter or act); wire in `AppState.confirmSave` path. Never auto-modify (constitution II/V). Calendar busyIntervals `[]` until P3 calendar lands.
+- [x] T073 [P] Create `VociCore/Sources/VociCore/ConflictCheck.swift`: pure `conflicts(forAdding:into:now:calendar:busyIntervals:frogId:) -> [TaskConflict]` (deadline-capacity / deadline-collision / depends-on-blocked / competes-with-frog / possible-duplicate) + `VociCore/Tests/VociCoreTests/ConflictCheckTests.swift`. Deterministic, `busyIntervals` injected (constitution III). High-signal only (empty = clean).
+- [x] T074 Surface the advisory on the confirm card: after parse, before save, run `conflicts(...)` and render at most ONE calm advisory line in `PopoverView.swift` (ignore-with-Enter or act); wire in `AppState.confirmSave` path. Never auto-modify (constitution II/V). Calendar busyIntervals `[]` until P3 calendar lands.
 
 ---
 
