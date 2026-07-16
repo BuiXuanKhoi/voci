@@ -1,4 +1,9 @@
 // Sources/Design/Glass.swift — GlassBackground + material/tint/hairline helpers (spec §6)
+//
+// RETHEME (Studio Dark) — no structural change here. This panel's tint/border default straight
+// through to `VociColor.bg` / `VociColor.borderHi` (Theme.swift), so retheming those tokens to the
+// deep-ink Studio Dark palette already tunes every `vociGlass`/`vociHairline` call site to be
+// deep, cool, and low-key — no numeric change was needed in this file.
 import SwiftUI
 
 /// Backing view for "Liquid Glass" panels: a system `Material` (native blur, no custom
