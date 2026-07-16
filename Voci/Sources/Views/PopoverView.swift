@@ -5,6 +5,15 @@ import SwiftUI
 /// `appState.captureState` (`.idle/.recording/.parsing/.parsed/.saving/.done/.error`) instead of
 /// the JSX's local/controlled `state` prop. Sizes itself to a fixed 380pt width internally, so
 /// callers (the popover-hosting window/`NSPopover`, wired in Phase 3) just place this view.
+///
+/// Phase 3 (T024) reworks the confirm card for `ParsedTask` v2 (contracts/parsing-contract.md):
+/// each present attribute renders as a dismissible chip; uncertain (<0.7 confidence) chips render
+/// dashed with "?" and require an explicit tap to accept before they can be saved (constitution
+/// II); `.taskDone` conditions below that bar show a task PICKER, never auto-attach; up to 10
+/// tasks confirm as a compact set (still glance-and-dismiss — Enter saves all); a one-time sheet
+/// gates the first cloud parse. All actual resolution/materialization lives in
+/// `AppState.confirmSave()` (T025) — this file only renders `appState.confirmDrafts` and reports
+/// taps back through `AppState`'s chip-interaction methods.
 struct PopoverView: View {
     @Environment(AppState.self) private var appState: AppState
     @State private var mounted = false
@@ -23,8 +32,8 @@ struct PopoverView: View {
                     .transition(.opacity)
             }
 
-            if showParsedCard, let parsed = appState.parsed {
-                parsedCard(parsed)
+            if showParsedCard {
+                parsedCard()
                     .transition(.opacity.combined(with: .move(edge: .top)))
             }
 
@@ -67,7 +76,8 @@ struct PopoverView: View {
     }
 
     private var showParsedCard: Bool {
-        appState.captureState == .parsed || appState.captureState == .saving || appState.captureState == .done
+        (appState.captureState == .parsed || appState.captureState == .saving || appState.captureState == .done)
+            && !appState.confirmDrafts.isEmpty
     }
 
     private var showActions: Bool {
@@ -105,7 +115,8 @@ struct PopoverView: View {
             Text("Parsing with AI…").foregroundStyle(accent.solid)
                 .transition(.opacity)
         case .parsed:
-            Text("Looks right? Hit return.").foregroundStyle(VociColor.textMut)
+            Text(appState.confirmDrafts.count > 1 ? "Looks right? Hit return to save all." : "Looks right? Hit return.")
+                .foregroundStyle(VociColor.textMut)
                 .transition(.opacity)
         case .saving:
             Text("Saving…").foregroundStyle(accent.solid)
@@ -114,9 +125,12 @@ struct PopoverView: View {
             Text("Saved").foregroundStyle(VociColor.done)
                 .transition(.opacity)
         case .error:
+            // `lineLimit` widened from the v1 2 lines to 3 — the cloud-consent explanation
+            // (T024) runs longer than a typical capture-failure message; unrelated error copy
+            // still fits comfortably within 3 lines.
             Text(appState.captureErrorDetail ?? "Didn't catch that.")
                 .foregroundStyle(VociColor.destruct)
-                .lineLimit(2)
+                .lineLimit(3)
                 .transition(.opacity)
         }
     }
@@ -148,6 +162,9 @@ struct PopoverView: View {
                         }
                         .transition(.opacity)
                     case .error:
+                        // Matches the existing `pendingServerConsent` convention: this generic
+                        // "Try again" placeholder is shown for every `.error` state, including
+                        // consent prompts — unchanged from the pre-T024 behavior.
                         Text("Try again")
                             .font(.system(size: 13))
                             .foregroundStyle(VociColor.destruct)
@@ -182,39 +199,29 @@ struct PopoverView: View {
         .padding(.bottom, 4)
     }
 
-    /// While `.recording`, the live streamed transcript from `SpeechCapture`. Otherwise, a
-    /// "parsed-derived sentence" (there is no separate raw-transcript field kept past recording —
-    /// `ParsedTask` doesn't carry the original sentence — so the parsed title stands in for it,
-    /// shown muted, matching the JSX's non-recording transcript styling).
+    /// While `.recording`, the live streamed transcript from `SpeechCapture`. Otherwise, the
+    /// first confirmed task's title stands in for it (multi-task: "+N more"), muted, matching the
+    /// JSX's non-recording transcript styling.
     private var transcriptText: String {
         if appState.captureState == .recording {
             return appState.liveTranscript
         }
-        return appState.parsed?.title ?? appState.liveTranscript
+        guard let first = appState.confirmDrafts.first else { return appState.liveTranscript }
+        let extra = appState.confirmDrafts.count - 1
+        return extra > 0 ? "\(first.task.title)  +\(extra) more" : first.task.title
     }
 
-    // MARK: - Parsed card
+    // MARK: - Parsed card (T024 — chips v2)
 
-    private func parsedCard(_ parsed: ParsedTask) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ParseRow(label: "Task") {
-                Text(parsed.title)
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(VociColor.textPri)
-            }
-            ParseRow(label: "When") {
-                TimeBadge(parsed.when)
-            }
-            ParseRow(label: "Priority") {
-                PriorityBadge(parsed.priority)
-            }
-            ParseRow(label: "Context") {
-                HStack(spacing: 6) {
-                    Circle().fill(VociColor.textMut).frame(width: 5, height: 5)
-                    Text(contextLine(parsed))
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(VociColor.textSec)
+    /// One `VStack` holding every confirmed draft's chip set, separated by hairlines when there's
+    /// more than one (multi-task confirm: a compact reviewable set, still glance-and-dismiss).
+    private func parsedCard() -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            ForEach(Array(appState.confirmDrafts.enumerated()), id: \.element.id) { offset, draft in
+                if offset > 0 {
+                    Rectangle().fill(VociColor.border).frame(height: 0.5)
                 }
+                taskDraftCard(draft, showRemove: appState.confirmDrafts.count > 1)
             }
         }
         .padding(12)
@@ -227,14 +234,227 @@ struct PopoverView: View {
         .padding(.top, 6)
     }
 
-    /// "\(context) · \(duration)" per the JSX `ParseRow` Context row. `HeuristicNLParser` never
-    /// currently fills `context` (see `NLParser.swift`), so this degrades gracefully: duration
-    /// alone, or an em dash if both are missing, rather than a dangling "· ".
-    private func contextLine(_ parsed: ParsedTask) -> String {
-        var parts: [String] = []
-        if let context = parsed.context, !context.isEmpty { parts.append(context) }
-        if let minutes = parsed.durationMinutes, minutes > 0 { parts.append(formattedDuration(minutes)) }
-        return parts.isEmpty ? "—" : parts.joined(separator: " · ")
+    private func taskDraftCard(_ draft: ConfirmDraft, showRemove: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                Text(draft.task.title)
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(VociColor.textPri)
+                    .lineLimit(3)
+                Spacer(minLength: 4)
+                if showRemove {
+                    Button {
+                        appState.removeDraft(draft.id)
+                    } label: {
+                        VocIcon(.x, size: 9, color: VociColor.textMut)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            attributeChips(draft)
+            conditionRows(draft)
+        }
+    }
+
+    /// Deadline / estimate / priority / reminder / recurrence / kind — every PRESENT attribute
+    /// renders as a dismissible chip; absent ones render nothing (T024).
+    @ViewBuilder
+    private func attributeChips(_ draft: ConfirmDraft) -> some View {
+        FlowLayout(spacing: 6) {
+            if let deadline = draft.task.deadline, !draft.dismissed.contains(.deadline) {
+                Chip(
+                    label: deadline.value.formatted(.dateTime.month().day().hour().minute()),
+                    uncertain: deadline.isUncertain,
+                    accepted: draft.accepted.contains(.deadline),
+                    onAccept: { appState.acceptUncertainAttribute(.deadline, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.deadline, forDraft: draft.id) }
+                )
+            }
+            if let estimate = draft.task.estimateMinutes, !draft.dismissed.contains(.estimate) {
+                Chip(
+                    label: formattedDuration(estimate.value),
+                    uncertain: estimate.isUncertain,
+                    accepted: draft.accepted.contains(.estimate),
+                    onAccept: { appState.acceptUncertainAttribute(.estimate, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.estimate, forDraft: draft.id) }
+                )
+            }
+            if let priority = draft.task.priority, !draft.dismissed.contains(.priority) {
+                Chip(
+                    label: priorityLabel(priority.value),
+                    uncertain: priority.isUncertain,
+                    accepted: draft.accepted.contains(.priority),
+                    onAccept: { appState.acceptUncertainAttribute(.priority, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.priority, forDraft: draft.id) }
+                )
+            }
+            if let reminder = draft.task.reminderOverride, !draft.dismissed.contains(.reminder) {
+                Chip(
+                    label: reminderLabel(reminder.value),
+                    uncertain: reminder.isUncertain,
+                    accepted: draft.accepted.contains(.reminder),
+                    onAccept: { appState.acceptUncertainAttribute(.reminder, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.reminder, forDraft: draft.id) }
+                )
+            }
+            if let recurrence = draft.task.recurrence, !draft.dismissed.contains(.recurrence) {
+                Chip(
+                    label: recurrenceLabel(recurrence.value),
+                    uncertain: recurrence.isUncertain,
+                    accepted: draft.accepted.contains(.recurrence),
+                    onAccept: { appState.acceptUncertainAttribute(.recurrence, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.recurrence, forDraft: draft.id) }
+                )
+            }
+            // `.task` is the default/absent case — only a non-default kind (`.review`) is a
+            // "present" attribute worth a chip (T024: "kind" is in the dismissible-chip list).
+            if draft.task.kind != .task, !draft.dismissed.contains(.kind) {
+                Chip(
+                    label: kindLabel(draft.task.kind),
+                    uncertain: false,
+                    accepted: true,
+                    onAccept: nil,
+                    onDismiss: { appState.dismissAttribute(.kind, forDraft: draft.id) }
+                )
+            }
+        }
+    }
+
+    /// Every `ParsedCondition`, in order — `.taskDone` gets the constitution-II picker row;
+    /// `.afterDate`/`.external` get an ordinary (dismissible, uncertain-gated) chip.
+    @ViewBuilder
+    private func conditionRows(_ draft: ConfirmDraft) -> some View {
+        let visible = draft.task.conditions.indices.filter { !draft.dismissedConditions.contains($0) }
+        if !visible.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(visible, id: \.self) { index in
+                    conditionRow(draft.task.conditions[index], index: index, draft: draft)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func conditionRow(_ condition: ParsedCondition, index: Int, draft: ConfirmDraft) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(VociColor.textMut).frame(width: 5, height: 5)
+            switch condition {
+            case .taskDone(let titleQuery, let confidence):
+                taskDoneRow(titleQuery: titleQuery, confidence: confidence, index: index, draft: draft)
+            case .afterDate(let date, let confidence):
+                Chip(
+                    label: "After \(date.formatted(.dateTime.month().day()))",
+                    uncertain: confidence < 0.7,
+                    accepted: draft.acceptedConditions.contains(index),
+                    onAccept: { appState.acceptUncertainCondition(at: index, forDraft: draft.id) },
+                    onDismiss: { appState.dismissCondition(at: index, forDraft: draft.id) }
+                )
+            case .external(let description, let confidence):
+                Chip(
+                    label: "Waiting: \(description)",
+                    uncertain: confidence < 0.7,
+                    accepted: draft.acceptedConditions.contains(index),
+                    onAccept: { appState.acceptUncertainCondition(at: index, forDraft: draft.id) },
+                    onDismiss: { appState.dismissCondition(at: index, forDraft: draft.id) }
+                )
+            }
+        }
+    }
+
+    /// `.taskDone`: if it was already auto-resolved (parser confidence >= 0.7 AND a confident
+    /// fuzzy title match — `AppState.preResolveConditions`), render a normal solid chip naming
+    /// the matched task. Otherwise this is exactly the constitution-II case — < 0.7, or no
+    /// confident match — and it MUST NOT auto-attach: show the picker instead.
+    @ViewBuilder
+    private func taskDoneRow(titleQuery: String, confidence: Double, index: Int, draft: ConfirmDraft) -> some View {
+        if let resolvedID = draft.resolvedTaskDone[index], confidence >= 0.7 {
+            let title = appState.openTasks.first { $0.id == resolvedID }?.title ?? titleQuery
+            Chip(
+                label: "After: \(title)",
+                uncertain: false,
+                accepted: true,
+                onAccept: nil,
+                onDismiss: { appState.dismissCondition(at: index, forDraft: draft.id) }
+            )
+        } else {
+            dependencyPicker(titleQuery: titleQuery, index: index, draft: draft)
+        }
+    }
+
+    /// The task PICKER constitution II mandates for a `.taskDone` below 0.7 confidence — a native
+    /// `Menu` (not the custom `Chip`, which bundles its own dismiss button as a `Menu` label
+    /// child; nesting a `Button` inside a `Menu`'s label doesn't reliably get its own tap target,
+    /// so the dismiss "x" here is a sibling control instead). Capped defensively at 100 open
+    /// titles — same bound the cloud contract uses — so this stays O(1) to render even at
+    /// hundreds of tasks (self-review "performance"); `openTasks` only ever lists the user's own
+    /// tasks (self-review "security" — no cross-user/global data).
+    private func dependencyPicker(titleQuery: String, index: Int, draft: ConfirmDraft) -> some View {
+        HStack(spacing: 4) {
+            Menu {
+                Button("Skip — no dependency") {
+                    appState.resolveTaskDone(at: index, to: nil, forDraft: draft.id)
+                }
+                if !appState.openTasks.isEmpty {
+                    Divider()
+                    ForEach(appState.openTasks.prefix(100)) { task in
+                        Button(task.title) {
+                            appState.resolveTaskDone(at: index, to: task.id, forDraft: draft.id)
+                        }
+                    }
+                }
+            } label: {
+                HStack(spacing: 5) {
+                    Text("?").font(.system(size: 10, weight: .bold))
+                    Text("After: \u{201C}\(titleQuery)\u{201D}")
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(VociColor.textSec)
+                .padding(.horizontal, 9)
+                .frame(height: 22)
+                .overlay(
+                    Capsule().strokeBorder(VociColor.textMut, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+                )
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+
+            Button {
+                appState.dismissCondition(at: index, forDraft: draft.id)
+            } label: {
+                VocIcon(.x, size: 9, color: VociColor.textMut)
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - Chip label formatting
+
+    private func priorityLabel(_ raw: Int) -> String {
+        switch raw {
+        case 1: return "High priority"
+        case 2: return "Medium priority"
+        case 3: return "Low priority"
+        default: return "Priority \(raw)" // engine allows up to 4 (data-model.md); no crash on the edge value
+        }
+    }
+
+    private func reminderLabel(_ policy: ReminderPolicy) -> String {
+        policy.repeatEvery != nil ? "Custom reminders" : "\(policy.offsets.count) reminder\(policy.offsets.count == 1 ? "" : "s")"
+    }
+
+    private func recurrenceLabel(_ recurrence: Recurrence) -> String {
+        switch recurrence {
+        case .daily: return "Daily"
+        case .weekly: return "Weekly"
+        case .monthly: return "Monthly"
+        case .every(let days): return "Every \(days)d"
+        }
+    }
+
+    private func kindLabel(_ kind: TaskKind) -> String {
+        kind == .review ? "Review" : kind.rawValue.capitalized
     }
 
     /// Mirrors `TaskItem.durationLabel`'s formatting ("45 min" / "1 hr" / "1h 30m"); duplicated
@@ -278,7 +498,7 @@ struct PopoverView: View {
                         Spinner(color: accent.solid, size: 14)
                     } else {
                         HStack(spacing: 8) {
-                            Text("Save task")
+                            Text(saveLabel)
                             Text("↵").opacity(0.85).font(.system(size: 12))
                         }
                         .font(.system(size: 13, weight: .medium))
@@ -305,12 +525,20 @@ struct PopoverView: View {
         .padding(.top, 10)
     }
 
-    // MARK: - Error retry
+    /// "Save task" / "Save 3 tasks" — multi-task confirm still saves the whole batch in one Enter
+    /// (glance-and-dismiss, constitution V).
+    private var saveLabel: String {
+        appState.confirmDrafts.count > 1 ? "Save \(appState.confirmDrafts.count) tasks" : "Save task"
+    }
+
+    // MARK: - Error retry / consent rows
 
     @ViewBuilder
     private func errorActionsRow(accent: Accent) -> some View {
         if appState.pendingServerConsent {
             dictationConsentActionsRow(accent: accent)
+        } else if appState.pendingCloudConsent {
+            cloudConsentActionsRow(accent: accent)
         } else {
             HStack(spacing: 8) {
                 Button {
@@ -399,6 +627,54 @@ struct PopoverView: View {
         }
         .padding(.top, 10)
     }
+
+    /// Shown instead of Dismiss/Try again when `appState.pendingCloudConsent` — the ONE-TIME
+    /// cloud-parse privacy opt-in (T024): the explanatory copy itself lives in
+    /// `AppState.captureErrorDetail` (surfaced above by `leftHint`), making clear that only TEXT
+    /// (never audio) would leave the device. Default action (Enter) is the privacy-preserving
+    /// decline, matching constitution I's on-device-first bias when the user doesn't read closely.
+    private func cloudConsentActionsRow(accent: Accent) -> some View {
+        VStack(spacing: 8) {
+            Button {
+                appState.resolveCloudConsent(allow: false)
+            } label: {
+                Text("Keep parsing on-device only")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(accent.solid)
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .keyboardShortcut(.defaultAction)
+
+            Button {
+                appState.resolveCloudConsent(allow: true)
+            } label: {
+                Text("Allow cloud parsing (sends this text online)")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(VociColor.textSec)
+                    .multilineTextAlignment(.center)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+            }
+            .buttonStyle(.plain)
+            .background(Color.white.opacity(0.06))
+            .overlay(
+                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    .stroke(VociColor.border, lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        }
+        .padding(.top, 10)
+    }
 }
 
 // MARK: - Private subviews
@@ -427,26 +703,88 @@ private struct Kbd: View {
     }
 }
 
-/// "Task/When/Priority/Context" label+value row, ported from the JSX `ParseRow`
-/// (`gridTemplateColumns: '64px 1fr'`).
-private struct ParseRow<Content: View>: View {
+/// A dismissible confirm-card attribute/condition chip (T024). Solid border for confident/present
+/// values; dashed border + a leading "?" for uncertain (<0.7) values pending an explicit tap to
+/// accept — tapping the body of an uncertain, not-yet-accepted chip accepts it (constitution II:
+/// never silently committed). The trailing "x" always dismisses (removes) the attribute from what
+/// gets saved — a one-way action; there's no undo affordance within a confirm session (the chip
+/// simply stops rendering once its backing `AppState` state says "dismissed"/"resolved-away").
+private struct Chip: View {
     let label: String
-    let content: Content
+    var uncertain: Bool = false
+    var accepted: Bool = false
+    var onAccept: (() -> Void)?
+    var onDismiss: () -> Void
 
-    init(label: String, @ViewBuilder content: () -> Content) {
-        self.label = label
-        self.content = content()
-    }
+    private var showsDashed: Bool { uncertain && !accepted }
 
     var body: some View {
-        HStack(alignment: .center, spacing: 10) {
-            Text(label.uppercased())
-                .font(.system(size: 10.5, weight: .medium))
-                .tracking(0.735) // 0.07em at 10.5pt
-                .foregroundStyle(VociColor.textMut)
-                .frame(width: 64, alignment: .leading)
-            content
-            Spacer(minLength: 0)
+        HStack(spacing: 5) {
+            if showsDashed {
+                Text("?").font(.system(size: 10, weight: .bold))
+            }
+            Text(label)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            Button(action: onDismiss) {
+                VocIcon(.x, size: 8, color: VociColor.textMut)
+            }
+            .buttonStyle(.plain)
+        }
+        .font(.system(size: 11.5, weight: .medium))
+        .foregroundStyle(showsDashed ? VociColor.textSec : VociColor.textPri)
+        .padding(.horizontal, 9)
+        .frame(height: 22)
+        .background(showsDashed ? Color.clear : Color.white.opacity(0.06))
+        .overlay(
+            Capsule().strokeBorder(
+                showsDashed ? VociColor.textMut : VociColor.border,
+                style: StrokeStyle(lineWidth: 0.5, dash: showsDashed ? [3, 2] : [])
+            )
+        )
+        .clipShape(Capsule())
+        .contentShape(Capsule())
+        .onTapGesture {
+            if showsDashed { onAccept?() }
+        }
+    }
+}
+
+/// Left-to-right wrapping row for the confirm card's chip set — a fixed `HStack` would clip or
+/// squeeze chips once several attributes are present on the fixed 380pt-wide popover. `Layout`
+/// has been available since macOS 13, well within this project's macOS 14 floor.
+private struct FlowLayout: Layout {
+    var spacing: CGFloat = 6
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        let maxWidth = proposal.width ?? .infinity
+        var x: CGFloat = 0, y: CGFloat = 0, rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > maxWidth, x > 0 {
+                x = 0
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
+        }
+        let width = maxWidth.isFinite ? maxWidth : x
+        return CGSize(width: width, height: y + rowHeight)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        var x = bounds.minX, y = bounds.minY, rowHeight: CGFloat = 0
+        for subview in subviews {
+            let size = subview.sizeThatFits(.unspecified)
+            if x + size.width > bounds.maxX, x > bounds.minX {
+                x = bounds.minX
+                y += rowHeight + spacing
+                rowHeight = 0
+            }
+            subview.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(size))
+            x += size.width + spacing
+            rowHeight = max(rowHeight, size.height)
         }
     }
 }
@@ -506,14 +844,25 @@ private struct BlinkingCaret: View {
 #Preview("Parsed") {
     let state = AppState()
     state.captureState = .parsed
-    state.parsed = ParsedTask(
-        title: "Customer call — Acme onboarding feedback",
-        details: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
-        when: "Tomorrow · 2:00 PM",
-        priority: .high,
-        durationMinutes: 30,
-        context: "Created in Cursor"
-    )
+    state.confirmDrafts = [
+        // Field order follows the contract's declared order (Swift's synthesized memberwise init
+        // requires exact declaration order at the call site) — every optional passed explicitly
+        // since the contract text doesn't show `= nil` defaults on the struct itself.
+        ConfirmDraft(task: ParsedTask(
+            title: "Customer call — Acme onboarding feedback",
+            notes: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority",
+            deadline: ParsedValue(value: Date().addingTimeInterval(86_400), confidence: 0.92),
+            estimateMinutes: ParsedValue(value: 30, confidence: 0.6),
+            priority: ParsedValue(value: 1, confidence: 0.95),
+            reminderOverride: nil,
+            recurrence: nil,
+            kind: .task,
+            conditions: [.taskDone(titleQuery: "finish the onboarding deck", confidence: 0.4)],
+            subtasks: [],
+            followUpReview: false,
+            sourceTranscript: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority"
+        ))
+    ]
     return PopoverView()
         .environment(state)
         .padding(40)

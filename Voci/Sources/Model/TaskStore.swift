@@ -229,6 +229,17 @@ final class TaskStore {
         return VociCore.eligibilityDiff(before: beforeSnapshot, after: afterSnapshot, now: now)
     }
 
+    /// Constitution V / FR-044: appends one `ParseCorrection` row for a confirm-card chip edit
+    /// (`AppState`'s chip-interaction methods, T024) — the only call site able to reach
+    /// `ParseCorrectionLog.record` since it needs this store's private `ModelContext`
+    /// (`ParseCorrection.swift`/T026 deliberately exposes no context of its own — see that file's
+    /// header comment). Saves immediately: unlike `addBatch`, a chip edit isn't naturally batched
+    /// with a larger transaction — it happens well before the user hits Save.
+    func recordCorrection(attribute: String, parsed: String, corrected: String, transcript: String) {
+        ParseCorrectionLog.record(attribute: attribute, parsed: parsed, corrected: corrected, transcript: transcript, in: context)
+        save()
+    }
+
     /// Computes "what's next" straight from the persisted snapshot via `VociCore.nextTask`, for
     /// any caller that only has a `TaskStore` (no full `AppState`) — e.g. a future background
     /// refresh of the menu-bar label.

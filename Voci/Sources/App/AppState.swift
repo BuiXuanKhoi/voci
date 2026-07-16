@@ -1,6 +1,7 @@
 // Sources/App/AppState.swift — central @Observable app state (frozen API, spec §4)
 import AppKit
 import Foundation
+import Network
 import Observation
 import VociCore
 
@@ -40,6 +41,41 @@ enum SpeechEngineChoice: String, Sendable, Equatable, CaseIterable, Identifiable
     }
 }
 
+/// One attribute a confirm-card chip governs (T024). Deliberately narrower than `ParsedTask`'s
+/// full field list — `title`/`notes`/`subtasks` have no chip (title is the always-shown headline,
+/// notes/subtasks aren't part of the v2 chip set per the contract's "Confirm + materialize"
+/// section) and `conditions` are tracked separately (`dismissedConditions`/`acceptedConditions`/
+/// `resolvedTaskDone`, keyed by index, since a task can carry several).
+enum ChipKind: String, CaseIterable, Hashable, Sendable {
+    case deadline, estimate, priority, reminder, recurrence, kind
+}
+
+/// One confirmed task's editable confirm-card state, layered OVER a router-parsed `ParsedTask`
+/// (the sibling-owned contract type, never mutated in place) so every chip edit is reversible
+/// before Save and `ParsedTask` itself stays exactly what the parser/router produced. This is
+/// UI/materialization-only state; `AppState.confirmSave()` reads it to decide what actually gets
+/// persisted (see `resolvedValue`/`resolvedConditions`).
+struct ConfirmDraft: Identifiable, Equatable {
+    let id = UUID()
+    var task: ParsedTask
+    /// Scalar attribute chips the user explicitly removed — dismissed attributes are never saved,
+    /// regardless of confidence (constitution II: dismiss always wins).
+    var dismissed: Set<ChipKind> = []
+    /// Scalar attribute chips that were uncertain (<0.7) and the user explicitly tapped to accept
+    /// — required before an uncertain value is ever committed (constitution II).
+    var accepted: Set<ChipKind> = []
+    /// `task.conditions` indices the user removed (dismissed chip, or "Skip" in the taskDone picker).
+    var dismissedConditions: Set<Int> = []
+    /// `task.conditions` indices for non-taskDone conditions (afterDate/external) that were
+    /// uncertain (<0.7) and explicitly accepted — same gate as `accepted` above, per-condition.
+    var acceptedConditions: Set<Int> = []
+    /// `task.conditions` indices of `.taskDone` cases resolved to a REAL existing task id — either
+    /// a confident (>=0.7 parser-confidence) fuzzy title match, or the user's explicit picker
+    /// choice. Never populated by a guess below that bar (constitution II) — an unresolved
+    /// `.taskDone` is simply absent here and gets dropped at save, not committed.
+    var resolvedTaskDone: [Int: UUID] = [:]
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -59,7 +95,10 @@ final class AppState {
     }
     var captureState: CaptureState
     var liveTranscript: String
-    var parsed: ParsedTask?
+    /// Up to 10 (`TaskStore.maxBatchSize`) confirm-card drafts from the last parse — replaces the
+    /// v1 single `ParsedTask?` now that one utterance can yield a compound/multi-task result
+    /// (contract "Confirm + materialize": multi-task confirm, ≤10). Empty = nothing to confirm.
+    var confirmDrafts: [ConfirmDraft] = []
     private(set) var captureErrorDetail: String?
     /// User consented to Apple server-based recognition (audio leaves the Mac). Persisted.
     private(set) var allowServerRecognition: Bool
@@ -73,6 +112,17 @@ final class AppState {
     /// True when capture failed because on-device recognition is unavailable (Dictation off) and
     /// the user hasn't consented to server recognition yet — drives the popover's hint + consent UI.
     private(set) var pendingServerConsent = false
+    /// One-time cloud-parse privacy opt-in (T024/contract R5): `nil` = never asked. Persisted so
+    /// the decision survives relaunch; a decline is permanent (never asked again, never routes to
+    /// Cloud) until the user changes it in Settings. Read by `DefaultCloudParseGate.isOptedIn()`
+    /// below — the REAL seam with `IntentRouter` is that injected `CloudParseGate` protocol
+    /// (`Sources/Parsing/IntentParsing.swift`, landed), not a convention this file has to guess at.
+    private(set) var cloudParseConsent: Bool?
+    /// Drives the popover's one-time cloud-parse consent row (mirrors `pendingServerConsent`'s
+    /// reuse of the `.error` capture state for a non-error consent prompt).
+    private(set) var pendingCloudConsent = false
+    /// The transcript awaiting a decision in `pendingCloudConsent`, resumed by `resolveCloudConsent`.
+    private var pendingParseTranscript: String?
 
     // Focus session
     var focusActive: Bool
@@ -98,7 +148,20 @@ final class AppState {
 
     // MARK: - Collaborators (implementation detail, not part of the frozen §4 surface)
 
-    private let parser: NLParser
+    /// Replaces the v1 `NLParser` direct call (contract "Confirm + materialize" / T025: "Replace
+    /// any v1 direct-HeuristicNLParser call with the router"). `IntentRouter` is owned by the
+    /// T019 agent (`Sources/Parsing/IntentParsing.swift`, landed) — constructed with its own
+    /// defaults for `foundationModel`/`heuristic`, but wired here with a real `cloudGate:`
+    /// (`DefaultCloudParseGate`, defined at the bottom of this file) so the one-time consent
+    /// decision this file owns (`cloudParseConsent`/`resolveCloudConsent`) actually reaches the
+    /// router. `cloud:` is left at its own default (`nil`) — a working `CloudParser` needs a real
+    /// `ParseCredentialProvider` (StoreKit paid JWS + `DeviceCheckProvider.swift`'s free-tier
+    /// token composed together), which is explicitly "NOT built in `CloudParser.swift`" and isn't
+    /// part of this task's scope (T051 StoreKit is Phase 8, not yet landed) — Cloud is
+    /// consequently inert today (FM -> Heuristic only) regardless of consent; the gate is wired
+    /// correctly for the moment that composite exists. See this task's final report for the
+    /// backlog note.
+    private let router: IntentRouter
     private let store: TaskStore?
     /// Injected clock so `activeTask` stays pure/testable instead of reading the wall clock
     /// directly; defaults to the live clock so production behavior is unaffected.
@@ -128,6 +191,9 @@ final class AppState {
     private static let allowServerRecognitionKey = "voci.allowServerRecognition"
     private static let recognitionLocaleKey = "voci.recognitionLocale"
     private static let speechEngineKey = "voci.speechEngine"
+    /// One-time cloud-parse consent. `fileprivate` (not `private`) so `DefaultCloudParseGate`
+    /// (bottom of this file) can read the same key from `isOptedIn()`.
+    fileprivate static let cloudParseConsentKey = "voci.cloudParseConsent"
 
     init(
         store: TaskStore? = nil,
@@ -138,7 +204,7 @@ final class AppState {
         ambient: AmbientMode = .none,
         customImageURL: URL? = nil,
         voiceFeedback: Bool = false,
-        parser: NLParser = HeuristicNLParser(),
+        router: IntentRouter = IntentRouter(cloudGate: DefaultCloudParseGate()),
         clock: @escaping () -> Date = Date.init
     ) {
         self.store = store
@@ -159,15 +225,16 @@ final class AppState {
         self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
         self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .appleOnDevice
+        self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
-        self.parsed = nil
+        self.confirmDrafts = []
         self.focusActive = false
         self.focusPaused = false
         self.focusSecondsLeft = 25 * 60
         self.focusIndex = 0
-        self.parser = parser
+        self.router = router
         self.clock = clock
         speech.setLocale(Locale(identifier: self.recognitionLocaleID))
     }
@@ -267,9 +334,11 @@ final class AppState {
     func startCapture() {
         captureState = .recording
         liveTranscript = ""
-        parsed = nil
+        confirmDrafts = []
         captureErrorDetail = nil
         pendingServerConsent = false
+        pendingCloudConsent = false
+        pendingParseTranscript = nil
         captureSession += 1
         let session = captureSession
         let engine = selectedEngine
@@ -333,7 +402,9 @@ final class AppState {
         captureSession += 1 // invalidate any authorization-pending start
         captureState = .idle
         liveTranscript = ""
-        parsed = nil
+        confirmDrafts = []
+        pendingCloudConsent = false
+        pendingParseTranscript = nil
         runningEngine?.stop()
         runningEngine = nil
     }
@@ -408,37 +479,374 @@ final class AppState {
     /// `.recording -> .parsing -> .parsed`: Phase-2 `SpeechCapture` calls this once the
     /// on-device transcript settles. A pure addition — `startCapture`/`cancelCapture`/
     /// `confirmSave` keep their exact frozen signatures.
+    ///
+    /// T025: routes the parse itself through `IntentRouter` (replaces the v1 direct
+    /// `HeuristicNLParser` call) — gated by the one-time cloud-parse consent sheet (T024) the
+    /// FIRST time this ever runs, per contract R5 ("Cloud ... IF: user opted in").
     func finishRecording(transcript: String) {
         liveTranscript = transcript
-        captureState = .parsing
-        parsed = parser.parse(transcript)
-        captureState = .parsed
+        guard cloudParseConsent != nil else {
+            // Never asked: pause for the consent sheet instead of parsing yet. Reuses the same
+            // `.error`-state-as-consent-prompt pattern as `pendingServerConsent` above (see
+            // `PopoverView.errorActionsRow`) rather than adding a new `CaptureState` case (frozen
+            // §4 enum).
+            pendingParseTranscript = transcript
+            pendingCloudConsent = true
+            captureErrorDetail = "Voci can parse on-device for free, or use a cloud AI for trickier phrasing. Cloud parsing sends only the TEXT of what you said (never audio) to our server — see contracts/parse-proxy.md."
+            captureState = .error
+            return
+        }
+        runParse(transcript: transcript)
     }
 
+    /// User answered the one-time cloud-parse consent sheet (`PopoverView`'s consent row).
+    /// Persists the decision (decline ⇒ never asked again, never routes to Cloud — see
+    /// `cloudParseConsent`'s doc comment for the seam note with `IntentRouter`) and resumes the
+    /// transcript that was waiting on it, if any (a cancel in the meantime already cleared it).
+    func resolveCloudConsent(allow: Bool) {
+        cloudParseConsent = allow
+        UserDefaults.standard.set(allow, forKey: Self.cloudParseConsentKey)
+        pendingCloudConsent = false
+        guard let transcript = pendingParseTranscript else { return }
+        pendingParseTranscript = nil
+        runParse(transcript: transcript)
+    }
+
+    /// The actual `IntentRouter.parse` call, split out of `finishRecording` so the one-time
+    /// consent gate above can defer it. Builds up to `TaskStore.maxBatchSize` `ConfirmDraft`s and
+    /// pre-resolves the "easy" `.taskDone` conditions (parser-confidence >= 0.7 AND a confident
+    /// fuzzy title match) so the confirm card doesn't show a picker for those — anything left
+    /// unresolved is exactly the < 0.7 / no-match case constitution II requires a picker for
+    /// (`PopoverView`'s `dependencyPicker`).
+    private func runParse(transcript: String) {
+        captureState = .parsing
+        captureSession += 1
+        let session = captureSession
+        let now = clock()
+        let titles = openTasks.map(\.title)
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let results = await self.router.parse(transcript, now: now, openTaskTitles: titles)
+            // Stale? The hold ended (Esc/cancel/a second capture) while the parse was in flight —
+            // mirrors `startCapture`'s authorization-pending guard.
+            guard self.captureSession == session, self.captureState == .parsing else { return }
+            // Defense-in-depth cap (self-review "client-exploit"): the contract promises the
+            // router already enforces the 10-task cap; this survives a malformed/hostile result
+            // regardless.
+            let capped = Array(results.prefix(TaskStore.maxBatchSize))
+            self.confirmDrafts = capped.map { self.preResolveConditions(ConfirmDraft(task: $0)) }
+            if self.confirmDrafts.isEmpty {
+                self.captureErrorDetail = "Didn't catch that."
+                self.captureState = .error
+            } else {
+                self.captureState = .parsed
+            }
+        }
+    }
+
+    /// Auto-resolves `.taskDone` conditions the router was itself confident about (>=0.7) against
+    /// a confident fuzzy title match in `openTasks` — never a guess below either bar (constitution
+    /// II); anything short of both stays unresolved for `PopoverView`'s picker.
+    private func preResolveConditions(_ draft: ConfirmDraft) -> ConfirmDraft {
+        var draft = draft
+        let candidates = openTasks
+        for (index, condition) in draft.task.conditions.enumerated() {
+            guard case .taskDone(let titleQuery, let confidence) = condition, confidence >= 0.7 else { continue }
+            if let match = Self.bestFuzzyMatch(for: titleQuery, in: candidates), match.score >= 0.7 {
+                draft.resolvedTaskDone[index] = match.id
+            }
+        }
+        return draft
+    }
+
+    private struct FuzzyMatch { let id: UUID; let score: Double }
+
+    /// Token-overlap similarity (case/diacritic-insensitive, so Vietnamese input matches
+    /// sensibly): scores each open task's title against `query` as a Jaccard index over
+    /// whitespace tokens, returning the single best match. O(n) over `openTasks` per condition —
+    /// at most ~10 conditions in a confirm batch, so this stays cheap even at hundreds of tasks
+    /// (self-review "performance"; no picker-side O(n²) — the picker itself just lists titles).
+    /// // UNVERIFIED: a deliberately simple placeholder heuristic — swap for a real string-
+    /// distance/fuzzy library later if parsing quality demands it (backlog candidate).
+    private static func bestFuzzyMatch(for query: String, in openTasks: [TaskItem]) -> FuzzyMatch? {
+        let queryTokens = tokenize(query)
+        guard !queryTokens.isEmpty else { return nil }
+        var best: FuzzyMatch?
+        for task in openTasks {
+            let titleTokens = tokenize(task.title)
+            guard !titleTokens.isEmpty else { continue }
+            let shared = queryTokens.intersection(titleTokens).count
+            let union = queryTokens.union(titleTokens).count
+            guard union > 0 else { continue }
+            let score = Double(shared) / Double(union)
+            if score > (best?.score ?? 0) {
+                best = FuzzyMatch(id: task.id, score: score)
+            }
+        }
+        return best
+    }
+
+    private static func tokenize(_ text: String) -> Set<String> {
+        Set(
+            text.lowercased()
+                .folding(options: .diacriticInsensitive, locale: nil)
+                .components(separatedBy: .whitespacesAndNewlines)
+                .filter { !$0.isEmpty }
+        )
+    }
+
+    // MARK: - Confirm-card chip interactions (T024)
+    //
+    // Every mutation here edits a `ConfirmDraft` overlay, never the underlying `ParsedTask` (the
+    // sibling-owned contract type) — see `ConfirmDraft`'s doc comment. Each is a one-way action
+    // (dismissed/resolved chips disappear from the card, matching `PopoverView`'s rendering —
+    // there is no re-surface-to-undo affordance within one confirm session; recording again
+    // starts fresh). Every edit that actually changes what gets saved logs a `ParseCorrection`
+    // (constitution V / FR-044).
+
+    /// Removes a scalar attribute chip (deadline/estimate/priority/reminder/recurrence/kind) —
+    /// it will not be saved regardless of confidence.
+    func dismissAttribute(_ kind: ChipKind, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].dismissed.insert(kind)
+        logCorrection(kind: kind, task: confirmDrafts[index].task, correctedValue: "dismissed")
+    }
+
+    /// Explicit tap-to-accept for an uncertain (<0.7) scalar attribute chip — required before it
+    /// is ever committed (constitution II).
+    func acceptUncertainAttribute(_ kind: ChipKind, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].accepted.insert(kind)
+        logCorrection(kind: kind, task: confirmDrafts[index].task, correctedValue: "accepted")
+    }
+
+    /// Removes a condition (any kind) at `conditionIndex` — dropped rather than guessed
+    /// (constitution II); also how the taskDone picker's "Skip" resolves.
+    func dismissCondition(at conditionIndex: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].dismissedConditions.insert(conditionIndex)
+        confirmDrafts[index].resolvedTaskDone[conditionIndex] = nil
+        logCorrection(
+            kind: nil, attribute: "condition[\(conditionIndex)]",
+            task: confirmDrafts[index].task, correctedValue: "dropped"
+        )
+    }
+
+    /// Explicit tap-to-accept for an uncertain (<0.7) `.afterDate`/`.external` condition chip.
+    /// `.taskDone` never uses this path — it always resolves via `resolveTaskDone` (picker or
+    /// confident fuzzy match), never a bare accept, per constitution II's explicit picker
+    /// requirement for dependencies.
+    func acceptUncertainCondition(at conditionIndex: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].acceptedConditions.insert(conditionIndex)
+        logCorrection(
+            kind: nil, attribute: "condition[\(conditionIndex)]",
+            task: confirmDrafts[index].task, correctedValue: "accepted"
+        )
+    }
+
+    /// The dependency picker's resolution (constitution II: NEVER auto-attach below 0.7 — the
+    /// user always makes this choice explicitly). `taskID == nil` drops the condition (picker's
+    /// "Skip — no dependency").
+    func resolveTaskDone(at conditionIndex: Int, to taskID: UUID?, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        if let taskID {
+            confirmDrafts[index].resolvedTaskDone[conditionIndex] = taskID
+            confirmDrafts[index].dismissedConditions.remove(conditionIndex)
+        } else {
+            confirmDrafts[index].dismissedConditions.insert(conditionIndex)
+        }
+        logCorrection(
+            kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
+            task: confirmDrafts[index].task, correctedValue: taskID?.uuidString ?? "dropped"
+        )
+    }
+
+    /// Multi-task confirm (T024): removes one task from the batch entirely (the compact
+    /// reviewable set's per-task "x") without discarding the rest.
+    func removeDraft(_ draftID: ConfirmDraft.ID) {
+        confirmDrafts.removeAll { $0.id == draftID }
+    }
+
+    /// Constitution V / FR-044: every chip edit is logged locally (never egressed) as the signal
+    /// for improving parsing over time. Goes through `TaskStore.recordCorrection` (added
+    /// alongside this task, since `ParseCorrectionLog.record` — the real T026 API,
+    /// `Voci/Sources/Model/ParseCorrection.swift` — needs a `ModelContext` this file has no other
+    /// way to reach). No-op (skipped, not crashed) in the no-store fallback used by
+    /// previews/tests — logging is a best-effort local record, never load-bearing for save.
+    private func logCorrection(kind: ChipKind?, attribute: String? = nil, task: ParsedTask, correctedValue: String) {
+        let attributeName = attribute ?? kind?.rawValue ?? "unknown"
+        store?.recordCorrection(
+            attribute: attributeName,
+            parsed: parsedValueDescription(kind: kind, task: task),
+            corrected: correctedValue,
+            transcript: task.sourceTranscript
+        )
+    }
+
+    private func parsedValueDescription(kind: ChipKind?, task: ParsedTask) -> String {
+        switch kind {
+        case .deadline: return task.deadline.map { "\($0.value)" } ?? ""
+        case .estimate: return task.estimateMinutes.map { "\($0.value)" } ?? ""
+        case .priority: return task.priority.map { "\($0.value)" } ?? ""
+        case .reminder: return task.reminderOverride.map { "\($0.value)" } ?? ""
+        case .recurrence: return task.recurrence.map { "\($0.value)" } ?? ""
+        case .kind: return task.kind.rawValue
+        case nil: return "" // condition corrections describe themselves via `attribute`
+        }
+    }
+
+    /// T025: materializes every confirmed draft through `TaskStore` validation (cycle rejection
+    /// surfaces its human-readable message rather than crashing; the 10-task cap is enforced by
+    /// `addBatch` itself). Preserves glance-and-dismiss + Enter-to-save (`PopoverView`'s
+    /// `.keyboardShortcut(.defaultAction)` on the Save button, unchanged) and the frozen
+    /// zero-argument signature.
     func confirmSave() {
-        guard let parsed else { return }
+        guard !confirmDrafts.isEmpty else { return }
         captureState = .saving
-        let item = TaskItem(
-            title: parsed.title,
-            details: parsed.details,
-            priority: parsed.priority,
+        let now = clock()
+
+        var itemsToSave: [TaskItem] = []
+        for draft in confirmDrafts {
+            let item = materialize(draft, now: now)
+            itemsToSave.append(item)
+            if draft.task.followUpReview {
+                itemsToSave.append(materializeFollowUpReview(for: item, now: now))
+            }
+        }
+
+        guard let store else {
+            // No-store fallback (previews/tests without a TaskStore) — mirrors `addTask`'s own
+            // no-store branch: in-memory only, no validation (there is no store to validate against).
+            tasks.insert(contentsOf: itemsToSave.reversed(), at: 0)
+            finishSaveUI(titles: itemsToSave.map(\.title))
+            return
+        }
+
+        do {
+            try store.addBatch(itemsToSave)
+            // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
+            tasks = store.fetchAll()
+            finishSaveUI(titles: itemsToSave.map(\.title))
+        } catch {
+            // Cycle rejection / batch-too-large / any other `TaskStoreError` surfaces its
+            // human-readable message instead of crashing; `confirmDrafts` is left intact so the
+            // user can adjust (e.g. drop a condition) and retry rather than losing the capture.
+            captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            captureState = .error
+        }
+    }
+
+    /// One draft -> one `TaskItem`, resolving every `ParsedValue`/`ParsedCondition` per the
+    /// contract's "Confirm + materialize" rules. `sourceTranscript` is ALWAYS persisted (closes
+    /// the backlog item where `confirmSave` used to hardcode `deadline: nil` for voice tasks —
+    /// deadlines, like every other attribute, now come resolved from `ParsedTask`).
+    private func materialize(_ draft: ConfirmDraft, now: Date) -> TaskItem {
+        let task = draft.task
+        let deadline = resolvedValue(task.deadline, kind: .deadline, draft: draft)
+        let estimate = resolvedValue(task.estimateMinutes, kind: .estimate, draft: draft)
+        let priorityInt = resolvedValue(task.priority, kind: .priority, draft: draft)
+        let reminder = resolvedValue(task.reminderOverride, kind: .reminder, draft: draft)
+        let recurrence = resolvedValue(task.recurrence, kind: .recurrence, draft: draft)
+        let kind = draft.dismissed.contains(.kind) ? .task : task.kind
+
+        return TaskItem(
+            title: task.title,
+            // `details` is the voice read-back copy (`AppState.speakDetails`'s frozen-field
+            // meaning, distinct from `notes` — see TaskItem.swift) — prefer explicit notes, else
+            // fall back to the verbatim transcript so read-back is never empty.
+            details: task.notes ?? task.sourceTranscript,
+            priority: Self.uiPriority(from: priorityInt),
+            status: .todo,
+            deadline: deadline,
+            conditions: resolvedConditions(draft),
+            createdAt: now,
+            when: .now,
+            durationMinutes: estimate,
+            frog: false,
+            notes: task.notes,
+            sourceTranscript: task.sourceTranscript,
+            kind: kind,
+            recurrence: recurrence,
+            reminderOverride: reminder
+        )
+    }
+
+    /// A `ParsedValue` only materializes if PRESENT, not dismissed, and either confident (>=0.7)
+    /// or explicitly accepted (constitution II — never silently commit an uncertain attribute).
+    private func resolvedValue<T>(_ value: ParsedValue<T>?, kind: ChipKind, draft: ConfirmDraft) -> T? {
+        guard let value, !draft.dismissed.contains(kind) else { return nil }
+        guard !value.isUncertain || draft.accepted.contains(kind) else { return nil }
+        return value.value
+    }
+
+    /// Resolves `task.conditions` into `VociCore.Condition`s per the contract: `.afterDate`/
+    /// `.external` map directly once past the same uncertain-accept gate as scalar attributes;
+    /// `.taskDone` only ever comes from `resolvedTaskDone` (confident fuzzy match or explicit
+    /// picker choice — `preResolveConditions`/`resolveTaskDone`), so an unresolved one is simply
+    /// absent here, i.e. DROPPED rather than guessed (constitution II).
+    private func resolvedConditions(_ draft: ConfirmDraft) -> [VociCore.Condition] {
+        var result: [VociCore.Condition] = []
+        for (index, condition) in draft.task.conditions.enumerated() {
+            guard !draft.dismissedConditions.contains(index) else { continue }
+            switch condition {
+            case .afterDate(let date, let confidence):
+                guard confidence >= 0.7 || draft.acceptedConditions.contains(index) else { continue }
+                result.append(.afterDate(date))
+            case .external(let description, let confidence):
+                guard confidence >= 0.7 || draft.acceptedConditions.contains(index) else { continue }
+                result.append(.external(description: description, satisfied: false))
+            case .taskDone:
+                if let resolved = draft.resolvedTaskDone[index] {
+                    result.append(.taskDone(resolved))
+                }
+            }
+        }
+        return result
+    }
+
+    /// Engine `priority` is `1...4` (contract/data-model.md); the UI `Priority` enum only spans
+    /// `1...3` (`TaskItem.swift`'s documented reasoning: "this app never produces those" — until
+    /// now, a voice parse legitimately can). Clamp 4 into `.low` rather than crash/force-unwrap;
+    /// absent/dismissed/unaccepted-uncertain priority falls back to the existing neutral default.
+    private static func uiPriority(from raw: Int?) -> Priority {
+        switch raw {
+        case 1: return .high
+        case 2: return .medium
+        case 3, 4: return .low
+        default: return .medium
+        }
+    }
+
+    /// `followUpReview` (contract): a second `.review`-kind task depending on the just-created
+    /// one via `.taskDone`. Appended immediately after its parent in `confirmSave`'s batch, so
+    /// `TaskStore.addBatch`'s intra-batch snapshot (documented to grow as earlier items in the
+    /// SAME batch are accepted) validates the edge without a second pass.
+    private func materializeFollowUpReview(for parent: TaskItem, now: Date) -> TaskItem {
+        TaskItem(
+            title: "Review: \(parent.title)",
+            details: "",
+            priority: .medium,
             status: .todo,
             deadline: nil,
-            conditions: [],
-            createdAt: clock(),
-            when: .now,
-            durationMinutes: parsed.durationMinutes,
-            frog: false
+            conditions: [.taskDone(parent.id)],
+            createdAt: now,
+            when: .later,
+            durationMinutes: nil,
+            frog: false,
+            sourceTranscript: parent.sourceTranscript,
+            kind: .review
         )
-        addTask(item)
+    }
+
+    /// Shared "Saved" flash + auto-dismiss tail for `confirmSave`'s two success paths (store /
+    /// no-store fallback) — unchanged timing/guard behavior from the v1 implementation, just
+    /// reading back a task-count-aware phrase for the multi-task case.
+    private func finishSaveUI(titles: [String]) {
         captureState = .done
-        self.parsed = nil
+        confirmDrafts = []
         runningEngine?.stop()
-        // Read the captured description back so the user can confirm by ear (voice-first).
-        voice.speak(item.details.isEmpty ? item.title : item.details)
-        // Transient "Saved" flash, then close the popover — without this the popover stayed
-        // stuck on "Saved" until the user clicked the scrim. Guarded by the session token so a
-        // new capture started within the window isn't dismissed by the stale timer.
+        voice.speak(titles.count == 1 ? (titles.first ?? "Saved") : "\(titles.count) tasks saved.")
         captureSession += 1
         let session = captureSession
         _Concurrency.Task { @MainActor [weak self] in
@@ -598,5 +1006,53 @@ final class AppState {
     /// fallback path (unlike the pre-Carbon `NSEvent` monitor it replaced).
     func activateServices() {
         hotkey.start(appState: self)
+    }
+}
+
+// MARK: - DefaultCloudParseGate (T024 seam: wires the one-time consent decision into `IntentRouter`)
+
+/// `IntentRouter`'s injected `CloudParseGate` (`Sources/Parsing/IntentParsing.swift`, T019,
+/// landed) — the REAL mechanism the Cloud tier is gated by, not a bare shared UserDefaults
+/// convention. Deliberately a standalone type (not `AppState` itself conforming) so it can be
+/// constructed as a default parameter expression in `AppState.init` before `self` exists.
+///
+/// `isOptedIn()` reads the exact key `AppState.resolveCloudConsent(allow:)` writes
+/// (`AppState.cloudParseConsentKey`, `fileprivate` to this file) — `false` (never opted in, or
+/// declined) is the safe default for an unset key, matching "decline ⇒ never cloud."
+///
+/// `isOnline()` is a best-effort `NWPathMonitor` snapshot. The protocol's own doc comment
+/// sanctions "`true` when unknown/unable to determine" as a valid answer (it's "purely an
+/// optimization ... not a security gate") — this defaults `pathSatisfied` to `true` until the
+/// monitor's first callback lands, rather than blocking `isOnline()` on that first update.
+/// `@unchecked Sendable`: the only mutable state (`pathSatisfied`) is lock-protected; `NWPathMonitor`
+/// itself delivers `pathUpdateHandler` on an arbitrary background queue, which is exactly why the
+/// lock exists instead of, say, `@MainActor`-isolating this type.
+final class DefaultCloudParseGate: CloudParseGate, @unchecked Sendable {
+    private let monitor = NWPathMonitor()
+    private let lock = NSLock()
+    private var pathSatisfied = true
+
+    init() {
+        monitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            self.lock.lock()
+            self.pathSatisfied = path.status == .satisfied
+            self.lock.unlock()
+        }
+        monitor.start(queue: DispatchQueue(label: "voci.cloudParseGate.reachability"))
+    }
+
+    deinit {
+        monitor.cancel()
+    }
+
+    func isOptedIn() async -> Bool {
+        UserDefaults.standard.bool(forKey: AppState.cloudParseConsentKey)
+    }
+
+    func isOnline() async -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return pathSatisfied
     }
 }
