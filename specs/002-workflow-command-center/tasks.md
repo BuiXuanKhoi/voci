@@ -121,10 +121,10 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 **Independent Test**: quickstart §5 — fuzzy match with disambiguation, never silent; sweep batch-completes by voice.
 
-- [ ] T035 [P] [US3] Create `Volar/Sources/Speech/VoiceDone.swift`: Vietnamese-aware normalization + token-set fuzzy scorer over open tasks + thresholds (single-confirm / disambiguate / none) — R6; same path clears `.external` descriptions
-- [ ] T036 [US3] Route completion/clear intents in `AppState` capture pipeline (detect done-phrasing before treating an utterance as new-task capture); one-word/one-tap confirm UI in `PopoverView.swift`
-- [ ] T037 [US3] Harden auto-advance in `Volar/Sources/App/AppState.swift` + `Volar/Sources/Views/MenuBarLabel.swift`: completion (any source — voice, notification action, UI) recomputes `nextTask` and updates menu bar with no intermediate empty/list state (FR-020)
-- [ ] T038 [US3] Create evening sweep flow in `Volar/Sources/Views/SweepView.swift` + AppState scheduling (once daily, skip-if-empty): today's open tasks read back, voice/one-tap batch completion → CompletionEvents (FR-021)
+- [x] T035 [P] [US3] Create `Volar/Sources/Speech/VoiceDone.swift`: Vietnamese-aware normalization + token-set fuzzy scorer over open tasks + thresholds (single-confirm / disambiguate / none) — R6; same path clears `.external` descriptions
+- [x] T036 [US3] Route completion/clear intents in `AppState` capture pipeline (detect done-phrasing before treating an utterance as new-task capture); one-word/one-tap confirm UI in `PopoverView.swift`
+- [x] T037 [US3] Harden auto-advance in `Volar/Sources/App/AppState.swift` + `Volar/Sources/Views/MenuBarLabel.swift`: completion (any source — voice, notification action, UI) recomputes `nextTask` and updates menu bar with no intermediate empty/list state (FR-020)
+- [x] T038 [US3] Create evening sweep flow in `Volar/Sources/Views/SweepView.swift` + AppState scheduling (once daily, skip-if-empty): today's open tasks read back, voice/one-tap batch completion → CompletionEvents (FR-021)
 
 **Checkpoint**: speak-to-create AND speak-to-finish both work — the core loop closes
 
