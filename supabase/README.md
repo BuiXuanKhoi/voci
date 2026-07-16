@@ -50,7 +50,7 @@ first).
 | `GEMINI_API_KEY` | all requests | Gemini API key. Never returned to clients; used server-side only. |
 | `PARSE_MODEL` | optional | Overrides the default Flash-Lite class model (`gemini-3.1-flash-lite` at time of writing — **verify this id is still current in Google AI Studio before deploy**, Gemini retires model ids on a rolling basis). |
 | `PARSE_UPSTREAM_TIMEOUT_MS` | optional | Gemini request timeout. Default `20000`. |
-| `PARSE_DAILY_QUOTA` | free-tier auth | Free-tier daily parse cap per device. Default `25`. Tune without redeploying the function — just update the secret. |
+| `PARSE_DAILY_QUOTA` | free-tier auth | Free-tier daily parse cap per device. Default `50`. Tune without redeploying the function — just update the secret. |
 | `PARSE_PAID_RPM` | paid-tier auth | Soft per-minute rate limit for the unmetered paid tier (abuse bound, not a real quota). Default `20`. |
 | `APPSTORE_BUNDLE_ID` | paid (JWS) auth | Your app's bundle id, checked against the verified transaction. |
 | `APPSTORE_ENVIRONMENT` | paid (JWS) auth | `Sandbox` or `Production`. |

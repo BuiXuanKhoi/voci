@@ -188,7 +188,7 @@ final class AppState {
     /// out of sync with `tasks`.
     var activeTask: TaskItem? {
         let engineTasks = tasks.map { $0.snapshot() }
-        guard let winner = VociCore.nextTask(from: engineTasks, now: clock()) else { return nil }
+        guard let winner = VociCore.nextTask(from: engineTasks, now: clock(), calendar: .current) else { return nil }
         return tasks.first { $0.id == winner.id }
     }
 
@@ -201,19 +201,38 @@ final class AppState {
 
     /// Mirrors `voci-mac.jsx`'s `toggleTask`: marking a task done always bumps it to `.later`
     /// (it leaves "Now"); un-marking it leaves the `when` bucket untouched.
+    ///
+    /// Store-backed path: `TaskStore.toggle` owns strictly more than a plain status flip
+    /// (recurrence reset-in-place, parent auto-complete cascade, `CompletionEvent` append — see
+    /// `TaskStore.toggle`'s doc comment), so after it runs, `tasks` is refreshed wholesale from
+    /// the store instead of hand-patched, keeping the store as the single source of truth for the
+    /// UI. No-store fallback (previews/tests without a `TaskStore`) keeps the old in-memory-only
+    /// behavior.
     func toggleDone(_ id: UUID) {
-        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
-        let wasDone = tasks[index].done
-        tasks[index].status = wasDone ? .todo : .done
-        if !wasDone {
-            tasks[index].when = .later
+        guard let store else {
+            guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+            let wasDone = tasks[index].done
+            tasks[index].status = wasDone ? .todo : .done
+            if !wasDone {
+                tasks[index].when = .later
+            }
+            return
         }
-        store?.toggle(id)
+        store.toggle(id)
+        tasks = store.fetchAll()
     }
 
+    /// Store-backed path: `TaskStore.delete` strips the id from every other task's `.taskDone`
+    /// conditions and nulls children's `parentId` (validation rule 4), so `tasks` is refreshed
+    /// from the store afterward rather than just removing the one row — same rationale as
+    /// `toggleDone` above. No-store fallback keeps the old in-memory-only behavior.
     func deleteTask(_ id: UUID) {
-        tasks.removeAll { $0.id == id }
-        store?.delete(id)
+        guard let store else {
+            tasks.removeAll { $0.id == id }
+            return
+        }
+        store.delete(id)
+        tasks = store.fetchAll()
     }
 
     // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
@@ -574,8 +593,9 @@ final class AppState {
     /// Starts the global ⌃⌥M toggle-capture hotkey. `HotkeyManager.start` already calls
     /// `appState.toggleCapture()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`);
     /// toggle mode has no use for key-up, so neither `onKeyDown` nor `onKeyUp` needs wiring here.
-    /// Safe to call even without Accessibility permission — `HotkeyManager` degrades to
-    /// local-only monitoring.
+    /// `HotkeyManager` registers the hotkey via Carbon's `RegisterEventHotKey` — a sandbox-legal
+    /// Carbon Event Manager API that needs no Accessibility permission and has no local-monitor
+    /// fallback path (unlike the pre-Carbon `NSEvent` monitor it replaced).
     func activateServices() {
         hotkey.start(appState: self)
     }

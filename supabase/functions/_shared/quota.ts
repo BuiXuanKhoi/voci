@@ -16,7 +16,7 @@
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2.110.6";
 import { readEnvInt } from "./env.ts";
 
-export const DEFAULT_DAILY_QUOTA = 25;
+export const DEFAULT_DAILY_QUOTA = 50;
 export const DEFAULT_PAID_RPM = 20;
 
 function utcDateString(now: Date): string {
@@ -46,7 +46,7 @@ export type QuotaCheck =
 
 /** Free tier: increments and checks the per-device daily counter in ONE round trip (a PostgREST
  *  RPC call to the atomic `parse_quota_increment` SQL function). `PARSE_DAILY_QUOTA` env
- *  (default 25) is read fresh per-request so operators can retune it without a redeploy. */
+ *  (default 50) is read fresh per-request so operators can retune it without a redeploy. */
 export async function checkFreeQuota(
   supabase: SupabaseClient,
   quotaKeyHash: string,

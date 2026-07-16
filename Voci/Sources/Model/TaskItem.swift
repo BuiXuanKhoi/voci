@@ -136,7 +136,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     }
 
     /// The only bridge into the pure selection engine (contracts/vocicore-api.md): maps this UI
-    /// struct into the small value type `nextTask(from:now:)` actually consumes. No selection
+    /// struct into the small value type `nextTask(from:now:calendar:)` actually consumes. No selection
     /// logic is duplicated here. `durationMinutes` feeds the engine's `estimateMinutes` — same
     /// concept, kept under its existing UI-facing name here (see TaskStore migration notes for
     /// why the persisted attribute name wasn't renamed to match).

@@ -38,8 +38,8 @@ edges only) with the same human-readable `DependencyError` as 001.
 
 ### Engine public API (delta vs 001)
 
-- `nextTask(from:now:)` — signature unchanged; eligibility internals updated.
-- `orderedBefore(now:)` — unchanged.
+- `nextTask(from:now:calendar:)` — `calendar` is an explicit injected input (no default; app passes `Calendar.current`, tests pass a fixed calendar) so the engine stays pure while classifying "today" in the caller's real time zone; eligibility internals updated.
+- `orderedBefore(_:now:calendar:)` — same injected `calendar`; tiers unchanged.
 - `validateCondition(adding:to:in:) throws` — generalizes `validateDependency`; only
   `.taskDone` payloads can throw cycle/self errors, other condition kinds always pass.
 - New pure helpers the app layer consumes (all side-effect-free):

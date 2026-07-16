@@ -138,10 +138,19 @@ final class VociTask {
 
     var conditions: [VociCore.Condition] {
         get {
-            guard let dtos = try? JSONDecoder().decode([ConditionDTO].self, from: conditionsData) else {
+            // Decode element-by-element (rather than `[ConditionDTO].self` in one shot) so a
+            // single structurally-invalid or unrecognized-`kind` element (e.g. a future condition
+            // kind this build doesn't know about) is skipped instead of throwing and wiping the
+            // ENTIRE array — mirrors `ConditionDTO.asCondition`'s existing per-element tolerance.
+            // A fully corrupt/non-array blob still fails closed to `[]`.
+            guard let rawElements = try? JSONSerialization.jsonObject(with: conditionsData) as? [Any] else {
                 return []
             }
-            return dtos.compactMap(\.asCondition)
+            return rawElements.compactMap { element -> VociCore.Condition? in
+                guard let elementData = try? JSONSerialization.data(withJSONObject: element) else { return nil }
+                guard let dto = try? JSONDecoder().decode(ConditionDTO.self, from: elementData) else { return nil }
+                return dto.asCondition
+            }
         }
         set {
             let dtos = newValue.map(ConditionDTO.init)

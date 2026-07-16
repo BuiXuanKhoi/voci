@@ -25,7 +25,7 @@ public enum DependencyError: Error, Equatable {
 ///
 /// This function is pure: it neither mutates `snapshot` nor reads the clock or any external
 /// state, and never persists anything itself. Cycle detection is intentionally performed at
-/// condition-creation time so the `nextTask(from:now:)` hot path may assume the `.taskDone` graph
+/// condition-creation time so the `nextTask(from:now:calendar:)` hot path may assume the `.taskDone` graph
 /// is already acyclic.
 public func validateCondition(
     adding condition: Condition,

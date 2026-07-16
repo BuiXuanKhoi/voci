@@ -36,10 +36,10 @@ public enum DependencyError: Error, Equatable {
 ```swift
 /// The single task to do next, or nil. Deterministic total order (001 tiers unchanged).
 /// New in v2: eligibility honors conditions and parent-of-open-child exclusion.
-public func nextTask(from snapshot: [Task], now: Date) -> Task?
+public func nextTask(from snapshot: [Task], now: Date, calendar: Calendar) -> Task?
 
 /// Strict total order over eligible tasks (unchanged tiers).
-extension Task { public func orderedBefore(_ other: Task, now: Date) -> Bool }
+extension Task { public func orderedBefore(_ other: Task, now: Date, calendar: Calendar) -> Bool }
 
 /// Validates adding `condition` to task `id` within `snapshot`.
 /// Throws only for .taskDone payloads that would create a cycle or self-reference.
@@ -56,14 +56,18 @@ public func nextResurfaceDate(in snapshot: [Task], after now: Date) -> Date?
 
 ## Behavioral guarantees (release-gated by tests)
 
-1. Identical `(snapshot, now)` → identical results, regardless of array order.
-2. A task with any unsatisfied condition is never returned by `nextTask`.
-3. `.taskDone` resolution: done/archived/absent = satisfied; todo/inProgress = blocking.
-4. A parent with ≥1 open child is never returned; its eligible child can be.
-5. `validateCondition` never persists anything and never mutates inputs; rejection carries
+1. Identical `(snapshot, now, calendar)` → identical results, regardless of array order.
+2. `calendar` is an explicit, no-default input the caller supplies (app: `Calendar.current`;
+   tests: a fixed calendar) — the engine never reads `Calendar.current` or any other global
+   itself, so `nextTask`/`orderedBefore` stay pure/deterministic (Constitution Principle III)
+   while still classifying "today" using the caller's real-world calendar/time zone.
+3. A task with any unsatisfied condition is never returned by `nextTask`.
+4. `.taskDone` resolution: done/archived/absent = satisfied; todo/inProgress = blocking.
+5. A parent with ≥1 open child is never returned; its eligible child can be.
+6. `validateCondition` never persists anything and never mutates inputs; rejection carries
    both task titles.
-6. `eligibilityDiff` returns ids only for status/condition-driven changes — pure set logic.
-7. Complexity: selection O(n log n); cycle check O(V+E); no allocation explosions at n=500.
+7. `eligibilityDiff` returns ids only for status/condition-driven changes — pure set logic.
+8. Complexity: selection O(n log n); cycle check O(V+E); no allocation explosions at n=500.
 
 ## Test suite contract (gate)
 

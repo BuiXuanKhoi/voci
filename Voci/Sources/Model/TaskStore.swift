@@ -234,7 +234,7 @@ final class TaskStore {
     /// refresh of the menu-bar label.
     func active(now: Date) -> TaskItem? {
         let all = fetchAll()
-        guard let winner = VociCore.nextTask(from: all.map { $0.snapshot() }, now: now) else { return nil }
+        guard let winner = VociCore.nextTask(from: all.map { $0.snapshot() }, now: now, calendar: .current) else { return nil }
         return all.first { $0.id == winner.id }
     }
 

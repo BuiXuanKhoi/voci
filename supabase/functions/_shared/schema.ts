@@ -71,14 +71,26 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
 }
 
-/** ISO8601-with-zone check. We don't need a full RFC parser — `Date.parse` plus a check that the
+/** ISO8601 check. We don't need a full RFC parser — `Date.parse` plus a check that the
  *  string round-trips through it and (loosely) looks like an ISO date is enough to reject
- *  garbage without accepting ambiguous non-ISO formats `Date.parse` is overly lenient about. */
+ *  garbage without accepting ambiguous non-ISO formats `Date.parse` is overly lenient about.
+ *  Does NOT require a timezone designator — used for model-output fields (`deadline`,
+ *  `afterDate`) where the contract doesn't mandate one; see `isIso8601WithZone` below for the
+ *  stricter check the contract requires on the client-supplied `now` field. */
 function isIso8601(v: unknown): v is string {
   if (typeof v !== "string") return false;
   if (!/^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}/.test(v)) return false;
   const ms = Date.parse(v);
   return Number.isFinite(ms);
+}
+
+/** ISO8601-WITH-ZONE check (contract: "now is required and must be ISO8601 with zone"). Requires
+ *  a trailing `Z` or `±HH:MM` UTC offset in addition to `isIso8601`'s shape check — a zone-less
+ *  "now" is ambiguous (local time in an unspecified timezone) and would make the server's
+ *  deadline/quota-day math nondeterministic, so it's rejected outright rather than assumed UTC. */
+function isIso8601WithZone(v: unknown): v is string {
+  if (!isIso8601(v)) return false;
+  return /(Z|[+-]\d{2}:\d{2})$/.test(v);
 }
 
 export function validateRequestBody(body: unknown): ValidationResult<ParsedRequestBody> {
@@ -101,7 +113,7 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
   if (body.transcript.length > MAX_TRANSCRIPT_CHARS) {
     return { ok: false, error: `transcript exceeds ${MAX_TRANSCRIPT_CHARS} chars` };
   }
-  if (!isIso8601(body.now)) {
+  if (!isIso8601WithZone(body.now)) {
     return { ok: false, error: "now is required and must be ISO8601 with zone" };
   }
   let localeHint: ParseRequest["localeHint"];

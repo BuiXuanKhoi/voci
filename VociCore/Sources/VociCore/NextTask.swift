@@ -4,10 +4,11 @@ import Foundation
 /// eligible.
 ///
 /// This is the core of Constitution Principle III (Deterministic, Pure, Test-Gated Core): the
-/// function performs no I/O, reads no global clock, and depends only on its two arguments. For
-/// identical `(snapshot, now)` it always returns the same result, regardless of the order of
-/// `snapshot` (see `Task.orderedBefore(_:now:)` for the total-order guarantee that makes this
-/// true).
+/// function performs no I/O, reads no global clock, and depends only on its arguments — `calendar`
+/// is data supplied by the caller (app: `Calendar.current`; tests: a fixed calendar), never read
+/// from a global, so the function remains pure/deterministic. For identical `(snapshot, now,
+/// calendar)` it always returns the same result, regardless of the order of `snapshot` (see
+/// `Task.orderedBefore(_:now:calendar:)` for the total-order guarantee that makes this true).
 ///
 /// Eligibility (v2 — see `Condition.swift` and `specs/002-workflow-command-center/data-model.md`
 /// "Engine layer"):
@@ -17,9 +18,9 @@ import Foundation
 ///   child is excluded, even if that child is itself ineligible for other reasons.
 ///
 /// Ordering (unchanged from 001): among eligible tasks, the minimum under
-/// `Task.orderedBefore(_:now:)` is returned.
-public func nextTask(from snapshot: [Task], now: Date) -> Task? {
-    eligibleTasks(in: snapshot, now: now).min { $0.orderedBefore($1, now: now) }
+/// `Task.orderedBefore(_:now:calendar:)` is returned.
+public func nextTask(from snapshot: [Task], now: Date, calendar: Calendar) -> Task? {
+    eligibleTasks(in: snapshot, now: now).min { $0.orderedBefore($1, now: now, calendar: calendar) }
 }
 
 /// All eligible tasks in `snapshot` at `now`, in the original (unordered) array order. Shared by
@@ -75,7 +76,11 @@ extension Task {
     /// 5. Lexical order of `id.uuidString` — this final tier is total over distinct `UUID`s,
     ///    which is what makes the overall relation a strict total order (irreflexive,
     ///    asymmetric, transitive) and therefore safe to pass to `Array.min(by:)`.
-    public func orderedBefore(_ other: Task, now: Date) -> Bool {
+    ///
+    /// `calendar` is an explicit injected input (never read from a global) used only by tier 2's
+    /// "same calendar day as `now`" classification — this keeps the comparator pure while letting
+    /// the caller decide what "today" means (app: `Calendar.current`; tests: a fixed calendar).
+    public func orderedBefore(_ other: Task, now: Date, calendar: Calendar) -> Bool {
         // Tier 1: status class.
         let selfStatusRank = statusRank(status)
         let otherStatusRank = statusRank(other.status)
@@ -84,8 +89,8 @@ extension Task {
         }
 
         // Tier 2: deadline urgency (today/overdue) relative to `now`.
-        let selfIsNearTerm = isNearTermDeadline(deadline, now: now)
-        let otherIsNearTerm = isNearTermDeadline(other.deadline, now: now)
+        let selfIsNearTerm = isNearTermDeadline(deadline, now: now, calendar: calendar)
+        let otherIsNearTerm = isNearTermDeadline(other.deadline, now: now, calendar: calendar)
         if selfIsNearTerm != otherIsNearTerm {
             return selfIsNearTerm
         }
@@ -125,31 +130,15 @@ private func statusRank(_ status: TaskStatus) -> Int {
     }
 }
 
-/// The fixed calendar the engine uses for "same calendar day" classification (tier 2). The v2
-/// public API dropped the `calendar` parameter that 001 exposed (`nextTask(from:now:calendar:)`)
-/// to keep the engine fully deterministic regardless of the host device's locale/time zone
-/// settings — see `specs/002-workflow-command-center/contracts/vocicore-api.md`. Gregorian/UTC
-/// matches the fixed calendar the test suite already anchors on (`Fixtures.swift`).
-// UNVERIFIED: confirm on Mac (and with product) that pinning "today" classification to UTC
-// (rather than the device's local calendar, as 001's `calendar: Calendar = .current` default
-// did) is the intended v2 behavior. The public API contract removed the `calendar` parameter
-// entirely, and purity (no locale/timezone reads) requires a fixed calendar here — UTC is the
-// only calendar the engine can canonically agree on with the test suite (`Fixtures.swift`'s
-// `testCalendar`). If deadlines are stored/compared in the user's local time near a day
-// boundary, this can classify "today" differently than local-calendar 001 did.
-private let engineCalendar: Calendar = {
-    var calendar = Calendar(identifier: .gregorian)
-    calendar.timeZone = TimeZone(identifier: "UTC")!
-    return calendar
-}()
-
 /// A deadline is "near-term" (today or overdue) relative to `now` iff it is strictly before
-/// `now` (overdue) or falls on the same UTC calendar day as `now` (today). A `nil` deadline, or
-/// one strictly in the future beyond today, is not near-term.
-private func isNearTermDeadline(_ deadline: Date?, now: Date) -> Bool {
+/// `now` (overdue) or falls on the same calendar day as `now` under the caller-supplied
+/// `calendar` (today). A `nil` deadline, or one strictly in the future beyond today, is not
+/// near-term. `calendar` is injected data, not read from a global (see `orderedBefore(_:now:
+/// calendar:)`), so this stays pure regardless of which calendar the caller passes.
+private func isNearTermDeadline(_ deadline: Date?, now: Date, calendar: Calendar) -> Bool {
     guard let deadline else { return false }
     if deadline < now { return true }
-    return engineCalendar.isDate(deadline, inSameDayAs: now)
+    return calendar.isDate(deadline, inSameDayAs: now)
 }
 
 /// Maps an optional priority to a rank where lower sorts first; `nil` (unset) maps to a value

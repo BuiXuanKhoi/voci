@@ -23,7 +23,7 @@ struct EligibilityTests {
         )
         let fallbackTask = makeTask(id: fixedUUID(3), status: .todo, priority: 4)
 
-        let beforeCompletion = nextTask(from: [prerequisite, blockedTask, fallbackTask], now: referenceNow)
+        let beforeCompletion = nextTask(from: [prerequisite, blockedTask, fallbackTask], now: referenceNow, calendar: testCalendar)
         // blockedTask (priority 1) is not eligible yet, so the fallback (priority 4) wins over
         // the unrelated prerequisite (priority 3) — the blocked task must never be chosen.
         #expect(beforeCompletion?.id != blockedTask.id)
@@ -33,7 +33,8 @@ struct EligibilityTests {
 
         let afterCompletion = nextTask(
             from: [completedPrerequisite, blockedTask, fallbackTask],
-            now: referenceNow
+            now: referenceNow,
+            calendar: testCalendar
         )
 
         #expect(afterCompletion?.id == blockedTask.id)
@@ -52,7 +53,7 @@ struct EligibilityTests {
             conditions: [.taskDone(firstPrerequisite.id), .taskDone(secondPrerequisite.id)]
         )
 
-        let stillBlocked = nextTask(from: [firstPrerequisite, secondPrerequisite, dependent], now: referenceNow)
+        let stillBlocked = nextTask(from: [firstPrerequisite, secondPrerequisite, dependent], now: referenceNow, calendar: testCalendar)
         #expect(stillBlocked?.id != dependent.id)
 
         var completedSecondPrerequisite = secondPrerequisite
@@ -60,13 +61,14 @@ struct EligibilityTests {
 
         let nowUnblocked = nextTask(
             from: [firstPrerequisite, completedSecondPrerequisite, dependent],
-            now: referenceNow
+            now: referenceNow,
+            calendar: testCalendar
         )
         #expect(nowUnblocked?.id == dependent.id)
     }
 
     // §6.2 #6: completing a task cascades — its dependent, previously blocked, becomes the new
-    // `nextTask()` result.
+    // `nextTask(from:now:calendar:)` result.
     @Test("completing a task cascades: its dependent becomes the new next task")
     func completingTaskCascadesToDependent() {
         let prerequisite = makeTask(id: fixedUUID(1), status: .todo, priority: 1)
@@ -75,13 +77,13 @@ struct EligibilityTests {
             conditions: [.taskDone(prerequisite.id)]
         )
 
-        let before = nextTask(from: [prerequisite, dependent], now: referenceNow)
+        let before = nextTask(from: [prerequisite, dependent], now: referenceNow, calendar: testCalendar)
         #expect(before?.id == prerequisite.id)
 
         var completedPrerequisite = prerequisite
         completedPrerequisite.status = .done
 
-        let after = nextTask(from: [completedPrerequisite, dependent], now: referenceNow)
+        let after = nextTask(from: [completedPrerequisite, dependent], now: referenceNow, calendar: testCalendar)
 
         #expect(after?.id == dependent.id)
     }
@@ -96,7 +98,7 @@ struct EligibilityTests {
         let taskB = makeTask(id: fixedUUID(2), status: .todo, conditions: [.taskDone(fixedUUID(3))])
         let taskC = makeTask(id: fixedUUID(3), status: .todo, conditions: [.taskDone(fixedUUID(1))])
 
-        let result = nextTask(from: [taskA, taskB, taskC], now: referenceNow)
+        let result = nextTask(from: [taskA, taskB, taskC], now: referenceNow, calendar: testCalendar)
 
         #expect(result == nil)
     }
@@ -111,7 +113,7 @@ struct EligibilityTests {
             conditions: [.taskDone(archivedPrerequisite.id)]
         )
 
-        let result = nextTask(from: [archivedPrerequisite, dependent], now: referenceNow)
+        let result = nextTask(from: [archivedPrerequisite, dependent], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id == dependent.id)
     }
@@ -126,7 +128,7 @@ struct EligibilityTests {
             conditions: [.taskDone(deletedPrerequisiteID)]
         )
 
-        let result = nextTask(from: [dependent], now: referenceNow)
+        let result = nextTask(from: [dependent], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id == dependent.id)
     }
@@ -138,7 +140,7 @@ struct EligibilityTests {
     func afterDateSatisfiedAtExactBoundary() {
         let task = makeTask(id: fixedUUID(1), status: .todo, conditions: [.afterDate(referenceNow)])
 
-        let result = nextTask(from: [task], now: referenceNow)
+        let result = nextTask(from: [task], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id == task.id)
     }
@@ -147,7 +149,7 @@ struct EligibilityTests {
     func afterDateInFutureBlocks() {
         let task = makeTask(id: fixedUUID(1), status: .todo, conditions: [.afterDate(tomorrow())])
 
-        let result = nextTask(from: [task], now: referenceNow)
+        let result = nextTask(from: [task], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id != task.id)
     }
@@ -156,7 +158,7 @@ struct EligibilityTests {
     func afterDateInPastSatisfied() {
         let task = makeTask(id: fixedUUID(1), status: .todo, conditions: [.afterDate(yesterday())])
 
-        let result = nextTask(from: [task], now: referenceNow)
+        let result = nextTask(from: [task], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id == task.id)
     }
@@ -170,7 +172,7 @@ struct EligibilityTests {
             conditions: [.external(description: "waiting on reply", satisfied: true)]
         )
 
-        let result = nextTask(from: [task], now: referenceNow)
+        let result = nextTask(from: [task], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id == task.id)
     }
@@ -182,7 +184,7 @@ struct EligibilityTests {
             conditions: [.external(description: "waiting on reply", satisfied: false)]
         )
 
-        let result = nextTask(from: [task], now: referenceNow)
+        let result = nextTask(from: [task], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id != task.id)
     }
@@ -204,7 +206,7 @@ struct EligibilityTests {
         )
         let fallback = makeTask(id: fixedUUID(3), status: .todo)
 
-        let result = nextTask(from: [doneePrerequisite, blocked, fallback], now: referenceNow)
+        let result = nextTask(from: [doneePrerequisite, blocked, fallback], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id == fallback.id)
 
@@ -219,7 +221,7 @@ struct EligibilityTests {
         var lowerPriorityFallback = fallback
         lowerPriorityFallback.priority = 4
 
-        let afterFlip = nextTask(from: [doneePrerequisite, unblocked, lowerPriorityFallback], now: referenceNow)
+        let afterFlip = nextTask(from: [doneePrerequisite, unblocked, lowerPriorityFallback], now: referenceNow, calendar: testCalendar)
         #expect(afterFlip?.id == unblocked.id)
     }
 
@@ -238,7 +240,7 @@ struct EligibilityTests {
         )
         let unrelated = makeTask(id: fixedUUID(3), title: "Unrelated", status: .todo, priority: 4)
 
-        let result = nextTask(from: [parent, ineligibleChild, unrelated], now: referenceNow)
+        let result = nextTask(from: [parent, ineligibleChild, unrelated], now: referenceNow, calendar: testCalendar)
 
         #expect(result?.id != parent.id)
         #expect(result?.id != ineligibleChild.id)
@@ -253,14 +255,14 @@ struct EligibilityTests {
         let parent = makeTask(id: fixedUUID(1), status: .todo, priority: 1)
         let openChild = makeTask(id: fixedUUID(2), status: .todo, priority: 1, parentId: parent.id)
 
-        let whileChildOpen = nextTask(from: [parent, openChild], now: referenceNow)
+        let whileChildOpen = nextTask(from: [parent, openChild], now: referenceNow, calendar: testCalendar)
         // The parent is excluded; the open, unconditioned child is eligible and wins.
         #expect(whileChildOpen?.id == openChild.id)
 
         var doneChild = openChild
         doneChild.status = .done
 
-        let afterChildDone = nextTask(from: [parent, doneChild], now: referenceNow)
+        let afterChildDone = nextTask(from: [parent, doneChild], now: referenceNow, calendar: testCalendar)
         #expect(afterChildDone?.id == parent.id)
     }
 
@@ -274,13 +276,13 @@ struct EligibilityTests {
         var generator = SeededGenerator(seed: 42)
         let snapshot = synthesizeSnapshot(count: 500, using: &generator)
 
-        let resultInOrder = nextTask(from: snapshot, now: referenceNow)
+        let resultInOrder = nextTask(from: snapshot, now: referenceNow, calendar: testCalendar)
 
         // Run several independent shuffles; every one must agree with the original order.
         for trial in 0..<5 {
             var shuffleGenerator = SeededGenerator(seed: UInt64(1000 + trial))
             let shuffled = snapshot.shuffled(using: &shuffleGenerator)
-            let resultShuffled = nextTask(from: shuffled, now: referenceNow)
+            let resultShuffled = nextTask(from: shuffled, now: referenceNow, calendar: testCalendar)
             #expect(resultShuffled?.id == resultInOrder?.id)
         }
     }

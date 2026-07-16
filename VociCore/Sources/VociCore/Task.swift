@@ -2,7 +2,7 @@ import Foundation
 
 /// The lifecycle status of a `Task`.
 ///
-/// Eligibility mapping (see `nextTask(from:now:)`):
+/// Eligibility mapping (see `nextTask(from:now:calendar:)`):
 /// - Eligible for selection: `.todo`, `.inProgress`.
 /// - Not eligible: `.done`, `.archived`.
 ///
@@ -25,7 +25,7 @@ public enum TaskStatus: Sendable, Equatable {
 /// model (e.g. a SwiftData `@Model`) into this value type before calling into `VociCore`.
 public struct Task: Sendable, Equatable, Identifiable {
     /// Stable unique identity. Used as the final tiebreak (lexical order of its string form)
-    /// in `orderedBefore(_:now:)` to guarantee a strict total order.
+    /// in `orderedBefore(_:now:calendar:)` to guarantee a strict total order.
     public let id: UUID
 
     /// Human-readable title. Not used by ordering or eligibility; carried so dependency-graph

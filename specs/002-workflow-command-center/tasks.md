@@ -21,10 +21,10 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 **Purpose**: Project-level plumbing every story needs
 
-- [ ] T001 Update `Voci/project.yml`: register `voci` URL scheme (CFBundleURLTypes), notification categories capability notes, add `Sources/Parsing`, `Sources/Reminders`, `Sources/Orchestrator` folders to sources
-- [ ] T002 Update `Voci/Resources/Voci.entitlements`: App Sandbox ON, `com.apple.security.network.client`, user-selected file read-write (security-scoped bookmarks); audit `Sources/` for sandbox breakage (custom background image path in `AmbientBackground.swift`/`SettingsView.swift` needs bookmark instead of raw path — per backlog 2026-07-13)
-- [ ] T003 [P] Replace `NSEvent.addGlobalMonitorForEvents` hotkey with Carbon `RegisterEventHotKey` in `Voci/Sources/Speech/HotkeyManager.swift` (sandbox-safe, no Accessibility — research R3); keep toggle semantics from commit ee75841
-- [ ] T004 [P] Scaffold `supabase/functions/` in-repo: `parse/index.ts` stub + shared auth util placeholder + README linking `contracts/parse-proxy.md`
+- [x] T001 Update `Voci/project.yml`: register `voci` URL scheme (CFBundleURLTypes), notification categories capability notes, add `Sources/Parsing`, `Sources/Reminders`, `Sources/Orchestrator` folders to sources
+- [x] T002 Update `Voci/Resources/Voci.entitlements`: App Sandbox ON, `com.apple.security.network.client`, user-selected file read-write (security-scoped bookmarks); audit `Sources/` for sandbox breakage (custom background image path in `AmbientBackground.swift`/`SettingsView.swift` needs bookmark instead of raw path — per backlog 2026-07-13)
+- [x] T003 [P] Replace `NSEvent.addGlobalMonitorForEvents` hotkey with Carbon `RegisterEventHotKey` in `Voci/Sources/Speech/HotkeyManager.swift` (sandbox-safe, no Accessibility — research R3); keep toggle semantics from commit ee75841
+- [x] T004 [P] Scaffold `supabase/functions/` in-repo: `parse/index.ts` stub + shared auth util placeholder + README linking `contracts/parse-proxy.md`
 
 **Checkpoint**: project generates (`xcodegen generate`) and builds on Mac with sandbox ON
 
@@ -36,26 +36,27 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 ### Engine tests first (must fail before T009–T012)
 
-- [ ] T005 [P] Migrate §6.2 suite to conditions in `VociCore/Tests/VociCoreTests/NextTaskTests.swift` (dependsOn → `.taskDone`; all 001 cases preserved 1:1)
-- [ ] T006 [P] New eligibility tests in `VociCore/Tests/VociCoreTests/EligibilityTests.swift`: afterDate boundary (now == date ⇒ satisfied), external satisfied/unsatisfied, mixed-condition AND, parent-of-open-child exclusion, determinism-under-shuffle n=500
-- [ ] T007 [P] Condition-validation tests in `VociCore/Tests/VociCoreTests/DependencyGraphTests.swift`: cycle via `.taskDone` (direct/transitive/self), afterDate/external never throw
-- [ ] T008 [P] Snapshot-helper tests in `VociCore/Tests/VociCoreTests/SnapshotTests.swift`: `eligibilityDiff` (complete/uncomplete/external-flip), `nextResurfaceDate` (none/several/past-only)
+- [x] T005 [P] Migrate §6.2 suite to conditions in `VociCore/Tests/VociCoreTests/NextTaskTests.swift` (dependsOn → `.taskDone`; all 001 cases preserved 1:1)
+- [x] T006 [P] New eligibility tests in `VociCore/Tests/VociCoreTests/EligibilityTests.swift`: afterDate boundary (now == date ⇒ satisfied), external satisfied/unsatisfied, mixed-condition AND, parent-of-open-child exclusion, determinism-under-shuffle n=500
+- [x] T007 [P] Condition-validation tests in `VociCore/Tests/VociCoreTests/DependencyGraphTests.swift`: cycle via `.taskDone` (direct/transitive/self), afterDate/external never throw
+- [x] T008 [P] Snapshot-helper tests in `VociCore/Tests/VociCoreTests/SnapshotTests.swift`: `eligibilityDiff` (complete/uncomplete/external-flip), `nextResurfaceDate` (none/several/past-only)
 
 ### Engine implementation (contract: contracts/vocicore-api.md)
 
-- [ ] T009 Create `VociCore/Sources/VociCore/Condition.swift`: `Condition` enum + satisfaction rules (data-model.md engine layer)
-- [ ] T010 Rework `VociCore/Sources/VociCore/Task.swift`: drop `dependsOn`, add `conditions`, `estimateMinutes`, `parentId`
-- [ ] T011 Rework `VociCore/Sources/VociCore/NextTask.swift` (eligibility v2 incl. parent exclusion) and `DependencyGraph.swift` (`validateCondition` DFS over `.taskDone` edges only, same `DependencyError` messages)
-- [ ] T012 Create `VociCore/Sources/VociCore/Snapshots.swift`: pure `eligibilityDiff(before:after:now:)` + `nextResurfaceDate(in:after:)`
+- [x] T009 Create `VociCore/Sources/VociCore/Condition.swift`: `Condition` enum + satisfaction rules (data-model.md engine layer)
+- [x] T010 Rework `VociCore/Sources/VociCore/Task.swift`: drop `dependsOn`, add `conditions`, `estimateMinutes`, `parentId`
+- [x] T011 Rework `VociCore/Sources/VociCore/NextTask.swift` (eligibility v2 incl. parent exclusion) and `DependencyGraph.swift` (`validateCondition` DFS over `.taskDone` edges only, same `DependencyError` messages)
+- [x] T012 Create `VociCore/Sources/VociCore/Snapshots.swift`: pure `eligibilityDiff(before:after:now:)` + `nextResurfaceDate(in:after:)`
 
 ### Persistence v2
 
-- [ ] T013 Rework `Voci/Sources/Model/TaskItem.swift`: VociTask @Model v2 fields (notes, sourceTranscript, kind, recurrence, reminderOverride, resumeNote, switchAwayCount, completedAt, delegation, conditions storage, parentId) + snapshot mapping to `VociCore.Task` + SwiftData migration mapping legacy `dependsOn` → `.taskDone` conditions
-- [ ] T014 [P] Create `Voci/Sources/Model/CompletionLog.swift`: `CompletionEvent` @Model (immutable append), append-on-complete API, day/week/month rollup queries per FR-035
-- [ ] T015 [P] Create `Voci/Sources/Model/Recurrence.swift`: `Recurrence` enum + reset-in-place engine (schedule-anchored, completion-moment re-anchor override — R8) + leaf-only validation
-- [ ] T016 Enforce persistence validation rules 1–6 of data-model.md in `Voci/Sources/Model/TaskStore.swift` (cycle check via engine, recurrence-leaf rule, parentId integrity, delete-cascade stripping `.taskDone` refs + one-time unblock notify flag, parent auto-complete, 10-task batch cap)
+- [x] T013 Rework `Voci/Sources/Model/TaskItem.swift`: VociTask @Model v2 fields (notes, sourceTranscript, kind, recurrence, reminderOverride, resumeNote, switchAwayCount, completedAt, delegation, conditions storage, parentId) + snapshot mapping to `VociCore.Task` + SwiftData migration mapping legacy `dependsOn` → `.taskDone` conditions
+- [x] T014 [P] Create `Voci/Sources/Model/CompletionLog.swift`: `CompletionEvent` @Model (immutable append), append-on-complete API, day/week/month rollup queries per FR-035
+- [x] T015 [P] Create `Voci/Sources/Model/Recurrence.swift`: `Recurrence` enum + reset-in-place engine (schedule-anchored, completion-moment re-anchor override — R8) + leaf-only validation
+- [x] T016 Enforce persistence validation rules 1–6 of data-model.md in `Voci/Sources/Model/TaskStore.swift` (cycle check via engine, recurrence-leaf rule, parentId integrity, delete-cascade stripping `.taskDone` refs + one-time unblock notify flag, parent auto-complete, 10-task batch cap)
 
 **Checkpoint**: `swift build && swift test` green in VociCore on Mac; app builds; legacy data migrates
+> STATUS 2026-07-16: T001–T016 code-complete (4 parallel Sonnet agents) + Opus full-diff review (0 ship-blocker) + fixes applied (calendar injection, AppState↔store sync, lenient decode, quota 50). Commits after `b0e90ed`. **Mac build/test NOT yet run** — this checkpoint is the immediate next action (highest compile risk: Carbon hotkey, SwiftData migration). `[~]` = partially done.
 
 ---
 
@@ -70,7 +71,7 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 - [ ] T019 [P] [US1] Create `Voci/Sources/Parsing/IntentParsing.swift`: protocol + router FM → Cloud (opt-in + online + quota) → Heuristic (R5); shared `ParsedTask` validation + title-only fallback (constitution II)
 - [ ] T020 [P] [US1] Create `Voci/Sources/Parsing/FoundationModelParser.swift`: `#available(macOS 26)` @Generable guided generation, capability probe, `// UNVERIFIED` markers for FM API surface
 - [ ] T021 [P] [US1] Create `Voci/Sources/Parsing/CloudParser.swift`: `/functions/v1/parse` client per contracts/parse-proxy.md — JWS or DeviceCheck auth headers, 429→typed quota fallback, text-only payload, ≤100 open-task titles only when dependency phrasing detected
-- [ ] T022 [US1] Implement `supabase/functions/parse/index.ts`: JWS/DeviceCheck verification, per-device daily counter (Postgres), Gemini Flash call with JSON-schema output, 10-task cap, no transcript logging (contract obligations 1–5)
+- [~] T022 [US1] Implement `supabase/functions/parse/index.ts`: JWS/DeviceCheck verification, per-device daily counter (Postgres), Gemini Flash call with JSON-schema output, 10-task cap, no transcript logging (contract obligations 1–5) — PARTIAL: code + migration + README done and Opus-reviewed (paid JWS path + quota + Gemini + hardening all present); free-tier App Attest key store is stubbed (fails closed 503) → completing it needs an `/attest/register` endpoint + key table (backlog, not blocking since client T021 not built yet)
 - [ ] T023 [US1] Add DeviceCheck token generation in `Voci/Sources/Parsing/DeviceCheckProvider.swift` (DCDevice; graceful nil on unsupported/simulator → heuristic)
 - [ ] T024 [US1] Rework confirm card in `Voci/Sources/Views/PopoverView.swift`: chips v2 for all attributes, uncertain (<0.7) dashed chips, dependency picker instead of auto-attach, multi-task confirm (≤10), one-time cloud-parse opt-in sheet
 - [ ] T025 [US1] Wire `AppState.confirmSave()` in `Voci/Sources/App/AppState.swift`: materialize tasks + conditions + review follow-ups through TaskStore validation; persist `sourceTranscript` always
