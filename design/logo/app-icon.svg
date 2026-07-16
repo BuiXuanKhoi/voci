@@ -1,22 +1,22 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Volar app icon">
   <defs>
-    <radialGradient id="ai-studio" cx="50%" cy="8%" r="105%">
-      <stop offset="0%" stop-color="#171d26"/>
-      <stop offset="46%" stop-color="#0E1116"/>
-      <stop offset="100%" stop-color="#080A0D"/>
+    <radialGradient id="ai-studio" cx="50%" cy="6%" r="108%">
+      <stop offset="0%" stop-color="#191f29"/>
+      <stop offset="44%" stop-color="#0E1116"/>
+      <stop offset="100%" stop-color="#070A0D"/>
     </radialGradient>
-    <radialGradient id="ai-spot" cx="60.5%" cy="37%" r="42%">
-      <stop offset="0%" stop-color="#E8B25A" stop-opacity="0.34"/>
-      <stop offset="46%" stop-color="#E8B25A" stop-opacity="0.11"/>
+    <radialGradient id="ai-spot" cx="60%" cy="34%" r="46%">
+      <stop offset="0%" stop-color="#E8B25A" stop-opacity="0.36"/>
+      <stop offset="46%" stop-color="#E8B25A" stop-opacity="0.12"/>
       <stop offset="100%" stop-color="#E8B25A" stop-opacity="0"/>
     </radialGradient>
     <linearGradient id="ai-wing" x1="20%" y1="90%" x2="80%" y2="10%">
       <stop offset="0%" stop-color="#C68A3A"/>
       <stop offset="55%" stop-color="#E8B25A"/>
-      <stop offset="100%" stop-color="#F0C67E"/>
+      <stop offset="100%" stop-color="#F2C982"/>
     </linearGradient>
     <filter id="ai-glow" x="-80%" y="-80%" width="260%" height="260%">
-      <feGaussianBlur stdDeviation="26"/>
+      <feGaussianBlur stdDeviation="30"/>
     </filter>
     <clipPath id="ai-clip"><rect x="0" y="0" width="1024" height="1024" rx="224"/></clipPath>
   </defs>
@@ -26,24 +26,24 @@
     <rect x="0" y="0" width="1024" height="1024" fill="url(#ai-spot)"/>
 
     <!-- bloom -->
-    <g filter="url(#ai-glow)" opacity="0.7">
-      <g transform="translate(178,280) scale(20)">
-        <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="25.6" cy="4.1" r="3.4" fill="#F0C67E"/>
+    <g filter="url(#ai-glow)" opacity="0.68">
+      <g transform="translate(196,250) scale(20.5)">
+        <path d="M6 13.2 Q9.7 19.7 13.5 21 Q17.5 17.3 22 8.3" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+        <circle cx="24.7" cy="4.9" r="3.2" fill="#F2C982"/>
       </g>
     </g>
 
     <!-- the wing -->
-    <g transform="translate(178,280) scale(20)">
-      <path d="M7 14 Q10 19 13 21.5 Q16.5 16 23 7.5" fill="none" stroke="url(#ai-wing)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+    <g transform="translate(196,250) scale(20.5)">
+      <path d="M6 13.2 Q9.7 19.7 13.5 21 Q17.5 17.3 22 8.3" fill="none" stroke="url(#ai-wing)" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
     </g>
 
     <!-- the one lit thing -->
-    <circle cx="690" cy="362" r="52" fill="#F0C67E"/>
-    <circle cx="690" cy="362" r="52" fill="none" stroke="#F6EAD6" stroke-width="6" stroke-opacity="0.9"/>
-    <circle cx="684" cy="354" r="20" fill="#FBF3E4" opacity="0.85"/>
+    <circle cx="702" cy="350" r="50" fill="#F2C982"/>
+    <circle cx="702" cy="350" r="50" fill="none" stroke="#FBE9CC" stroke-width="6" stroke-opacity="0.9"/>
+    <circle cx="696" cy="342" r="19" fill="#FDF6E9" opacity="0.85"/>
 
     <!-- top edge light -->
-    <rect x="0" y="0" width="1024" height="1024" rx="224" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+    <rect x="1" y="1" width="1022" height="1022" rx="223" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
   </g>
 </svg>

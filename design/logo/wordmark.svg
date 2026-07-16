@@ -1,8 +1,8 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 236 88" width="236" height="88" role="img" aria-label="Volar">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 232 84" width="232" height="84" role="img" aria-label="Volar">
   <!-- Precise system grotesk. One restrained detail: the initial V catches the amber key light. -->
-  <text x="6" y="62"
+  <text x="4" y="60"
         font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Inter', 'Segoe UI', Helvetica, Arial, sans-serif"
-        font-size="66" font-weight="600" letter-spacing="-2.4">
-    <tspan fill="#E8B25A">V</tspan><tspan fill="#EAECEF">olar</tspan>
+        font-size="64" font-weight="600" letter-spacing="-2.6">
+    <tspan fill="#E8B25A">V</tspan><tspan fill="#ECEEF1">olar</tspan>
   </text>
 </svg>
