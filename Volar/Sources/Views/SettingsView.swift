@@ -467,21 +467,27 @@ struct SettingsView: View {
     /// next time `appState.lastAppLinkAt` changes — see the `.onChange` below.
     @State private var testSignalAwaitingReceipt = false
     @State private var testSignalReceived = false
+    /// M1: whether it's safe to offer "Send test signal" — `AppLinkHandler.handle`'s exactly-one-
+    /// waiting-task rule can't be told a signal is a test, so it's only safe when nothing real is
+    /// currently waiting to be wrongly resolved. `wipCount()` is the same live-derived count
+    /// `MenuBarLabel`'s "⏳ N" badge uses (`DelegationTracker.wipCount()`, O(n) over tasks, cheap
+    /// enough to read directly in this computed property rather than caching it).
+    private var claudeTestSignalSafe: Bool {
+        (appState.delegation?.wipCount() ?? 0) == 0
+    }
 
     private var integrationsTab: some View {
         VStack(spacing: 12) {
-            if claudeDetected {
-                claudeCodeCard
-            } else {
-                SettingsRow(
-                    label: "Claude Code",
-                    hint: "Volar didn't find a ~/.claude folder on this Mac. Install the Claude Code CLI, then reopen Settings."
-                ) {
-                    Text("Not found")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(VolarColor.textMut)
-                }
-            }
+            // WG4 (ship-blocker, reviewer fix): this used to gate the ENTIRE card — including the
+            // "Connect…" button itself — on `claudeDetected`. Under App Sandbox, `detect()` returns
+            // `false` on first run (the container home has no `~/.claude`;
+            // `ClaudeCodeConnector.detect()`'s own doc comment says to treat `false` as "unknown,
+            // offer the picker" — never as "hide the connect affordance"). `claudeCodeCard` already
+            // internally branches connect-vs-disconnect on `claudeConnected` (the real gate — an
+            // actual granted NSOpenPanel/bookmark, fully entitled regardless of sandbox detection),
+            // so it's always shown; `claudeDetected` is used ONLY to soften the copy inside it now
+            // (see `claudeConnectHint` below).
+            claudeCodeCard
         }
         .task {
             claudeDetected = appState.claudeConnector.detect()
@@ -494,6 +500,17 @@ struct SettingsView: View {
         }
     }
 
+    /// WG4: the card's description line, softened by `claudeDetected` — never a gate on whether
+    /// the card (or its Connect button) is shown at all, only on which sentence explains it.
+    private var claudeConnectHint: String {
+        guard !claudeConnected else {
+            return "Installs a Stop hook so Claude Code tells Volar when an agent run finishes — Volar never reads Claude Code's own state, only receives this one signal (contracts/app-links.md)."
+        }
+        return claudeDetected
+            ? "Found ~/.claude on this Mac — connect to install a Stop hook so Claude Code tells Volar when an agent run finishes."
+            : "Choose your ~/.claude folder to connect. Volar couldn't confirm it's there automatically (normal under sandboxing) — it may still exist; pick it below."
+    }
+
     /// The full "Connect Claude Code" card: preview → connect/disconnect → test-signal, all in one
     /// `VolarColor.card` block (rather than several `SettingsRow`s) since the preview code block
     /// and multi-step connect flow don't fit that row's fixed label/hint/control shape.
@@ -503,7 +520,7 @@ struct SettingsView: View {
                 Text("Connect Claude Code")
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundStyle(VolarColor.textPri)
-                Text("Installs a Stop hook so Claude Code tells Volar when an agent run finishes — Volar never reads Claude Code's own state, only receives this one signal (contracts/app-links.md).")
+                Text(claudeConnectHint)
                     .font(.system(size: 12))
                     .foregroundStyle(VolarColor.textSec)
                     .lineSpacing(2)
@@ -528,11 +545,30 @@ struct SettingsView: View {
 
             HStack(spacing: 8) {
                 if claudeConnected {
-                    settingsPillButton("Send test signal", solid: true) { sendClaudeTestSignal() }
+                    // M1 (self-review "client-exploit", reviewer fix): `AppLinkHandler.handle` for
+                    // `ai-done` resolves (marks needs-review) whenever EXACTLY ONE task is currently
+                    // waiting on AI, regardless of whether the signal is a real Claude Code Stop
+                    // hook or this test button — `ClaudeCodeConnector.sendTestSignal()` (out of this
+                    // fix's file ownership) carries no marker distinguishing the two. Rather than
+                    // let "Send test signal" silently clear a real in-flight delegation, it's only
+                    // offered while there is nothing it COULD wrongly resolve (`wipCount() == 0`).
+                    // (`AppLinkHandler.handle` also now treats a future `test=1`/`probe=1` param as
+                    // receipt-only, forward-compatible if the connector is ever updated to send one
+                    // — see that file's `handleAIDone`.)
+                    if claudeTestSignalSafe {
+                        settingsPillButton("Send test signal", solid: true) { sendClaudeTestSignal() }
+                    }
                     settingsPillButton("Disconnect") { disconnectClaudeCode() }
                 } else {
                     settingsPillButton("Connect…", solid: true) { connectClaudeCode() }
                 }
+            }
+
+            if claudeConnected, !claudeTestSignalSafe {
+                Text("Test signal hidden while a delegation is waiting — sending it now could mark a real task reviewed instead of just testing the connection.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textMut)
+                    .lineLimit(3)
             }
 
             if testSignalAwaitingReceipt {
@@ -580,7 +616,19 @@ struct SettingsView: View {
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        panel.directoryURL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude", isDirectory: true)
+        // M2 (minor, reviewer fix): `FileManager.default.homeDirectoryForCurrentUser` under App
+        // Sandbox resolves to the SANDBOX CONTAINER's home, not the user's real home — pre-targeting
+        // `<container>/.claude` (which never exists) forced the user to navigate away every time.
+        // `NSHomeDirectoryForUser(NSUserName())` looks the real home up via the directory-services
+        // passwd entry directly, bypassing the sandbox's redirected `$HOME`, so it resolves to the
+        // user's ACTUAL home. Falls back to the real home directory itself (letting the user
+        // navigate from there) when `~/.claude` doesn't exist yet there, and never crashes/force-
+        // unwraps if resolution fails outright — the panel just opens at its own default location.
+        if let realHome = NSHomeDirectoryForUser(NSUserName()) {
+            let realHomeURL = URL(fileURLWithPath: realHome, isDirectory: true)
+            let claudeDir = realHomeURL.appendingPathComponent(".claude", isDirectory: true)
+            panel.directoryURL = FileManager.default.fileExists(atPath: claudeDir.path) ? claudeDir : realHomeURL
+        }
         panel.message = "Choose your ~/.claude folder so Volar can install the Claude Code hook."
         panel.prompt = "Grant Access"
         guard panel.runModal() == .OK, let url = panel.url else { return }

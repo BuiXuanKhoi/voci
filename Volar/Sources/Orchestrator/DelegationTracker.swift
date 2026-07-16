@@ -102,6 +102,24 @@ final class DelegationTracker {
     /// earliest-due-first (stable, no notion of urgency beyond that — the UI decides presentation).
     func dueForRecheck(now: Date = Date()) -> [UUID] {
         pruneOrphans()
+        // WG2 (ship-blocker, reviewer fix): `metaStore` alone can't tell a completed/reviewed task
+        // from one still genuinely in flight — every completion path (ambient [Done], NOW Done,
+        // voice-done, sweep) completes the task via `store.toggle`/`store.delete` WITHOUT touching
+        // this shadow store (only `markNeedsReview` removes a meta entry). Self-heal by
+        // cross-checking against the SAME live-store predicate `wipCount()`/`reconcileBatch()`
+        // already use — task exists in `store.fetchAll()`, `status != .done && status != .archived`,
+        // and still carries an unsatisfied waiting-on-AI condition — so a completed task's stale
+        // meta entry can never keep re-surfacing its check-in card. Also prunes the now-stale meta
+        // for excluded ids so the shadow store self-cleans (same shape as `pruneOrphans()`'s
+        // existing "task no longer exists" prune, one level stricter: "task exists but isn't
+        // waiting anymore").
+        let waitingIds = Set(
+            store.fetchAll()
+                .filter { $0.status != .done && $0.status != .archived }
+                .filter { $0.conditions.contains(where: Self.isWaitingOnAI) }
+                .map(\.id)
+        )
+        metaStore.pruneKeys(notIn: waitingIds)
         return metaStore.all()
             .filter { _, meta in meta.backoffStage < Self.batchOnlyStage && meta.checkBackAt <= now }
             .sorted { $0.value.checkBackAt < $1.value.checkBackAt }

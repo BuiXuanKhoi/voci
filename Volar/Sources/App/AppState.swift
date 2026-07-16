@@ -1804,6 +1804,24 @@ final class AppState {
     /// }
     /// ```
     func maybeShowEveningSweep() {
+        // WG3 (major, reviewer fix): `DelegationTracker.reconcileBatch()` was defined but had zero
+        // call sites — stage-2 (bumped past 30' → batch-only) delegations are deliberately excluded
+        // from `dueForRecheck` (see that method's own backoff-stage cutoff) and were consequently
+        // never resurfaced anywhere. `reconcileBatch()`'s own doc comment names its intended trigger
+        // as "natural touchpoints (popover open / evening)" — this evening-sweep call IS that
+        // touchpoint. Deliberately NOT unioned into the every-60s timer tick
+        // (`refreshDelegationQueue`): `reconcileBatch()` is independent of backoff stage, so
+        // surfacing it every tick would show every in-flight delegation immediately regardless of
+        // its check-back schedule, defeating the whole point of the 10'/30'/batch-only backoff.
+        // Once/evening (this call site) matches the contract's own "evening" touchpoint instead.
+        // Independent of the sweep-day gate below (a `showSweep` throttle for a DIFFERENT feature)
+        // so it still runs even when the sweep card itself was already shown today, or
+        // `sweepItems` is empty — a delegation-only evening still deserves its reconcile pass.
+        if let delegation {
+            let batchIds = delegation.reconcileBatch()
+            let alreadyQueued = Set(dueDelegationRechecks)
+            dueDelegationRechecks += batchIds.filter { !alreadyQueued.contains($0) }
+        }
         let day = Self.isoDayKey(from: clock())
         guard UserDefaults.standard.string(forKey: Self.sweepLastShownDayKey) != day, !sweepItems.isEmpty else { return }
         showSweep = true
@@ -2018,6 +2036,14 @@ final class AppState {
     /// signal "✓ received" confirmation, T044), and refreshes the ambient queue (an `ai-done` match
     /// can clear a delegation, which changes what's due).
     func onAppLinkHandled() {
+        // WG1 (major, reviewer fix): `AppLinkHandler.handle(_:)` (called just before this, in
+        // `VolarApp.swift`'s `.onOpenURL`) already ran the resolve chain (→ `markNeedsReview` →
+        // `store.clearFirstExternalCondition`) if it matched a task — but that mutates the STORE,
+        // not this file's `tasks` snapshot. Without this refresh, `activeTask`/`MenuBarLabel`
+        // (both derived from `tasks`) stay stale until some unrelated mutation happens to catch
+        // them up. The mutation (if any) already happened by the time this method runs, so
+        // refreshing first is correct here.
+        refreshFromStore()
         lastAppLinkAt = clock()
         pendingDisambiguationTaskIDs = appLinkHandler?.pendingDisambiguation ?? []
         refreshDelegationQueue()
@@ -2029,6 +2055,12 @@ final class AppState {
     /// re-syncs the mirrored `pendingDisambiguationTaskIDs`/queue exactly like `onAppLinkHandled`.
     func resolveAppLinkDisambiguation(taskId: UUID) {
         appLinkHandler?.resolveDisambiguation(taskId: taskId)
+        // WG1 (major, reviewer fix): same staleness gap as `onAppLinkHandled` above, for the
+        // disambiguation-card tap path — `resolveDisambiguation` above mutates the store via
+        // `markNeedsReview`, so the refresh runs AFTER that call (not literally the method's first
+        // statement) so `tasks` actually reflects what this call just changed, still strictly
+        // before `refreshDelegationQueue()`.
+        refreshFromStore()
         pendingDisambiguationTaskIDs = appLinkHandler?.pendingDisambiguation ?? []
         refreshDelegationQueue()
     }

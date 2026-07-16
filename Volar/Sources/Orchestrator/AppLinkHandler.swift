@@ -99,6 +99,19 @@ final class AppLinkHandler {
         // `tty` field to persist it into, so "stored" isn't achievable without editing that struct;
         // it is accepted and otherwise ignored until a future schema change adds the field.
         _ = params["tty"]
+        // M1 (self-review "client-exploit", reviewer fix): a test/probe signal must never resolve
+        // a REAL in-flight delegation. `ClaudeCodeConnector.sendTestSignal()` does not currently
+        // carry this marker (that file is out of this fix's scope), so the primary guard against
+        // "Send test signal" clearing a real delegation is the Settings-side gate (only enabled
+        // when `wipCount() == 0`, see SettingsView.swift) — but this check is added here too,
+        // forward-compatible with a future connector change that DOES send `test=1`/`probe=1`:
+        // receipt-only, matching ladder skipped entirely, never resolves a task. The caller still
+        // observes the round trip via `AppState.lastAppLinkAt` (stamped unconditionally by
+        // `onAppLinkHandled()`), so "✓ received" still works.
+        if params["test"] == "1" || params["probe"] == "1" {
+            log("ai-done received with test/probe=1 — receipt-only, matching ladder skipped")
+            return
+        }
         let waiting = waitingTaskIDs()
         guard !waiting.isEmpty else {
             log("ai-done received with no tasks currently waiting on AI — ignored")
