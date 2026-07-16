@@ -26,12 +26,18 @@ struct MenuBarLabel: View {
 
     // MARK: - Idle
 
+    // Studio Dark: calm/quiet at rest — muted secondary-text tone rather than a raw white, so the
+    // idle glyph recedes in the menu bar instead of reading as "on". UNVERIFIED (not rendered).
     private var idleContent: some View {
-        VocIcon(.mic, size: 14, color: Color.white.opacity(0.7), weight: .regular)
+        VocIcon(.mic, size: 14, color: VociColor.textSec, weight: .regular)
     }
 
     // MARK: - Listening
 
+    // Recording/capture indicator — intentionally still driven by `appState.accent` (the user's
+    // selectable accent, preserved binding), NOT the reserved `nowAccent` spotlight: this badge
+    // means "capturing audio", not "this is the NOW task". Only the font face moves to the
+    // `vociMono` instrument token for Studio Dark fidelity. UNVERIFIED (not rendered).
     private var listeningContent: some View {
         HStack(spacing: 4) {
             ZStack {
@@ -43,7 +49,7 @@ struct MenuBarLabel: View {
                 VocIcon(.mic, size: 14, color: accentColors.solid, weight: .semibold)
             }
             Text("REC")
-                .font(.system(size: 10.5, weight: .medium, design: .monospaced))
+                .font(Font.vociMono(size: 10.5, weight: .medium))
                 .foregroundStyle(accentColors.solid)
                 .tracking(0.3)
         }
@@ -51,22 +57,28 @@ struct MenuBarLabel: View {
 
     // MARK: - Focus lock
 
+    // This IS the single NOW/active task, so the small lock badge (mic + dot) is the one place in
+    // the menu bar allowed to carry the reserved warm `nowAccent` — used sparingly on the badge
+    // only, never washed across the title. The title itself stays calm/legible primary text; the
+    // countdown is an instrument readout (mono face, cool `instrument` tone) per Theme.swift's own
+    // "timers" example under §05. No looping/breathing animation added — static only, per the
+    // historical AppKit layout-thrash removal. UNVERIFIED (not rendered).
     private var focusLockContent: some View {
         HStack(spacing: 5) {
             ZStack(alignment: .bottomTrailing) {
-                VocIcon(.mic, size: 14, color: accentColors.solid, weight: .semibold)
+                VocIcon(.mic, size: 14, color: VociColor.nowAccent, weight: .semibold)
                 Circle()
-                    .fill(accentColors.solid)
+                    .fill(VociColor.nowAccent)
                     .frame(width: 6, height: 6)
                     .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 0.5))
-                    .shadow(color: accentColors.glow, radius: 3)
+                    .shadow(color: VociColor.nowGlow, radius: 3)
                     .offset(x: 2, y: 2)
             }
 
             if let title = appState.activeTask?.title {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(accentColors.solid)
+                    .foregroundStyle(VociColor.textPri)
                     .lineLimit(1)
                     .truncationMode(.tail)
                     .frame(maxWidth: 120, alignment: .leading)
@@ -77,8 +89,8 @@ struct MenuBarLabel: View {
             }
 
             Text(timerLabel)
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
-                .foregroundStyle(accentColors.solid)
+                .font(Font.vociMono(size: 11, weight: .medium))
+                .foregroundStyle(VociColor.instrument)
                 .monospacedDigit()
         }
     }
