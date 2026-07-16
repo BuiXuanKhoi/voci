@@ -187,7 +187,7 @@ final class AppState {
     /// live `tasks` snapshot on every access, so there is no cached "active" state that can drift
     /// out of sync with `tasks`.
     var activeTask: TaskItem? {
-        let engineTasks = tasks.map { $0.toEngineTask() }
+        let engineTasks = tasks.map { $0.snapshot() }
         guard let winner = VociCore.nextTask(from: engineTasks, now: clock()) else { return nil }
         return tasks.first { $0.id == winner.id }
     }
@@ -405,7 +405,7 @@ final class AppState {
             priority: parsed.priority,
             status: .todo,
             deadline: nil,
-            dependsOn: [],
+            conditions: [],
             createdAt: clock(),
             when: .now,
             durationMinutes: parsed.durationMinutes,
@@ -539,7 +539,7 @@ final class AppState {
                 priority: .medium,
                 status: .todo,
                 deadline: nil,
-                dependsOn: [],
+                conditions: [],
                 createdAt: clock(),
                 when: .later,
                 durationMinutes: nil,

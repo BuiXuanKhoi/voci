@@ -15,7 +15,7 @@ struct NextTaskTests {
         let inProgress = makeTask(id: fixedUUID(1), status: .inProgress, priority: 3)
         let higherPriorityTodo = makeTask(id: fixedUUID(2), status: .todo, priority: 1)
 
-        let result = nextTask(from: [inProgress, higherPriorityTodo], now: referenceNow, calendar: testCalendar)
+        let result = nextTask(from: [inProgress, higherPriorityTodo], now: referenceNow)
 
         #expect(result?.id == inProgress.id)
     }
@@ -26,7 +26,7 @@ struct NextTaskTests {
         let overdue = makeTask(id: fixedUUID(1), status: .todo, priority: 4, deadline: yesterday())
         let priorityOneNoDeadline = makeTask(id: fixedUUID(2), status: .todo, priority: 1, deadline: nil)
 
-        let result = nextTask(from: [overdue, priorityOneNoDeadline], now: referenceNow, calendar: testCalendar)
+        let result = nextTask(from: [overdue, priorityOneNoDeadline], now: referenceNow)
 
         #expect(result?.id == overdue.id)
     }
@@ -39,7 +39,7 @@ struct NextTaskTests {
         let deadlineTomorrow = makeTask(id: fixedUUID(1), status: .todo, priority: 4, deadline: tomorrow())
         let priorityOneNoDeadline = makeTask(id: fixedUUID(2), status: .todo, priority: 1, deadline: nil)
 
-        let result = nextTask(from: [deadlineTomorrow, priorityOneNoDeadline], now: referenceNow, calendar: testCalendar)
+        let result = nextTask(from: [deadlineTomorrow, priorityOneNoDeadline], now: referenceNow)
 
         #expect(result?.id == priorityOneNoDeadline.id)
     }
@@ -51,8 +51,8 @@ struct NextTaskTests {
         let taskA = makeTask(id: fixedUUID(1), status: .todo, priority: 2, deadline: nil, createdAt: referenceNow)
         let taskB = makeTask(id: fixedUUID(2), status: .todo, priority: 2, deadline: nil, createdAt: referenceNow)
 
-        let resultInOrder = nextTask(from: [taskA, taskB], now: referenceNow, calendar: testCalendar)
-        let resultShuffled = nextTask(from: [taskB, taskA], now: referenceNow, calendar: testCalendar)
+        let resultInOrder = nextTask(from: [taskA, taskB], now: referenceNow)
+        let resultShuffled = nextTask(from: [taskB, taskA], now: referenceNow)
 
         #expect(resultInOrder?.id == taskA.id)
         #expect(resultShuffled?.id == taskA.id)
@@ -66,7 +66,7 @@ struct NextTaskTests {
         let priorityFour = makeTask(id: fixedUUID(1), status: .todo, priority: 4)
         let noPriority = makeTask(id: fixedUUID(2), status: .todo, priority: nil)
 
-        let result = nextTask(from: [priorityFour, noPriority], now: referenceNow, calendar: testCalendar)
+        let result = nextTask(from: [priorityFour, noPriority], now: referenceNow)
 
         #expect(result?.id == priorityFour.id)
     }
@@ -80,13 +80,11 @@ struct NextTaskTests {
 
         let resultInOrder = nextTask(
             from: [inProgressLowerPriority, inProgressHigherPriority],
-            now: referenceNow,
-            calendar: testCalendar
+            now: referenceNow
         )
         let resultShuffled = nextTask(
             from: [inProgressHigherPriority, inProgressLowerPriority],
-            now: referenceNow,
-            calendar: testCalendar
+            now: referenceNow
         )
 
         #expect(resultInOrder?.id == inProgressHigherPriority.id)
@@ -95,7 +93,7 @@ struct NextTaskTests {
 
     @Test("empty task set returns nil")
     func emptyTaskSetReturnsNil() {
-        let result = nextTask(from: [], now: referenceNow, calendar: testCalendar)
+        let result = nextTask(from: [], now: referenceNow)
 
         #expect(result == nil)
     }
@@ -105,7 +103,7 @@ struct NextTaskTests {
         let doneTask = makeTask(id: fixedUUID(1), status: .done)
         let archivedTask = makeTask(id: fixedUUID(2), status: .archived)
 
-        let result = nextTask(from: [doneTask, archivedTask], now: referenceNow, calendar: testCalendar)
+        let result = nextTask(from: [doneTask, archivedTask], now: referenceNow)
 
         #expect(result == nil)
     }

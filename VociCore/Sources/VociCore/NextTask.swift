@@ -4,106 +4,111 @@ import Foundation
 /// eligible.
 ///
 /// This is the core of Constitution Principle III (Deterministic, Pure, Test-Gated Core): the
-/// function performs no I/O, reads no global clock, and depends only on its three arguments.
-/// For identical `(tasks, now, calendar)` it always returns the same result, regardless of the
-/// order of `tasks` in the array (see `orderedBefore(now:calendar:)` for the total-order
-/// guarantee that makes this true).
+/// function performs no I/O, reads no global clock, and depends only on its two arguments. For
+/// identical `(snapshot, now)` it always returns the same result, regardless of the order of
+/// `snapshot` (see `Task.orderedBefore(_:now:)` for the total-order guarantee that makes this
+/// true).
 ///
-/// Eligibility (contract C-S1/C-S2):
+/// Eligibility (v2 — see `Condition.swift` and `specs/002-workflow-command-center/data-model.md`
+/// "Engine layer"):
 /// - Only tasks with `status ∈ {.todo, .inProgress}` are considered.
-/// - A task is excluded while any `dependsOn` id is unresolved. An id is *resolved* when the
-///   task it refers to is `.done`, `.archived`, or absent from `tasks` (deleted).
+/// - A task is excluded while any of its `conditions` is unsatisfied (AND semantics).
+/// - A task that is the parent (via another task's `parentId`) of any `.todo`/`.inProgress`
+///   child is excluded, even if that child is itself ineligible for other reasons.
 ///
-/// Ordering (contract C-S3): among eligible tasks, the minimum under
-/// `orderedBefore(now:calendar:)` is returned.
+/// Ordering (unchanged from 001): among eligible tasks, the minimum under
+/// `Task.orderedBefore(_:now:)` is returned.
+public func nextTask(from snapshot: [Task], now: Date) -> Task? {
+    eligibleTasks(in: snapshot, now: now).min { $0.orderedBefore($1, now: now) }
+}
+
+/// All eligible tasks in `snapshot` at `now`, in the original (unordered) array order. Shared by
+/// `nextTask` and `eligibilityDiff` (`Snapshots.swift`) so the eligibility rule lives in exactly
+/// one place.
 ///
-/// Auto-advance (User Story 2): this function has no notion of an "active" task or history —
-/// completing a task and re-invoking `nextTask(from:now:calendar:)` with the updated snapshot
-/// (the completed task now has `status == .done`) is sufficient to advance to the next correct
-/// task, because `.done` tasks are never eligible. Recomputing after every status change, and
-/// any "Next: …" transition, is the caller's (app's) responsibility — this module only ever
-/// answers "what is next task right now for this snapshot".
-public func nextTask(
-    from tasks: [Task],
-    now: Date,
-    calendar: Calendar = .current
-) -> Task? {
-    // Build an id -> status lookup once per call so dependency resolution is O(1) per edge
-    // instead of an O(n) scan per prerequisite. Built with an explicit loop (rather than
-    // `Dictionary(uniqueKeysWithValues:)`) so a malformed snapshot with duplicate ids cannot
-    // crash the engine; the last occurrence for a given id wins.
+/// O(n) precomputation (an `id -> status` lookup and an `id -> hasOpenChild` set, each built with
+/// a single pass) followed by an O(n) filter — no per-task or per-comparison rescans of the
+/// snapshot, so this stays linear even at large n.
+func eligibleTasks(in snapshot: [Task], now: Date) -> [Task] {
+    // Built with an explicit loop (rather than `Dictionary(uniqueKeysWithValues:)`) so a
+    // malformed snapshot with duplicate ids cannot crash the engine; the last occurrence for a
+    // given id wins.
     var statusByID: [UUID: TaskStatus] = [:]
-    statusByID.reserveCapacity(tasks.count)
-    for task in tasks {
+    statusByID.reserveCapacity(snapshot.count)
+    for task in snapshot {
         statusByID[task.id] = task.status
     }
 
-    let eligible = tasks.filter { task in
-        guard task.status == .todo || task.status == .inProgress else { return false }
-        return task.dependsOn.allSatisfy { prerequisiteID in
-            guard let prerequisiteStatus = statusByID[prerequisiteID] else {
-                // Absent from the snapshot: deleted, therefore resolved.
-                return true
-            }
-            return prerequisiteStatus == .done || prerequisiteStatus == .archived
-        }
+    // Ids that are the `parentId` of at least one currently-open (todo/inProgress) task. This is
+    // a single O(n) pass over direct parent-child edges only — it does not walk parent chains,
+    // so a `parentId` cycle in adversarial data cannot cause unbounded recursion here.
+    var parentsWithOpenChild: Set<UUID> = []
+    parentsWithOpenChild.reserveCapacity(snapshot.count)
+    for task in snapshot {
+        guard let parentId = task.parentId,
+              task.status == .todo || task.status == .inProgress
+        else { continue }
+        parentsWithOpenChild.insert(parentId)
     }
 
-    return eligible.min(by: orderedBefore(now: now, calendar: calendar))
+    return snapshot.filter { task in
+        guard task.status == .todo || task.status == .inProgress else { return false }
+        guard !parentsWithOpenChild.contains(task.id) else { return false }
+        return task.conditions.allSatisfy { $0.isSatisfied(statusByID: statusByID, now: now) }
+    }
 }
 
-/// A strict total order over tasks for a given reference time: returns `true` iff `a` should be
-/// selected before `b`.
-///
-/// Comparison is first-difference-wins across five tiers (data-model.md):
-/// 1. Status class — `.inProgress` before `.todo` (and, defensively, before `.done`/`.archived`
-///    should this comparator ever be invoked on ineligible tasks).
-/// 2. Deadline urgency relative to `now` (using the injected `calendar` for day-boundary
-///    classification) — a today-or-overdue deadline ranks before no such deadline; among
-///    today/overdue tasks, the earlier deadline instant ranks first. A deadline strictly in the
-///    future beyond today does NOT participate in this tier (contract C-O3).
-/// 3. Explicit priority ascending (1 highest); `nil` (unset) ranks after every explicit 1...4
-///    value (contract C-O4).
-/// 4. Earlier `createdAt` first.
-/// 5. Lexical order of `id.uuidString` — this final tier is total over distinct `UUID`s, which
-///    is what makes the overall relation a strict total order (irreflexive, asymmetric,
-///    transitive) and therefore safe to pass to `Array.min(by:)` (contract C-O2).
-public func orderedBefore(
-    now: Date,
-    calendar: Calendar = .current
-) -> (_ a: Task, _ b: Task) -> Bool {
-    return { a, b in
+extension Task {
+    /// A strict total order over tasks for a given reference time: returns `true` iff `self`
+    /// should be selected before `other`.
+    ///
+    /// Comparison is first-difference-wins across five tiers (data-model.md; unchanged from
+    /// 001):
+    /// 1. Status class — `.inProgress` before `.todo` (and, defensively, before `.done`/
+    ///    `.archived` should this comparator ever be invoked on ineligible tasks).
+    /// 2. Deadline urgency relative to `now` — a today-or-overdue deadline ranks before no such
+    ///    deadline; among today/overdue tasks, the earlier deadline instant ranks first. A
+    ///    deadline strictly in the future beyond today does NOT participate in this tier.
+    /// 3. Explicit priority ascending (1 highest); `nil` (unset) ranks after every explicit
+    ///    1...4 value.
+    /// 4. Earlier `createdAt` first.
+    /// 5. Lexical order of `id.uuidString` — this final tier is total over distinct `UUID`s,
+    ///    which is what makes the overall relation a strict total order (irreflexive,
+    ///    asymmetric, transitive) and therefore safe to pass to `Array.min(by:)`.
+    public func orderedBefore(_ other: Task, now: Date) -> Bool {
         // Tier 1: status class.
-        let aStatusRank = statusRank(a.status)
-        let bStatusRank = statusRank(b.status)
-        if aStatusRank != bStatusRank {
-            return aStatusRank < bStatusRank
+        let selfStatusRank = statusRank(status)
+        let otherStatusRank = statusRank(other.status)
+        if selfStatusRank != otherStatusRank {
+            return selfStatusRank < otherStatusRank
         }
 
         // Tier 2: deadline urgency (today/overdue) relative to `now`.
-        let aIsNearTerm = isNearTermDeadline(a.deadline, now: now, calendar: calendar)
-        let bIsNearTerm = isNearTermDeadline(b.deadline, now: now, calendar: calendar)
-        if aIsNearTerm != bIsNearTerm {
-            return aIsNearTerm
+        let selfIsNearTerm = isNearTermDeadline(deadline, now: now)
+        let otherIsNearTerm = isNearTermDeadline(other.deadline, now: now)
+        if selfIsNearTerm != otherIsNearTerm {
+            return selfIsNearTerm
         }
-        if aIsNearTerm, bIsNearTerm, let aDeadline = a.deadline, let bDeadline = b.deadline, aDeadline != bDeadline {
-            return aDeadline < bDeadline
+        if selfIsNearTerm, otherIsNearTerm,
+           let selfDeadline = deadline, let otherDeadline = other.deadline,
+           selfDeadline != otherDeadline {
+            return selfDeadline < otherDeadline
         }
 
         // Tier 3: explicit priority ascending; nil sorts after every explicit value.
-        let aPriorityRank = priorityRank(a.priority)
-        let bPriorityRank = priorityRank(b.priority)
-        if aPriorityRank != bPriorityRank {
-            return aPriorityRank < bPriorityRank
+        let selfPriorityRank = priorityRank(priority)
+        let otherPriorityRank = priorityRank(other.priority)
+        if selfPriorityRank != otherPriorityRank {
+            return selfPriorityRank < otherPriorityRank
         }
 
         // Tier 4: earlier creation time first.
-        if a.createdAt != b.createdAt {
-            return a.createdAt < b.createdAt
+        if createdAt != other.createdAt {
+            return createdAt < other.createdAt
         }
 
         // Tier 5: stable total-order tiebreak.
-        return a.id.uuidString < b.id.uuidString
+        return id.uuidString < other.id.uuidString
     }
 }
 
@@ -120,13 +125,31 @@ private func statusRank(_ status: TaskStatus) -> Int {
     }
 }
 
+/// The fixed calendar the engine uses for "same calendar day" classification (tier 2). The v2
+/// public API dropped the `calendar` parameter that 001 exposed (`nextTask(from:now:calendar:)`)
+/// to keep the engine fully deterministic regardless of the host device's locale/time zone
+/// settings — see `specs/002-workflow-command-center/contracts/vocicore-api.md`. Gregorian/UTC
+/// matches the fixed calendar the test suite already anchors on (`Fixtures.swift`).
+// UNVERIFIED: confirm on Mac (and with product) that pinning "today" classification to UTC
+// (rather than the device's local calendar, as 001's `calendar: Calendar = .current` default
+// did) is the intended v2 behavior. The public API contract removed the `calendar` parameter
+// entirely, and purity (no locale/timezone reads) requires a fixed calendar here — UTC is the
+// only calendar the engine can canonically agree on with the test suite (`Fixtures.swift`'s
+// `testCalendar`). If deadlines are stored/compared in the user's local time near a day
+// boundary, this can classify "today" differently than local-calendar 001 did.
+private let engineCalendar: Calendar = {
+    var calendar = Calendar(identifier: .gregorian)
+    calendar.timeZone = TimeZone(identifier: "UTC")!
+    return calendar
+}()
+
 /// A deadline is "near-term" (today or overdue) relative to `now` iff it is strictly before
-/// `now` (overdue) or falls on the same local calendar day as `now` (today), per the injected
-/// `calendar`. A `nil` deadline, or one strictly in the future beyond today, is not near-term.
-private func isNearTermDeadline(_ deadline: Date?, now: Date, calendar: Calendar) -> Bool {
+/// `now` (overdue) or falls on the same UTC calendar day as `now` (today). A `nil` deadline, or
+/// one strictly in the future beyond today, is not near-term.
+private func isNearTermDeadline(_ deadline: Date?, now: Date) -> Bool {
     guard let deadline else { return false }
     if deadline < now { return true }
-    return calendar.isDate(deadline, inSameDayAs: now)
+    return engineCalendar.isDate(deadline, inSameDayAs: now)
 }
 
 /// Maps an optional priority to a rank where lower sorts first; `nil` (unset) maps to a value

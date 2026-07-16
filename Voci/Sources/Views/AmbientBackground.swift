@@ -257,30 +257,142 @@ private struct SplitMix64: RandomNumberGenerator {
 }
 
 /// `.custom` mode: an on-disk image (dimmed, cover-fit), or a placeholder hatch pattern with
-/// hint text when no image has been chosen yet. Loaded via `NSImage(contentsOf:)` — simpler and
-/// more reliable for arbitrary local file URLs than routing through `AsyncImage`'s `URLSession`
-/// loader, at the cost of a small synchronous decode (acceptable for a local ambient-picker image).
+/// hint text when no image has been chosen yet. Loaded via `SecureImageBookmark.loadImage`
+/// (sandbox-safe) instead of a raw `NSImage(contentsOf: url)` call — see that type's docs.
+///
+/// Loads once (`.task`/`.onChange`, not inline in `body`) into `@State`, rather than decoding on
+/// every `body` evaluation the way the pre-sandbox version did — a small incidental perf
+/// improvement, not a full fix: this mode has no `TimelineView` driving it, so `body` was already
+/// infrequent, but eager per-body decode was still there before. Bookmark resolution + decode
+/// still happens synchronously on the main thread when it *does* run (kept in scope per the
+/// feature 002 Phase 1 boundary — flagged for the reviewer, not refactored further here).
 private struct CustomImageLayer: View {
     let url: URL?
 
+    @State private var image: NSImage?
+
     var body: some View {
-        if let url, let nsImage = NSImage(contentsOf: url) {
-            Image(nsImage: nsImage)
-                .resizable()
-                .aspectRatio(contentMode: .fill)
-                .brightness(-0.45)
-                .saturation(0.9)
-                .clipped()
-        } else {
-            ZStack {
-                Color(voci: 0x14141A)
-                HatchPattern()
-                Text("Choose an image in Settings → Appearance")
-                    .font(.system(size: 12, design: .monospaced))
-                    .tracking(0.48)
-                    .foregroundStyle(Color.white.opacity(0.28))
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .brightness(-0.45)
+                    .saturation(0.9)
+                    .clipped()
+            } else {
+                ZStack {
+                    Color(voci: 0x14141A)
+                    HatchPattern()
+                    Text("Choose an image in Settings → Appearance")
+                        .font(.system(size: 12, design: .monospaced))
+                        .tracking(0.48)
+                        .foregroundStyle(Color.white.opacity(0.28))
+                }
             }
         }
+        .onAppear { reload() }
+        .onChange(of: url) { _, _ in reload() }
+    }
+
+    private func reload() {
+        image = SecureImageBookmark.loadImage(fallbackRawURL: url)
+    }
+}
+
+/// Security-scoped bookmark plumbing for the custom ambient background image (App Sandbox — T002).
+///
+/// `AppState.customImageURL` / `AppState.setCustomImage` (frozen §4 surface, not edited here)
+/// keep persisting a *raw file path* under their own `"voci.customImageURL"` UserDefaults key —
+/// that storage is left exactly as-is. This type layers an independent, sandbox-safe bookmark on
+/// top under a NEW key (`"voci.customImageBookmarkData"`), written by `SettingsView`'s image
+/// picker (`SecureImageBookmark.save(for:)`, alongside — not instead of — `appState.setCustomImage`)
+/// and consulted here and by `SettingsView`'s thumbnail, instead of trusting the raw path.
+///
+/// **One-time migration**: if no bookmark was ever saved (e.g. the image was picked on a build
+/// before this sandbox migration shipped, or while sandboxing was off), `loadImage` falls back to
+/// a direct `NSImage(contentsOf:)` read of the legacy raw path. Under App Sandbox that only
+/// succeeds if the file happens to still be in an already-granted location (e.g. the very same
+/// launch/session that picked it, since `NSOpenPanel` grants a transient extension); after a
+/// relaunch it will typically fail and this degrades *silently* to "no image" (the hatch
+/// placeholder below) — never a crash. The user just needs to re-pick once via Settings, which
+/// writes a durable bookmark and this fallback is never needed again for that image.
+enum SecureImageBookmark {
+    private static let bookmarkKey = "voci.customImageBookmarkData"
+
+    /// Creates a security-scoped bookmark for `url` and persists it. `url` should come straight
+    /// from an active `NSOpenPanel` selection (or a previously-resolved security-scoped URL,
+    /// which `loadImage` also feeds back through here on stale-bookmark refresh) — that is what
+    /// grants the scope needed to create the bookmark data in the first place.
+    static func save(for url: URL) {
+        do {
+            let data = try url.bookmarkData(
+                options: .withSecurityScope,
+                includingResourceValuesForKeys: nil,
+                relativeTo: nil
+            )
+            UserDefaults.standard.set(data, forKey: bookmarkKey)
+        } catch {
+            // Best-effort only: if bookmark creation fails (e.g. `.withSecurityScope` can throw
+            // when the app isn't actually sandboxed, or the URL wasn't panel-granted), skip
+            // silently — the legacy raw-path fallback in `loadImage` still covers that case, and
+            // nothing here should ever crash the Settings UI over a background-image picker.
+            print("[Voci.SecureImageBookmark] save failed: \(error)")
+        }
+    }
+
+    /// Clears the saved bookmark. Call when the user removes the custom image (`Remove` button in
+    /// SettingsView), so a stale bookmark from a previously-chosen image never gets picked back up.
+    static func clear() {
+        UserDefaults.standard.removeObject(forKey: bookmarkKey)
+    }
+
+    /// Resolves the bookmark, decodes an `NSImage` while the security scope is active, then stops
+    /// accessing it before returning. `NSImage(contentsOf:)` decodes eagerly, so the returned
+    /// image is fully backed by in-memory data and safe to keep/draw after the scope closes —
+    /// `startAccessingSecurityScopedResource()`/`stopAccessingSecurityScopedResource()` stay
+    /// correctly paired via `defer`, so a failed decode still releases the scope (no leaked
+    /// file-handle/scope-count, which would otherwise quietly exhaust over repeated calls).
+    ///
+    /// Never throws: any failure — missing bookmark, stale/moved file, tampered UserDefaults data,
+    /// decode failure — returns `nil` so callers show the placeholder instead of crashing. A
+    /// tampered/corrupt bookmark blob specifically fails via the `catch` below (fails closed).
+    static func loadImage(fallbackRawURL: URL?) -> NSImage? {
+        guard let data = UserDefaults.standard.data(forKey: bookmarkKey) else {
+            return legacyRawLoad(fallbackRawURL)
+        }
+
+        var isStale = false
+        let resolved: URL
+        do {
+            resolved = try URL(
+                resolvingBookmarkData: data,
+                options: .withSecurityScope,
+                relativeTo: nil,
+                bookmarkDataIsStale: &isStale
+            )
+        } catch {
+            print("[Voci.SecureImageBookmark] resolve failed: \(error)")
+            return legacyRawLoad(fallbackRawURL)
+        }
+
+        guard resolved.startAccessingSecurityScopedResource() else { return nil }
+        defer { resolved.stopAccessingSecurityScopedResource() }
+
+        let image = NSImage(contentsOf: resolved)
+
+        if isStale {
+            // Re-mint the bookmark from the just-resolved URL so future loads don't keep paying
+            // the staleness-resolution path, and so a subsequent underlying-location change
+            // (e.g. the file moved within an already-granted folder) keeps being picked up.
+            save(for: resolved)
+        }
+        return image
+    }
+
+    private static func legacyRawLoad(_ url: URL?) -> NSImage? {
+        guard let url else { return nil }
+        return NSImage(contentsOf: url)
     }
 }
 

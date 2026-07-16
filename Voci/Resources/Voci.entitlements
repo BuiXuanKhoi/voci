@@ -3,21 +3,42 @@
 <plist version="1.0">
 <dict>
 	<!--
-	  Tradeoff: App Sandbox is deliberately left OFF (no `com.apple.security.app-sandbox` key).
+	  feature 002 (plan.md Technical Context: "Mac App Store distribution: App Sandbox ON, no
+	  Accessibility-dependent paths"; research.md R3). This SUPERSEDES the prior revision of this
+	  file, which deliberately left the sandbox OFF because HotkeyManager needed
+	  NSEvent.addGlobalMonitorForEvents (Accessibility-gated, MAS-hostile). HotkeyManager
+	  (Sources/Speech/HotkeyManager.swift) now uses Carbon RegisterEventHotKey, which needs no
+	  Accessibility permission and is sandbox-legal, so that blocker is gone.
 
-	  HotkeyManager (Phase 2) needs a global NSEvent monitor for the hold-to-talk gesture
-	  (Ctrl+Option+Space keyDown/keyUp), which requires Accessibility permission and does not
-	  reliably deliver events outside the app's own windows when the app is sandboxed. A fully
-	  sandboxed build would need a separate Accessibility-permission XPC helper to keep the
-	  global monitor working, which is out of scope for v1.
-
-	  Because the app is non-sandboxed, no `com.apple.security.device.audio-input` entitlement
-	  is required either: microphone access is governed purely by the
-	  NSMicrophoneUsageDescription Info.plist key and the standard macOS TCC consent prompt.
-
-	  Cost: this app cannot be distributed via the Mac App Store as-is (sandboxing is mandatory
-	  there). Acceptable for an indie/direct-distributed menu-bar utility for now — revisit if
-	  App Store distribution becomes a goal (tracked in backlog.md).
+	  Minimal set only — five keys, nothing else. No temporary-exception entitlements, no Apple
+	  Events, no broader file access than user-selected read-write + its bookmark counterpart.
 	-->
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+
+	<!-- Outbound calls only: Supabase Edge Function proxy (Groq speech + future /parse route)
+	     and WhisperKit's one-time model download. No inbound/listening capability requested. -->
+	<key>com.apple.security.network.client</key>
+	<true/>
+
+	<!-- CRITICAL: without this the microphone silently stops working under App Sandbox even
+	     though NSMicrophoneUsageDescription (Info.plist) is set — TCC never even prompts, capture
+	     just fails. This is the one entitlement whose absence breaks the app's core function. -->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!-- NSOpenPanel-driven file access: the custom ambient background image picker today
+	     (SettingsView.swift `chooseImage`), and the future "Connect Claude Code" ~/.claude
+	     picker (Orchestrator, later phase). Grants access only to files the user explicitly
+	     picks via the panel — not arbitrary filesystem access. -->
+	<key>com.apple.security.files.user-selected.read-write</key>
+	<true/>
+
+	<!-- Lets security-scoped bookmarks created from those NSOpenPanel selections keep resolving
+	     across relaunches (see SecureImageBookmark in AmbientBackground.swift). Without this,
+	     picked-file access is revoked the moment the app quits and every bookmark resolve would
+	     fail on next launch. -->
+	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
 </dict>
 </plist>

@@ -80,7 +80,9 @@ func makeTask(
     status: TaskStatus = .todo,
     priority: Int? = nil,
     deadline: Date? = nil,
-    dependsOn: [UUID] = [],
+    conditions: [Condition] = [],
+    estimateMinutes: Int? = nil,
+    parentId: UUID? = nil,
     createdAt: Date = referenceNow
 ) -> Task {
     Task(
@@ -89,7 +91,9 @@ func makeTask(
         status: status,
         priority: priority,
         deadline: deadline,
-        dependsOn: dependsOn,
+        conditions: conditions,
+        estimateMinutes: estimateMinutes,
+        parentId: parentId,
         createdAt: createdAt
     )
 }

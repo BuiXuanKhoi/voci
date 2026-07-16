@@ -19,6 +19,10 @@ targets:
     type: application
     platform: macOS
     deploymentTarget: "14.0"
+    # `path: Sources` is a whole-tree reference, so xcodegen recursively picks up every
+    # subfolder under it (incl. Parsing/, Reminders/, Orchestrator/ added for feature 002 —
+    # each ships one _Placeholder.swift so the folder is never empty) with no per-path entries
+    # needed here.
     sources:
       - path: Sources
       - path: Resources
@@ -36,6 +40,10 @@ targets:
         SWIFT_VERSION: "6.0"
         SWIFT_STRICT_CONCURRENCY: complete
         ENABLE_HARDENED_RUNTIME: YES
+        # NOTE (feature 002): GENERATE_INFOPLIST_FILE stays NO — the `voci://` CFBundleURLTypes
+        # registration (contracts/app-links.md) is declared directly in the physical
+        # Resources/Info.plist instead of xcodegen's `target.info.properties` merge mechanism,
+        # since that mechanism only applies when xcodegen itself generates the Info.plist.
         GENERATE_INFOPLIST_FILE: NO
         ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
     dependencies:

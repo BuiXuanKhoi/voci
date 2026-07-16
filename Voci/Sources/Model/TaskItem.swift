@@ -1,4 +1,5 @@
-// Sources/Model/TaskItem.swift — UI/domain task model + mapping into VociCore.Task (frozen §4)
+// Sources/Model/TaskItem.swift — UI/domain task model + mapping into VociCore.Task (v2 shape,
+// contracts/vocicore-api.md). See VociTask.swift for the paired SwiftData persistence model.
 import Foundation
 import VociCore
 
@@ -29,11 +30,44 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     var priority: Priority
     var status: TaskStatus
     var deadline: Date?
-    var dependsOn: [UUID]
+    /// Gates eligibility (replaces v1's `dependsOn: [UUID]` — data-model.md "Persisted layer").
+    /// AND semantics, mirrors `VociCore.Task.conditions` 1:1 (see `snapshot()`). `.taskDone`
+    /// edges must be validated via `TaskStore` before being attached (validation rule 1); this
+    /// struct itself carries no validation, matching `VociCore.Condition`'s own pure-value
+    /// nature — see `TaskStore`'s doc comments for the trust-boundary note.
+    var conditions: [VociCore.Condition]
     var createdAt: Date
     var when: When
     var durationMinutes: Int?
     var frog: Bool
+
+    // MARK: - v2 fields (specs/002-workflow-command-center/data-model.md "Persisted layer")
+
+    /// Free-text notes, distinct from `details` (which stays the voice-capture read-back copy
+    /// spoken by `AppState.speakDetails`).
+    var notes: String?
+    /// Verbatim utterance for voice-created tasks — always kept (FR-001).
+    var sourceTranscript: String?
+    var kind: TaskKind
+    /// Leaf tasks only — `TaskStore.setRecurrence`/`add`/`addBatch` reject setting this on a task
+    /// that has children (validation rule 2).
+    var recurrence: Recurrence?
+    /// `nil` -> global default `ReminderPolicy.defaultPolicy`.
+    var reminderOverride: ReminderPolicy?
+    /// "Save game" note surfaced on re-entry (FR-042).
+    var resumeNote: String?
+    /// Đổi-gió counter; ≥3 triggers a one-time breakdown suggestion (FR-030).
+    var switchAwayCount: Int
+    /// Latest completion instant; full history lives in `CompletionEvent` — recurrence resets
+    /// in place, so this field alone can't reconstruct history.
+    var completedAt: Date?
+    /// Breakdown child -> parent link. Engine rule: a task that is a parent of any open child is
+    /// excluded from `nextTask`, even though it stays selectable in its own right once every
+    /// child is done/archived.
+    var parentId: UUID?
+    /// Present while delegated-to-AI (US4); cleared once the matching `.external` condition is
+    /// satisfied (signal or manual).
+    var delegation: DelegationMeta?
 
     init(
         id: UUID = UUID(),
@@ -42,11 +76,21 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
-        dependsOn: [UUID] = [],
+        conditions: [VociCore.Condition] = [],
         createdAt: Date = Date(),
         when: When,
         durationMinutes: Int? = nil,
-        frog: Bool = false
+        frog: Bool = false,
+        notes: String? = nil,
+        sourceTranscript: String? = nil,
+        kind: TaskKind = .task,
+        recurrence: Recurrence? = nil,
+        reminderOverride: ReminderPolicy? = nil,
+        resumeNote: String? = nil,
+        switchAwayCount: Int = 0,
+        completedAt: Date? = nil,
+        parentId: UUID? = nil,
+        delegation: DelegationMeta? = nil
     ) {
         self.id = id
         self.title = title
@@ -54,11 +98,21 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         self.priority = priority
         self.status = status
         self.deadline = deadline
-        self.dependsOn = dependsOn
+        self.conditions = conditions
         self.createdAt = createdAt
         self.when = when
         self.durationMinutes = durationMinutes
         self.frog = frog
+        self.notes = notes
+        self.sourceTranscript = sourceTranscript
+        self.kind = kind
+        self.recurrence = recurrence
+        self.reminderOverride = reminderOverride
+        self.resumeNote = resumeNote
+        self.switchAwayCount = switchAwayCount
+        self.completedAt = completedAt
+        self.parentId = parentId
+        self.delegation = delegation
     }
 
     /// Derived: "done" is purely the engine status, never a separately stored bool.
@@ -81,17 +135,21 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         return "\(hours)h \(minutes)m"
     }
 
-    /// The only bridge into the pure selection engine (feature 001): maps this UI struct into
-    /// the small value type `nextTask(from:now:calendar:)` actually consumes. No selection logic
-    /// is duplicated here.
-    func toEngineTask() -> VociCore.Task {
+    /// The only bridge into the pure selection engine (contracts/vocicore-api.md): maps this UI
+    /// struct into the small value type `nextTask(from:now:)` actually consumes. No selection
+    /// logic is duplicated here. `durationMinutes` feeds the engine's `estimateMinutes` — same
+    /// concept, kept under its existing UI-facing name here (see TaskStore migration notes for
+    /// why the persisted attribute name wasn't renamed to match).
+    func snapshot() -> VociCore.Task {
         VociCore.Task(
             id: id,
             title: title,
             status: status,
             priority: priority.rawValue,
             deadline: deadline,
-            dependsOn: dependsOn,
+            conditions: conditions,
+            estimateMinutes: durationMinutes,
+            parentId: parentId,
             createdAt: createdAt
         )
     }

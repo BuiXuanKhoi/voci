@@ -35,43 +35,43 @@ enum SampleData {
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!,
             title: "Ship the auth fix to staging", priority: .high, status: .todo,
-            deadline: time(11, 30), dependsOn: [], createdAt: time(7, 0),
+            deadline: time(11, 30), conditions: [], createdAt: time(7, 0),
             when: .now, durationMinutes: 45, frog: true
         ),
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000002")!,
             title: "Customer call — Acme onboarding feedback", priority: .high, status: .todo,
-            deadline: time(14, 0), dependsOn: [], createdAt: time(7, 1),
+            deadline: time(14, 0), conditions: [], createdAt: time(7, 1),
             when: .now, durationMinutes: 30
         ),
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000003")!,
             title: "Write landing page hero copy", priority: .medium, status: .todo,
-            deadline: time(16, 0), dependsOn: [], createdAt: time(7, 2),
+            deadline: time(16, 0), conditions: [], createdAt: time(7, 2),
             when: .later, durationMinutes: 60
         ),
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000004")!,
             title: "Reply to investor email — Mira @ Lux Ventures", priority: .medium, status: .todo,
-            deadline: time(17, 0), dependsOn: [], createdAt: time(7, 3),
+            deadline: time(17, 0), conditions: [], createdAt: time(7, 3),
             when: .later, durationMinutes: 20
         ),
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000005")!,
             title: "Push v0.4.2 build to TestFlight", priority: .high, status: .todo,
-            deadline: time(19, 30), dependsOn: [], createdAt: time(7, 4),
+            deadline: time(19, 30), conditions: [], createdAt: time(7, 4),
             when: .later, durationMinutes: 15
         ),
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000006")!,
             title: "Set up Xcode project for v2", priority: .low, status: .done,
-            deadline: time(9, 30), dependsOn: [], createdAt: time(7, 5),
+            deadline: time(9, 30), conditions: [], createdAt: time(7, 5),
             when: .later, durationMinutes: nil
         ),
         TaskItem(
             id: UUID(uuidString: "00000000-0000-0000-0000-000000000007")!,
             title: "Post launch teaser on X", priority: .low, status: .done,
-            deadline: time(8, 50), dependsOn: [], createdAt: time(7, 6),
+            deadline: time(8, 50), conditions: [], createdAt: time(7, 6),
             when: .later, durationMinutes: nil
         ),
     ]

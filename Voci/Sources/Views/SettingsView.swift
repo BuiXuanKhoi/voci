@@ -294,17 +294,9 @@ struct SettingsView: View {
             if appState.ambient == .custom {
                 SettingsRow(label: "Custom image", hint: "Choose a photo or wallpaper from your Mac.") {
                     HStack(spacing: 10) {
-                        Group {
-                            if let url = appState.customImageURL, let nsImage = NSImage(contentsOf: url) {
-                                Image(nsImage: nsImage)
-                                    .resizable()
-                                    .aspectRatio(contentMode: .fill)
-                            } else {
-                                Color.white.opacity(0.06)
-                            }
-                        }
-                        .frame(width: 44, height: 30)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        CustomImageThumbnail(url: appState.customImageURL)
+                            .frame(width: 44, height: 30)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
 
                         Button("Choose image…") { chooseImage(appState: appState) }
                             .buttonStyle(.plain)
@@ -317,10 +309,13 @@ struct SettingsView: View {
                             .vociHairline(cornerRadius: 7)
 
                         if appState.customImageURL != nil {
-                            Button("Remove") { appState.setCustomImage(nil) }
-                                .buttonStyle(.plain)
-                                .font(.system(size: 12, weight: .medium))
-                                .foregroundStyle(VociColor.textSec)
+                            Button("Remove") {
+                                SecureImageBookmark.clear()
+                                appState.setCustomImage(nil)
+                            }
+                            .buttonStyle(.plain)
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(VociColor.textSec)
                         }
                     }
                 }
@@ -366,10 +361,12 @@ struct SettingsView: View {
         }
     }
 
-    /// Opens a file picker for the custom ambient background image. Not sandboxed today, so a
-    /// plain file path (via `NSOpenPanel.url`) is fine — no security-scoped bookmark needed. If
-    /// sandboxing is ever enabled for this app, this will need to start/stop a security-scoped
-    /// bookmark around every `NSImage(contentsOf:)` load instead of a raw path.
+    /// Opens a file picker for the custom ambient background image. App Sandbox is ON (T002):
+    /// `NSOpenPanel` grants a transient sandbox extension for whatever the user picks, which is
+    /// enough for the current session, but persisting access across relaunches needs a
+    /// security-scoped bookmark — `SecureImageBookmark.save` (AmbientBackground.swift) creates
+    /// and persists that bookmark under its own UserDefaults key, alongside (not instead of)
+    /// `appState.setCustomImage`'s existing raw-path persistence, which is left untouched.
     private func chooseImage(appState: AppState) {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.image]
@@ -377,6 +374,7 @@ struct SettingsView: View {
         panel.canChooseDirectories = false
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
+            SecureImageBookmark.save(for: url)
             appState.setCustomImage(url)
         }
     }
@@ -537,6 +535,34 @@ private struct Segmented<T: Hashable>: View {
         .background(Color.black.opacity(0.25))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .vociHairline(cornerRadius: 8)
+    }
+}
+
+/// Small preview swatch for the custom ambient background image, loaded via
+/// `SecureImageBookmark.loadImage` (sandbox-safe — see AmbientBackground.swift) instead of a raw
+/// `NSImage(contentsOf:)` call, and cached in `@State` so it decodes once per `url` change rather
+/// than on every `body` evaluation of the surrounding `appearanceTab`.
+private struct CustomImageThumbnail: View {
+    let url: URL?
+
+    @State private var image: NSImage?
+
+    var body: some View {
+        Group {
+            if let image {
+                Image(nsImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+            } else {
+                Color.white.opacity(0.06)
+            }
+        }
+        .onAppear { reload() }
+        .onChange(of: url) { _, _ in reload() }
+    }
+
+    private func reload() {
+        image = SecureImageBookmark.loadImage(fallbackRawURL: url)
     }
 }
 
