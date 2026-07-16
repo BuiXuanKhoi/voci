@@ -3,7 +3,7 @@
 Parallel agents code against THIS. Owner named per symbol. Won't fully compile until all land +
 Mac verify; the contract keeps them consistent.
 
-## A. Voice-done matcher — OWNED BY the VoiceDone agent (`Voci/Sources/Speech/VoiceDone.swift`)
+## A. Voice-done matcher — OWNED BY the VoiceDone agent (`Volar/Sources/Speech/VoiceDone.swift`)
 
 Classifies a spoken utterance as a COMPLETION / CLEAR-EXTERNAL / (else) new-capture, and fuzzy-
 matches it against open tasks. Assistive, never authoritative (constitution II — always confirm,
@@ -33,7 +33,7 @@ clearly present but nothing matched, the app STATES "no matching task" and offer
 never guesses). Reuse/normalize like the Phase-3 heuristic (diacritic+case fold, "đ/Đ" special-
 cased — see `NLParser`/`ConflictCheck` for the established convention). Pure of I/O.
 
-## B. Evening sweep view — OWNED BY the Sweep agent (`Voci/Sources/Views/SweepView.swift`)
+## B. Evening sweep view — OWNED BY the Sweep agent (`Volar/Sources/Views/SweepView.swift`)
 
 ```swift
 struct SweepView: View {
@@ -54,7 +54,7 @@ injected. Skipped when `items` empty (presenter guards).
   offer capture. Confirm → complete the task (through `TaskStore`, feeding `CompletionEvent`) or
   clear the `.external` condition. `.notACompletion` → existing new-task confirm flow (Phase 3).
 - **T037** Harden auto-advance: completion from ANY source (voice, notification action, UI toggle,
-  sweep) recomputes `VociCore.nextTask(from:now:calendar:)` and updates `MenuBarLabel` with NO
+  sweep) recomputes `VolarCore.nextTask(from:now:calendar:)` and updates `MenuBarLabel` with NO
   intermediate empty/list state (FR-020). Consolidate so every completion path funnels through one
   refresh+advance function (avoid divergent update paths).
 - **T038** Evening sweep: once-daily schedule (ISO-day `@AppStorage` gate like morning-frog/triage),

@@ -1,10 +1,10 @@
-// tokens.jsx — shared design tokens, icons, sample data for Voci
+// tokens.jsx — shared design tokens, icons, sample data for Volar
 
-const VOCI_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", system-ui, sans-serif';
-const VOCI_MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
+const VOLAR_FONT = '-apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro", "Helvetica Neue", system-ui, sans-serif';
+const VOLAR_MONO = 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace';
 
 // Base palette (per the brief)
-const VOCI_BASE = {
+const VOLAR_BASE = {
   bg:        '#1C1C1E',
   surface:   '#2C2C2E',
   surfaceHi: '#3A3A3C',
@@ -23,7 +23,7 @@ const VOCI_BASE = {
 };
 
 // Accent swatches (curated, all sit at similar L/C in oklch space)
-const VOCI_ACCENTS = {
+const VOLAR_ACCENTS = {
   indigo:  { solid: '#6B6BFF', hover: '#8B8BFF', surface: 'rgba(107,107,255,0.15)', glow: 'rgba(107,107,255,0.45)' },
   teal:    { solid: '#3DD5C7', hover: '#6FE3D8', surface: 'rgba(61,213,199,0.15)',  glow: 'rgba(61,213,199,0.45)' },
   amber:   { solid: '#FFB547', hover: '#FFC76B', surface: 'rgba(255,181,71,0.15)',  glow: 'rgba(255,181,71,0.45)' },
@@ -31,21 +31,21 @@ const VOCI_ACCENTS = {
 };
 
 // Density presets
-const VOCI_DENSITY = {
+const VOLAR_DENSITY = {
   cozy:   { rowPadY: 7,  rowGap: 3, sectionGap: 18 },
   comfy:  { rowPadY: 10, rowGap: 4, sectionGap: 22 },
   roomy:  { rowPadY: 14, rowGap: 6, sectionGap: 30 },
 };
 
 // Glass intensity presets
-const VOCI_GLASS = {
+const VOLAR_GLASS = {
   subtle:   { blur: 14, bg: 'rgba(28,28,30,0.92)' },
   standard: { blur: 24, bg: 'rgba(28,28,30,0.78)' },
   heavy:    { blur: 36, bg: 'rgba(28,28,30,0.55)' },
 };
 
 // Lightweight icon set (16/14/12 px)
-function VocIcon({ name, size = 14, color = 'currentColor', strokeWidth = 1.6 }) {
+function VolarIcon({ name, size = 14, color = 'currentColor', strokeWidth = 1.6 }) {
   const s = size;
   const sw = strokeWidth;
   const stroke = { stroke: color, strokeWidth: sw, fill: 'none', strokeLinecap: 'round', strokeLinejoin: 'round' };
@@ -132,14 +132,14 @@ const SAMPLE_TRANSCRIPT_PARSED = [
 
 // Resolved theme = palette + accent variant
 function resolveTheme(t) {
-  const accent = VOCI_ACCENTS[t.accent] || VOCI_ACCENTS.indigo;
-  const density = VOCI_DENSITY[t.density] || VOCI_DENSITY.comfy;
-  const glass = VOCI_GLASS[t.glass] || VOCI_GLASS.standard;
-  return { c: VOCI_BASE, a: accent, d: density, g: glass, font: VOCI_FONT, mono: VOCI_MONO };
+  const accent = VOLAR_ACCENTS[t.accent] || VOLAR_ACCENTS.indigo;
+  const density = VOLAR_DENSITY[t.density] || VOLAR_DENSITY.comfy;
+  const glass = VOLAR_GLASS[t.glass] || VOLAR_GLASS.standard;
+  return { c: VOLAR_BASE, a: accent, d: density, g: glass, font: VOLAR_FONT, mono: VOLAR_MONO };
 }
 
 Object.assign(window, {
-  VocIcon, VOCI_BASE, VOCI_ACCENTS, VOCI_DENSITY, VOCI_GLASS,
+  VolarIcon, VOLAR_BASE, VOLAR_ACCENTS, VOLAR_DENSITY, VOLAR_GLASS,
   SAMPLE_TASKS, SAMPLE_PROJECTS, SAMPLE_TRANSCRIPT_PARSED,
-  resolveTheme, VOCI_FONT, VOCI_MONO,
+  resolveTheme, VOLAR_FONT, VOLAR_MONO,
 });

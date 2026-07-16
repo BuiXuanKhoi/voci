@@ -1,4 +1,4 @@
-# Voci — tầng automation cho ADHD (phân tích 2026-07-15)
+# Volar — tầng automation cho ADHD (phân tích 2026-07-15)
 
 Trả lời câu hỏi: người ADHD cần gì, automate thế nào để **nhớ việc, tập trung,
 không bỏ lỡ, và complete nhanh**. Bổ sung cho `docs/task-model-v1.md` (model là nền,
@@ -7,7 +7,7 @@ tài liệu này là các cơ chế chạy trên nền đó).
 ## Nguyên tắc thiết kế
 
 1. **Mỗi automation phải XÓA một quyết định, không thêm một feature phải quản lý.**
-   App task cho ADHD chết vì trở thành "một task nữa phải quản lý". Voci đóng vai
+   App task cho ADHD chết vì trở thành "một task nữa phải quản lý". Volar đóng vai
    executive function bên ngoài; user chỉ làm 2 động tác: **nói** (capture) và **tick** (done).
 2. **Chống shame spiral bằng thiết kế.** Không tích badge đỏ/số quá hạn. Task quá hạn
    hoặc kẹt lâu → app chủ động hỏi MỘT lần với lối thoát tử tế (dời/chia nhỏ/bỏ),
@@ -158,7 +158,7 @@ Ba bậc thiết kế:
 ## Phương pháp làm việc phổ biến — tích hợp CƠ CHẾ, không tích hợp THƯƠNG HIỆU (2026-07-15)
 
 Không làm menu "chọn phương pháp" (thêm hệ thống phải quản lý). Nướng lợi ích vào flow
-mặc định. Voci đã ngầm chứa: eat-the-frog (morning ritual), GTD capture (voice),
+mặc định. Volar đã ngầm chứa: eat-the-frog (morning ritual), GTD capture (voice),
 GTD weekly review (stale triage + chiến tích tuần), Eisenhower (engine ordering =
 deadline urgency × priority, máy kẻ ma trận hộ), timeboxing ("10 phút thôi").
 
@@ -184,7 +184,7 @@ vấn đề từ "không tập trung nổi" thành "N VÒNG LẶP MỞ trong wor
 kết quả AI nằm mốc, agent treo ở câu clarify không ai trả lời. **Prompted ≠ done.**
 
 Task tách 2 loại: **ủy thác** (chạm vào ở khoảnh khắc: prompt → chờ → review → done)
-và **sâu** (cần não liên tục). Voci đổi vai: từ "gác cổng tập trung" → **đài kiểm soát
+và **sâu** (cần não liên tục). Volar đổi vai: từ "gác cổng tập trung" → **đài kiểm soát
 không lưu**: (1) không loop nào bị quên; (2) lấp khoảng chờ bằng "giờ làm gì?" (khoảng
 2-5 phút chờ AI là nơi ADHD lạc trôi); (3) kỷ luật nghiệm thu — done = review xong,
 không phải prompt xong; (4) capture ý tưởng giữa lúc chờ.
@@ -226,14 +226,14 @@ không phải sync hoàn hảo — không bao giờ phạt user vì app bị cũ
 Các đường bị TỪ CHỐI vì app sẽ có năng lực đọc data phiên làm việc (vi phạm constitution
 Principle I, phá positioning privacy-first, prompt quyền đáng sợ giết conversion):
 đọc notification DB app khác (cần Full Disk Access — thấy cả tin nhắn/OTP), Accessibility
-đọc nội dung cửa sổ app khác (Voci có quyền AX cho hotkey rồi — dùng nó đọc nội dung là
+đọc nội dung cửa sổ app khác (Volar có quyền AX cho hotkey rồi — dùng nó đọc nội dung là
 phản bội niềm tin + rủi ro App Store review), ScreenCaptureKit. Theo dõi process (`claude`
 CLI exit) vô hại nhưng vô dụng (không biết task nào).
-Đường CHỌN: Voci đăng ký **URL scheme `voci://`** (Info.plist, không quyền mới);
-công cụ AI chủ động báo: `open "voci://ai-done?cwd=$PWD"`. Tính chất: một chiều
+Đường CHỌN: Volar đăng ký **URL scheme `volar://`** (Info.plist, không quyền mới);
+công cụ AI chủ động báo: `open "volar://ai-done?cwd=$PWD"`. Tính chất: một chiều
 đi VÀO, payload tối thiểu (không nội dung phiên làm việc), opt-in hoàn toàn (không cài
 hook → rơi về timer + batch reconcile). Threat: URL scheme app local nào cũng gọi được →
-giả tín hiệu chỉ làm task trồi lên sớm để review (Voci KHÔNG auto-mark-done theo tín
+giả tín hiệu chỉ làm task trồi lên sớm để review (Volar KHÔNG auto-mark-done theo tín
 hiệu, chỉ chuyển "cần review") — chấp nhận được. KHÔNG mở local HTTP server (web page
 trong browser bắn request tới localhost được; URL scheme không có cổng lắng nghe).
 
@@ -243,10 +243,10 @@ một nút, có preview, có chạy thử, có gỡ. Flow:
 2. Bấm → PREVIEW entry JSON sẽ thêm (sửa config công cụ khác phải minh bạch, không lén).
 3. Ghi an toàn: backup `settings.json` → parse → MERGE append vào `hooks.Stop`
    (tuyệt đối không ghi đè hook sẵn có — phá config dev của user là tội nặng nhất) →
-   validate → ghi. Entry: `{"type":"command","command":"open \"voci://ai-done?cwd=$PWD\""}`.
+   validate → ghi. Entry: `{"type":"command","command":"open \"volar://ai-done?cwd=$PWD\""}`.
 4. Nút [Chạy thử] → bắn tín hiệu → "✓ Đã nhận" (tin ngay, không chờ lần dùng thật).
-5. Nút [Gỡ kết nối] → xóa đúng entry có marker `voci://`, không đụng gì khác.
-Mapping task (hook không mang tên task Voci): đúng 1 task đang chờ-AI (case phổ biến) →
+5. Nút [Gỡ kết nối] → xóa đúng entry có marker `volar://`, không đụng gì khác.
+Mapping task (hook không mang tên task Volar): đúng 1 task đang chờ-AI (case phổ biến) →
 map thẳng sang "cần review"; nhiều task → dùng `cwd` match project folder; không chắc →
 ambient card "1 agent vừa xong — [A] [B]?" một chạm. Không bao giờ auto-done.
 Ràng buộc App Sandbox (MAS): không tự ghi `~/.claude/` được → lần đầu hiện NSOpenPanel
@@ -255,23 +255,23 @@ trỏ sẵn `~/.claude`, user bấm Open 1 cái = security-scoped bookmark vĩnh
 tay — đường lùi, không phải đường chính.
 
 **Voice-reply vào terminal — "gõ hộ" prompt tiếp theo (chốt hướng 2026-07-15, BIG WIN):**
-đóng trọn vòng orchestrator bằng giọng nói: agent xong → Voci báo → hotkey → nói →
+đóng trọn vòng orchestrator bằng giọng nói: agent xong → Volar báo → hotkey → nói →
 prompt chạy vào đúng terminal → agent chạy tiếp, không cần chạm terminal.
 - **Đường chọn: AppleScript `write text` nhắm theo tty.** Stop-hook chạy trong session
-  nên lấy được tty → gửi kèm `voci://ai-done?cwd=...&tty=...` → Voci hỏi iTerm2/Terminal
+  nên lấy được tty → gửi kèm `volar://ai-done?cwd=...&tty=...` → Volar hỏi iTerm2/Terminal
   session nào có tty đó → ghi chữ vào ĐÚNG session (kể cả đang bị che). Không race focus.
-  Quyền: Apple Events automation — prompt MỘT LẦN THEO TỪNG APP ĐÍCH ("Voci muốn điều
+  Quyền: Apple Events automation — prompt MỘT LẦN THEO TỪNG APP ĐÍCH ("Volar muốn điều
   khiển iTerm2") — hẹp và dễ hiểu hơn Accessibility toàn cục. **CHỈ GHI, không bao giờ
   ĐỌC nội dung terminal** (một chiều đi ra, giữ nguyên cam kết privacy).
 - **Preview BẮT BUỘC trước khi gửi** (constitution II): hiện transcript + đích đến
-  ("→ iTerm2, dự án voci") → user gật mới gõ. Cũng là chốt an toàn nếu terminal đang
+  ("→ iTerm2, dự án volar") → user gật mới gõ. Cũng là chốt an toàn nếu terminal đang
   đứng ở prompt y/n của lệnh khác.
 - Fallback terminal không AppleScript (Warp/Ghostty/VS Code): kích hoạt đúng cửa sổ +
   clipboard + hiện "⌘V để gửi" (không bao giờ nhầm chỗ); CGEvent keystroke toàn cục chỉ
   là phương án cuối vì race focus (gõ nhầm app = thảm họa).
 - **KHÔNG làm** đường `claude --resume <session> -p` ngầm: fork lịch sử hội thoại
-  (terminal không thấy lượt mới), biến Voci thành agent client (phình scope), sandbox
-  MAS giết process con. Terminal của user là single source of truth — Voci chỉ gõ hộ.
+  (terminal không thấy lượt mới), biến Volar thành agent client (phình scope), sandbox
+  MAS giết process con. Terminal của user là single source of truth — Volar chỉ gõ hộ.
 - Caveat phân phối: Apple Events entitlement + Accessibility đều khó qua MAS review →
   thêm lý do cân nhắc bản Developer ID ngoài store cho power users; bản MAS degrade
   về clipboard+⌘V.

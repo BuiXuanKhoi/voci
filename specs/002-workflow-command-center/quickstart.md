@@ -1,4 +1,4 @@
-# Quickstart Validation: Voci v2 — Workflow Command Center
+# Quickstart Validation: Volar v2 — Workflow Command Center
 
 Validation guide for the P1+P2 release boundary. Environment note: code is authored on
 Windows; **every step below runs on the Mac** (build/test split per project convention).
@@ -13,18 +13,18 @@ Windows; **every step below runs on the Mac** (build/test split per project conv
 ## 1. Engine gate (fastest signal — pure Swift, no app)
 
 ```bash
-cd VociCore && swift build && swift test
+cd VolarCore && swift build && swift test
 ```
 
 **Expected**: all tests green, including migrated §6.2 cases (now condition-based) and the new
 suites — afterDate boundary, external toggling, mixed-condition AND, parent exclusion,
 eligibilityDiff, nextResurfaceDate, determinism-under-shuffle. Any red here blocks everything
-(constitution III release gate). Contract: `contracts/vocicore-api.md`.
+(constitution III release gate). Contract: `contracts/volarcore-api.md`.
 
 ## 2. App build + model migration
 
 ```bash
-cd Voci && xcodegen generate && open Voci.xcodeproj   # build & run target "Voci"
+cd Volar && xcodegen generate && open Volar.xcodeproj   # build & run target "Volar"
 ```
 
 **Expected**: existing 001-era tasks load with `dependsOn` migrated into `.taskDone`
@@ -62,7 +62,7 @@ accomplishments.
 2. Delegate an active task by voice ("giao cho Claude rồi") → **Expected**: task leaves menu
    bar, next task appears, WIP counter "⏳ 1".
 3. In a terminal in the project folder run any Claude Code session to completion (or simulate:
-   `open "voci://ai-done?cwd=$PWD"`) → **Expected**: task flips to needs-review ambient card;
+   `open "volar://ai-done?cwd=$PWD"`) → **Expected**: task flips to needs-review ambient card;
    counter decrements; duplicate signal = no-op.
 4. Let a second delegated task's 10′ timer elapse instead → **Expected**: ambient resurface
    (menu bar only — no system notification), [Done][Still waiting][Check later]; ignore twice
@@ -92,6 +92,6 @@ opt-in is on; `/parse` payloads contain text only.
 
 ## Cross-references
 
-- Data shapes: `data-model.md` · Engine API: `contracts/vocicore-api.md`
+- Data shapes: `data-model.md` · Engine API: `contracts/volarcore-api.md`
 - Signals & hook install: `contracts/app-links.md` · Cloud route: `contracts/parse-proxy.md`
 - Acceptance criteria per story: `spec.md` (§User Scenarios)

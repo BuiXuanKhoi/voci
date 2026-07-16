@@ -1,4 +1,4 @@
-# Voci Task Model v1 — thiết kế đã chốt (2026-07-15)
+# Volar Task Model v1 — thiết kế đã chốt (2026-07-15)
 
 Kết quả buổi thảo luận "voice → task, người ADHD cần gì trên mỗi task".
 Tài liệu này **supersede** phần model của `specs/001-nexttask-engine/data-model.md`
@@ -60,7 +60,7 @@ struct ReminderPolicy: Sendable, Equatable {
 (eligibility); `deadline` quyết định *task khẩn cấp tới đâu* (ordering) và *khi nào nhắc*
 (reminder). Không trộn hai vai.
 
-## Engine subset (VociCore.Task — chỉ field selection-relevant)
+## Engine subset (VolarCore.Task — chỉ field selection-relevant)
 
 `id, title, status, priority, deadline, conditions, createdAt`.
 (`notes/sourceTranscript/kind/estimateMinutes/recurrence/reminderOverride` thuộc persisted

@@ -176,7 +176,7 @@ function validateBreakdownRequest(body: Record<string, unknown>): ValidationResu
 
 // ---------------------------------------------------------------------------------------------
 // Response (model -> us -> client). Mirrors data-model.md's ParsedTask v2 shape + contract's
-// "every attribute carries confidence: 0..1". NOTE: `Voci/Sources/Model/NLParser.swift`'s v2
+// "every attribute carries confidence: 0..1". NOTE: `Volar/Sources/Model/NLParser.swift`'s v2
 // `ParsedTask` (spec task T017) had not landed at the time this route was implemented (T004/T022
 // run ahead of T017 per tasks.md dependency notes) — this is a best-effort mirror of
 // contracts/parse-proxy.md + data-model.md's "Parsing contract" section. Reconcile field names

@@ -1,4 +1,4 @@
-# Implementation Plan: Voci v2 — Voice-first Workflow Command Center
+# Implementation Plan: Volar v2 — Voice-first Workflow Command Center
 
 **Branch**: `macos` (project convention — no feature branches) | **Date**: 2026-07-15 | **Spec**: [spec.md](./spec.md)
 
@@ -7,18 +7,18 @@
 
 ## Summary
 
-Voci v2 pivots the product from "voice to-do app" to a voice-first workflow command center:
+Volar v2 pivots the product from "voice to-do app" to a voice-first workflow command center:
 (1) a unified task model where a single `conditions: [Condition]` list
 (taskDone / afterDate / external) gates eligibility while `deadline` keeps driving urgency;
 (2) an ADHD automation layer — reliable escalating reminders with actionable notifications,
 voice completion with auto-advance, rituals, breakdown, structured switching; (3) an AI-agent
 orchestrator — delegation tracking with ambient minute-scale check-backs, WIP awareness, and a
-one-button Claude Code integration over a sandbox-safe `voci://` app link. First shippable
+one-button Claude Code integration over a sandbox-safe `volar://` app link. First shippable
 release = user stories P1+P2. Distribution is Mac App Store-first (sandbox + StoreKit), which
 defers terminal-typing (US5) and mandates a sandbox-safe hotkey. Intent parsing routes
 on-device Foundation Models → free metered cloud parse (opt-in, DeviceCheck-metered, Gemini
 behind the existing Supabase proxy) → heuristic parser. The pure engine work stays in
-`VociCore` and remains the constitution-III release gate.
+`VolarCore` and remains the constitution-III release gate.
 
 ## Technical Context
 
@@ -26,18 +26,18 @@ behind the existing Supabase proxy) → heuristic parser. The pure engine work s
 with `#available(macOS 26)` conditional paths (FoundationModels). Xcode 15+ builds; Xcode 26
 required only to exercise FM paths.
 
-**Primary Dependencies**: VociCore (internal, dependency-free) · SwiftData · UserNotifications ·
+**Primary Dependencies**: VolarCore (internal, dependency-free) · SwiftData · UserNotifications ·
 EventKit (P3) · StoreKit 2 + DeviceCheck (quota/entitlement) · WhisperKit (existing, arm64-gated)
 · Carbon `RegisterEventHotKey` (sandbox-safe hotkey) · Supabase Edge Functions (Deno) for
 `/groq` (existing plan) + `/parse` (new) — provider keys server-side (initial parse provider:
 Gemini Flash, swappable).
 
-**Storage**: SwiftData — `VociTask` (extended), `CompletionEvent` (append-only),
+**Storage**: SwiftData — `VolarTask` (extended), `CompletionEvent` (append-only),
 `ReminderRecord`, `ParseCorrection`; `UserDefaults` for settings/policies; security-scoped
 bookmark for `~/.claude`. Postgres (Supabase) server-side for free-quota counters only.
 
-**Testing**: Swift Testing for `VociCore` (release gate, extended suite per
-`contracts/vocicore-api.md`); XCTest for app-layer units (reminder recovery, migration,
+**Testing**: Swift Testing for `VolarCore` (release gate, extended suite per
+`contracts/volarcore-api.md`); XCTest for app-layer units (reminder recovery, migration,
 matching, hook merge); manual validation script `quickstart.md` on the Mac (Windows/Mac
 split: code authored on Windows ships unverified until Mac run).
 
@@ -90,8 +90,8 @@ specs/002-workflow-command-center/
 ├── data-model.md        # Phase 1 — engine + persisted layers, validation rules
 ├── quickstart.md        # Phase 1 — Mac-side validation guide (P1+P2 release)
 ├── contracts/
-│   ├── vocicore-api.md  # Engine public API v2 + test-suite contract
-│   ├── app-links.md     # voci:// inbound signals + Claude Code hook install contract
+│   ├── volarcore-api.md  # Engine public API v2 + test-suite contract
+│   ├── app-links.md     # volar:// inbound signals + Claude Code hook install contract
 │   └── parse-proxy.md   # /functions/v1/parse request/response/metering contract
 ├── checklists/requirements.md
 └── spec.md              # Clarified specification
@@ -100,19 +100,19 @@ specs/002-workflow-command-center/
 ### Source Code (repository root)
 
 ```text
-VociCore/                                  # Pure engine (extend in place)
-├── Sources/VociCore/
+VolarCore/                                  # Pure engine (extend in place)
+├── Sources/VolarCore/
 │   ├── Task.swift                         # + conditions, estimateMinutes, parentId (drop dependsOn)
 │   ├── Condition.swift                    # NEW: Condition enum + satisfaction rules
 │   ├── NextTask.swift                     # eligibility v2 (conditions, parent exclusion)
 │   ├── DependencyGraph.swift              # validateCondition (DFS over .taskDone edges)
 │   └── Snapshots.swift                    # NEW: eligibilityDiff, nextResurfaceDate
-└── Tests/VociCoreTests/                   # migrated §6.2 + new suites (see contract)
+└── Tests/VolarCoreTests/                   # migrated §6.2 + new suites (see contract)
 
-Voci/                                      # App target (SwiftUI + SwiftData, sandboxed)
+Volar/                                      # App target (SwiftUI + SwiftData, sandboxed)
 ├── Sources/
 │   ├── Model/
-│   │   ├── TaskItem.swift                 # VociTask @Model v2 + migration from dependsOn
+│   │   ├── TaskItem.swift                 # VolarTask @Model v2 + migration from dependsOn
 │   │   ├── CompletionLog.swift            # NEW: CompletionEvent + queries/rollups
 │   │   ├── Recurrence.swift               # NEW: reset-in-place engine (app layer)
 │   │   └── NLParser.swift                 # ParsedTask v2; heuristic parser extensions
@@ -125,13 +125,13 @@ Voci/                                      # App target (SwiftUI + SwiftData, sa
 │   │   └── NotificationActions.swift      # categories: Done/Snooze/Tomorrow, ready, reschedule
 │   ├── Orchestrator/                      # NEW
 │   │   ├── DelegationTracker.swift        # DelegationMeta, backoff, WIP counter, batch reconcile
-│   │   ├── AppLinkHandler.swift           # voci://ai-done, voci://capture (onOpenURL)
+│   │   ├── AppLinkHandler.swift           # volar://ai-done, volar://capture (onOpenURL)
 │   │   └── ClaudeCodeConnector.swift      # detect, preview, backup, merge, test, disconnect
 │   ├── Speech/…                           # existing engines; VoiceDone matcher added
 │   ├── Views/…                            # confirm chips v2, sweep, triage, accomplishments,
 │   │                                      #   đổi gió, panic, WIP badge, Settings sections
 │   └── App/AppState.swift                 # wiring: auto-advance, diff→notify, focus/session
-├── Resources/Voci.entitlements            # sandbox + network client + bookmarks
+├── Resources/Volar.entitlements            # sandbox + network client + bookmarks
 └── project.yml                            # URL scheme, notification categories, capabilities
 
 supabase/                                  # NEW (backend routes; deployed separately)
@@ -140,7 +140,7 @@ supabase/                                  # NEW (backend routes; deployed separ
     └── parse/                             # NEW per contracts/parse-proxy.md
 ```
 
-**Structure Decision**: Extend the existing two-layer layout (pure `VociCore` + app target)
+**Structure Decision**: Extend the existing two-layer layout (pure `VolarCore` + app target)
 rather than adding modules — the engine delta is small and the constitution-III boundary is
 already correct. New app concerns get dedicated folders (`Parsing/`, `Reminders/`,
 `Orchestrator/`) to keep review surfaces separable. Backend stays a thin serverless appendix

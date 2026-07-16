@@ -1,6 +1,6 @@
-# Voci Supabase backend
+# Volar Supabase backend
 
-Serverless appendix for the Voci macOS app (spec `002-workflow-command-center`). Currently
+Serverless appendix for the Volar macOS app (spec `002-workflow-command-center`). Currently
 implements one route: `POST /functions/v1/parse` — see
 `../specs/002-workflow-command-center/contracts/parse-proxy.md` for the wire contract this code
 implements exactly (status codes, field names, caps). `groq/` is a documented placeholder

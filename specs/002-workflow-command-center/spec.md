@@ -1,4 +1,4 @@
-# Feature Specification: Voci v2 — Voice-first Workflow Command Center
+# Feature Specification: Volar v2 — Voice-first Workflow Command Center
 
 **Feature Branch**: `002-workflow-command-center` *(spec label only — all work happens on the `macos` branch; no feature branch is created)*
 
@@ -6,7 +6,7 @@
 
 **Status**: Draft
 
-**Input**: User description: "Voci v2 — nâng cấp từ voice to-do app thành trung tâm chỉ huy công việc bằng giọng nói cho kỷ nguyên AI, theo các quyết định đã chốt trong docs/task-model-v1.md, docs/adhd-automation-v1.md, docs/product-vision-v2.md: task model thống nhất quanh conditions[], tầng automation ADHD, chế độ orchestrator AI, và các tính năng Vision Tier 1+2 đã duyệt."
+**Input**: User description: "Volar v2 — nâng cấp từ voice to-do app thành trung tâm chỉ huy công việc bằng giọng nói cho kỷ nguyên AI, theo các quyết định đã chốt trong docs/task-model-v1.md, docs/adhd-automation-v1.md, docs/product-vision-v2.md: task model thống nhất quanh conditions[], tầng automation ADHD, chế độ orchestrator AI, và các tính năng Vision Tier 1+2 đã duyệt."
 
 **Source documents** (decision record, authoritative for design intent):
 `docs/task-model-v1.md` · `docs/adhd-automation-v1.md` · `docs/product-vision-v2.md`
@@ -47,7 +47,7 @@ A professional speaks one sentence — *"Send the contract after I finish the dr
 
 ### User Story 2 - Never miss: reliable reminders that act, not nag (Priority: P1)
 
-The user captures tasks with deadlines and trusts Voci to bring them back at the right time. Reminders escalate as the deadline approaches (default: one day before, one hour before, at the deadline), arrive as actionable notifications with **Done / Snooze / Tomorrow** buttons, survive app restarts and Mac sleep, and never fire for tasks already completed. When a task becomes unblocked because its prerequisite finished, the user is told. When a deadline passes, the notification offers one-tap rescheduling instead of accumulating red guilt badges.
+The user captures tasks with deadlines and trusts Volar to bring them back at the right time. Reminders escalate as the deadline approaches (default: one day before, one hour before, at the deadline), arrive as actionable notifications with **Done / Snooze / Tomorrow** buttons, survive app restarts and Mac sleep, and never fire for tasks already completed. When a task becomes unblocked because its prerequisite finished, the user is told. When a deadline passes, the notification offers one-tap rescheduling instead of accumulating red guilt badges.
 
 **Why this priority**: Reliable delivery is a constitution-level requirement (Principle IV) and the single biggest gap between the current build and the product promise: today no notification is ever scheduled.
 
@@ -66,7 +66,7 @@ The user captures tasks with deadlines and trusts Voci to bring them back at the
 
 ### User Story 3 - Complete and advance by voice (Priority: P1)
 
-Finishing work is as frictionless as capturing it: the user says *"the report is done"* and Voci matches the phrase to the right task, marks it done, and the menu bar instantly shows the next thing to do. In the evening, a two-minute sweep reads back today's open tasks so the user can harvest everything they finished in real life but never ticked.
+Finishing work is as frictionless as capturing it: the user says *"the report is done"* and Volar matches the phrase to the right task, marks it done, and the menu bar instantly shows the next thing to do. In the evening, a two-minute sweep reads back today's open tasks so the user can harvest everything they finished in real life but never ticked.
 
 **Why this priority**: The complete-fast loop closes the task lifecycle by voice (speak to create → speak to finish) and feeds every downstream feature (accomplishment view, streaks, auto-advance). High value, small surface.
 
@@ -74,8 +74,8 @@ Finishing work is as frictionless as capturing it: the user says *"the report is
 
 **Acceptance Scenarios**:
 
-1. **Given** an open task "Write Q3 report", **When** the user says "xong cái báo cáo rồi", **Then** Voci proposes that task for completion (one-tap/one-word confirm) and completes it on confirmation.
-2. **Given** two similarly-named open tasks, **When** a spoken completion matches both, **Then** Voci asks which one — it never silently picks.
+1. **Given** an open task "Write Q3 report", **When** the user says "xong cái báo cáo rồi", **Then** Volar proposes that task for completion (one-tap/one-word confirm) and completes it on confirmation.
+2. **Given** two similarly-named open tasks, **When** a spoken completion matches both, **Then** Volar asks which one — it never silently picks.
 3. **Given** a task completes, **Then** the menu bar shows the next selected task with no user action in between.
 4. **Given** the evening sweep runs, **When** the user answers "done" to some items by voice, **Then** all confirmed items complete in one pass and appear in today's accomplishments.
 
@@ -83,9 +83,9 @@ Finishing work is as frictionless as capturing it: the user says *"the report is
 
 ### User Story 4 - Delegate to AI without losing a single loop (Priority: P2)
 
-The user prompts an AI agent (e.g., Claude Code) to do a task, tells Voci *"handed it to Claude"* (or Voci learns it automatically via the connected integration), and moves on. The task leaves the menu bar; the next task surfaces. Voci tracks every in-flight delegation: a minute-scale check-back timer quietly resurfaces the task for review, the menu bar shows how many delegations are in flight, and if too many pile up Voci gently suggests reviewing before delegating more. Signals about finished agents arrive through a one-button integration — never by Voci reading other apps' notifications or screens. If the user already handled things without telling Voci, reconciliation happens in one batch question at natural touchpoints — never by nagging notifications.
+The user prompts an AI agent (e.g., Claude Code) to do a task, tells Volar *"handed it to Claude"* (or Volar learns it automatically via the connected integration), and moves on. The task leaves the menu bar; the next task surfaces. Volar tracks every in-flight delegation: a minute-scale check-back timer quietly resurfaces the task for review, the menu bar shows how many delegations are in flight, and if too many pile up Volar gently suggests reviewing before delegating more. Signals about finished agents arrive through a one-button integration — never by Volar reading other apps' notifications or screens. If the user already handled things without telling Volar, reconciliation happens in one batch question at natural touchpoints — never by nagging notifications.
 
-**Why this priority**: This is the positioning pivot — the orchestrator layer that makes Voci a workflow command center rather than a to-do list. It depends on the P1 model (external conditions) but is independently testable on top of it.
+**Why this priority**: This is the positioning pivot — the orchestrator layer that makes Volar a workflow command center rather than a to-do list. It depends on the P1 model (external conditions) but is independently testable on top of it.
 
 **Independent Test**: Delegate several tasks, verify state transitions (waiting → needs-review → done), timer-based ambient resurfacing with backoff, WIP counter accuracy, one-button Claude Code hook installation on a machine with Claude Code present, and correct behavior when the completion signal arrives via the URL callback.
 
@@ -106,7 +106,7 @@ The user prompts an AI agent (e.g., Claude Code) to do a task, tells Voci *"hand
 > distribution decision. Kept in the spec as design record. The inbound completion-signal
 > half of the loop (Story 4) ships in v2; the outbound typing half does not.
 
-When an agent finishes, the user presses the hotkey and speaks the next instruction — *"add tests for that and run again"*. Voci shows the transcribed text and the exact destination ("→ iTerm2, project voci"), and on confirmation types it into the precise terminal session the agent ran in, even if that window is buried. Voci only ever writes into the terminal; it never reads terminal content. On terminals that cannot be scripted, Voci activates the right window and stages the text for a one-key paste.
+When an agent finishes, the user presses the hotkey and speaks the next instruction — *"add tests for that and run again"*. Volar shows the transcribed text and the exact destination ("→ iTerm2, project volar"), and on confirmation types it into the precise terminal session the agent ran in, even if that window is buried. Volar only ever writes into the terminal; it never reads terminal content. On terminals that cannot be scripted, Volar activates the right window and stages the text for a one-key paste.
 
 **Why this priority**: Closes the orchestration loop end-to-end by voice. Depends on Story 4's signal metadata but delivers distinct, independently testable value.
 
@@ -117,7 +117,7 @@ When an agent finishes, the user presses the hotkey and speaks the next instruct
 1. **Given** an agent finished in a known terminal session, **When** the user dictates a reply and confirms the preview, **Then** the exact text is delivered into that session and the task returns to waiting-on-AI with a fresh check-back timer.
 2. **Given** the preview is shown, **When** the user cancels, **Then** nothing is typed anywhere.
 3. **Given** the target session no longer exists, **Then** the user is told and offered the clipboard fallback — text is never typed into a different window.
-4. **Given** an unsupported terminal, **Then** Voci activates the correct window, places the text on the clipboard, and instructs "⌘V to send".
+4. **Given** an unsupported terminal, **Then** Volar activates the correct window, places the text on the clipboard, and instructs "⌘V to send".
 
 ---
 
@@ -133,7 +133,7 @@ Facing a long, boring task, the user breaks it into 5–15 minute steps (assiste
 
 1. **Given** a large task, **When** the user requests a breakdown, **Then** proposed steps of 5–15 minutes appear for editing/confirmation (voice or click), and saving creates chained child tasks under the parent.
 2. **Given** a mid-task boredom moment, **When** the user says "đổi gió", **Then** exactly one alternative task is offered; accepting swaps the menu bar task while the previous one retains its progress context for re-entry.
-3. **Given** a task switched away from 3 times, **Then** Voci suggests breaking it down.
+3. **Given** a task switched away from 3 times, **Then** Volar suggests breaking it down.
 4. **Given** a 25-minute focus session ends while the user keeps working, **Then** the session extends without interruption; **Given** 90 continuous minutes, **Then** one firm break reminder appears.
 5. **Given** panic mode is invoked, **Then** the interface reduces to a single ≤5-minute task and exits panic mode only on user request.
 
@@ -159,7 +159,7 @@ The day is book-ended by two short rituals: a morning prompt to pick the single 
 
 ### User Story 8 - Calendar-aware realism (Priority: P3)
 
-Voci reads the user's calendar (read-only) so its advice matches reality: a 5 PM deadline with meetings from 2–5 PM is surfaced as effectively due at 2 PM; free gaps power "quick win" suggestions sized to the available minutes; and a transition warning fires 10 minutes before a meeting so the time-blind user is never ambushed by their own calendar.
+Volar reads the user's calendar (read-only) so its advice matches reality: a 5 PM deadline with meetings from 2–5 PM is surfaced as effectively due at 2 PM; free gaps power "quick win" suggestions sized to the available minutes; and a transition warning fires 10 minutes before a meeting so the time-blind user is never ambushed by their own calendar.
 
 **Why this priority**: Multiplies the value of estimates and deadlines from P1 but requires calendar access and is independent of the orchestrator stories.
 
@@ -214,7 +214,7 @@ The user can export/back up all tasks, transcripts, and completion history to op
 - **External condition satisfied while the app was not running**: state reconciles at next launch; check-back timers that elapsed while closed fire their ambient resurfacing once, not repeatedly.
 - **Completion signal for an unknown/no waiting task**: ignored silently (logged locally); signals never create tasks or mark anything done.
 - **Spoofed/duplicate completion signals**: at worst a task resurfaces early for review; idempotent handling; no state loss.
-- **Voice-done matches zero tasks**: Voci says so and offers capture instead — it never guesses a completion.
+- **Voice-done matches zero tasks**: Volar says so and offers capture instead — it never guesses a completion.
 - **Terminal session gone before voice-reply**: user informed; clipboard fallback offered; no typing into any other window.
 - **Notification permission denied**: reminders degrade to in-app/menu-bar surfacing with one explanatory prompt; no silent loss and no repeated permission nagging.
 - **Clock/timezone/DST changes**: absolute-instant semantics hold; date-based conditions and reminders fire exactly once at the correct instant.
@@ -266,13 +266,13 @@ The user can export/back up all tasks, transcripts, and completion history to op
 - **FR-022**: The user MUST be able to mark a task as delegated-to-AI in one utterance or tap, which sets an external waiting condition, removes it from the active slot, and advances to the next task — with no separate switch announcement required.
 - **FR-023**: Each delegation MUST carry a minute-scale check-back timer (default configurable, spoken override) that ambiently resurfaces the task for review — via the menu bar queue only, never a system notification — with one-tap [Done] [Still waiting] [Check later] responses; unanswered checks MUST back off and fold into batch reconciliation at natural touchpoints.
 - **FR-024**: The menu bar MUST display the count of in-flight delegations; exceeding a soft limit (default 4) MUST produce a gentle, dismissible review-first suggestion, never a block.
-- **FR-025**: Voci MUST accept agent-completion signals only through an inbound app-link callback registered by the app. On a signal: exactly one waiting task → mark needs-review; several → match by project-folder hint; ambiguous → one-tap disambiguation card. A signal MUST NEVER mark a task done and MUST be idempotent. Voci MUST NOT read other applications' notifications, windows, or screens to detect agent state.
-- **FR-026**: Where a supported agent CLI is detected, Voci MUST offer a one-button connect flow: preview of the exact configuration change, backup before write, additive merge (never overwriting existing user configuration), a test-signal round-trip, and a disconnect that removes only what Voci added. A copy-manually fallback MUST exist.
+- **FR-025**: Volar MUST accept agent-completion signals only through an inbound app-link callback registered by the app. On a signal: exactly one waiting task → mark needs-review; several → match by project-folder hint; ambiguous → one-tap disambiguation card. A signal MUST NEVER mark a task done and MUST be idempotent. Volar MUST NOT read other applications' notifications, windows, or screens to detect agent state.
+- **FR-026**: Where a supported agent CLI is detected, Volar MUST offer a one-button connect flow: preview of the exact configuration change, backup before write, additive merge (never overwriting existing user configuration), a test-signal round-trip, and a disconnect that removes only what Volar added. A copy-manually fallback MUST exist.
 
 **Voice-reply to terminal — DEFERRED (far post-v2; see Clarifications 2026-07-15)**
 
-- **FR-027 (deferred)**: For a task whose delegation signal identified its terminal session, the user MUST be able to dictate a follow-up instruction; Voci MUST show the transcript and the resolved destination and MUST NOT send without explicit confirmation.
-- **FR-028 (deferred)**: On confirmation Voci MUST deliver the text into exactly the identified session on scriptable terminals; on unsupported terminals it MUST activate the correct window and stage the text on the clipboard with a paste instruction. Delivery is write-only: Voci MUST NOT read terminal contents. If the session is gone, the user is informed and offered the clipboard path; text is never delivered to any other window.
+- **FR-027 (deferred)**: For a task whose delegation signal identified its terminal session, the user MUST be able to dictate a follow-up instruction; Volar MUST show the transcript and the resolved destination and MUST NOT send without explicit confirmation.
+- **FR-028 (deferred)**: On confirmation Volar MUST deliver the text into exactly the identified session on scriptable terminals; on unsupported terminals it MUST activate the correct window and stage the text on the clipboard with a paste instruction. Delivery is write-only: Volar MUST NOT read terminal contents. If the session is gone, the user is informed and offered the clipboard path; text is never delivered to any other window.
 
 **Focus, breakdown, switching**
 
@@ -291,7 +291,7 @@ The user can export/back up all tasks, transcripts, and completion history to op
 
 **Calendar, capture-at-scale, query, data**
 
-- **FR-038**: With user permission, Voci MUST read calendar events (read-only) to: adjust effective urgency for deadlines that collide with busy blocks, size gap suggestions to actual free minutes, and fire a single transition warning ~10 minutes before events. Denial MUST degrade gracefully with no repeated prompts. Calendar data MUST NOT leave the device.
+- **FR-038**: With user permission, Volar MUST read calendar events (read-only) to: adjust effective urgency for deadlines that collide with busy blocks, size gap suggestions to actual free minutes, and fire a single transition warning ~10 minutes before events. Denial MUST degrade gracefully with no repeated prompts. Calendar data MUST NOT leave the device.
 - **FR-039**: The user MUST be able to ingest an audio recording (e.g., a meeting) and receive proposed action items as confirmable cards — nothing persists unconfirmed; free-tier processing MUST keep audio on device.
 - **FR-040**: A system-wide capture path MUST turn selected text in other applications into a task carrying the text and source reference.
 - **FR-041**: The user MUST be able to ask the board questions by voice (today/this week, waiting-on-AI, stuck-longest, waiting-on-whom) and receive an accurate spoken/visual answer scoped to their own data.
@@ -318,7 +318,7 @@ The user can export/back up all tasks, transcripts, and completion history to op
 - **SC-002**: In automated recovery tests (restart, sleep/wake, missed-while-closed), 100% of due reminders present exactly once — none lost, none duplicated, none for completed tasks.
 - **SC-003**: Completing a task — by voice or from a notification — takes one confirmation and ≤2 seconds of interaction, and the next task is visible immediately (no empty gap requiring a decision).
 - **SC-004**: Across a simulated week of AI delegations, 0 delegated tasks are permanently forgotten: every one either reaches needs-review via signal/timer or appears in batch reconciliation.
-- **SC-005**: Connecting the agent integration takes ≤2 clicks and ≤60 seconds including the verified test signal; disconnecting restores the prior configuration byte-for-byte apart from Voci's removed entry.
+- **SC-005**: Connecting the agent integration takes ≤2 clicks and ≤60 seconds including the verified test signal; disconnecting restores the prior configuration byte-for-byte apart from Volar's removed entry.
 - **SC-006**: The engine test suite (existing release gate + new eligibility/condition/hierarchy cases) passes 100%, and selection on a board of several hundred tasks completes in well under 1 second.
 - **SC-007**: In accomplishment views, a day with ≥1 completed step never renders as empty, and no surface anywhere shows negative comparison or shame styling (audited against a checklist).
 - **SC-008**: Voice replies reach the exact originating terminal session in 100% of supported-terminal tests, and 0 sends occur without a confirmed preview.

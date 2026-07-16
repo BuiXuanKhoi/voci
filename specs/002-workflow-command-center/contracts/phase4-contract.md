@@ -3,7 +3,7 @@
 Parallel agents code against THIS, not each other's files. Won't fully compile until all land +
 Mac verify; the contract keeps them consistent. Owner named per symbol.
 
-## A. Reminder subsystem — OWNED BY the Reminders agent (`Voci/Sources/Reminders/` + `Model/ReminderRecord.swift`)
+## A. Reminder subsystem — OWNED BY the Reminders agent (`Volar/Sources/Reminders/` + `Model/ReminderRecord.swift`)
 
 ```swift
 // ReminderRecord.swift — @Model
@@ -21,7 +21,7 @@ Mac verify; the contract keeps them consistent. Owner named per symbol.
 @MainActor final class ReminderScheduler {
     init(store: TaskStore, voice: VoiceReminderChannel, gate: ReminderContextGate)
     func rebuildFromStorage()                 // call on launch + NSWorkspace.didWakeNotification
-    func scheduleReminders(for task: VociTask) // derive fire times from deadline × (policy|override)
+    func scheduleReminders(for task: VolarTask) // derive fire times from deadline × (policy|override)
     func cancelReminders(taskId: UUID)
     func handleFire(recordId: UUID)           // reload task fresh; suppress if done/archived; else deliver
     func scheduleResurface(at: Date, taskId: UUID)   // FR-017 afterDate
@@ -57,7 +57,7 @@ pending system requests (64 cap); refill on delivery/launch. Fire-time reload fr
 `VoiceDeliveryMode` (enum `visualOnly` / `visualPlusVoice` (default) / `voiceOnly`) lives in a
 settings source read by the scheduler; the App-wiring agent adds the setting UI + persistence.
 
-## C. Conflict engine — OWNED BY the Conflict agent (`VociCore/Sources/VociCore/ConflictCheck.swift`)
+## C. Conflict engine — OWNED BY the Conflict agent (`VolarCore/Sources/VolarCore/ConflictCheck.swift`)
 
 ```swift
 public enum TaskConflict: Sendable, Equatable {
@@ -79,7 +79,7 @@ capacity fires only when the candidate's deadline day is already ≥ ~80% commit
 vs `.inProgress`/priority-1/frog; duplicate only at fuzzy score ≥ ~0.8; depends-on-blocked only
 when the referenced task is overdue or itself has an unsatisfied blocking condition.
 
-## D. Triage view — OWNED BY the Triage agent (`Voci/Sources/Views/TriageView.swift`)
+## D. Triage view — OWNED BY the Triage agent (`Volar/Sources/Views/TriageView.swift`)
 
 ```swift
 struct TriageView: View {
@@ -92,10 +92,10 @@ struct TriageView: View {
 }
 ```
 
-## E. App wiring — OWNED BY the App-wiring agent (`AppState.swift`, `VociApp.swift`, `SettingsView.swift`, `PopoverView.swift`, `VociTask.swift`)
+## E. App wiring — OWNED BY the App-wiring agent (`AppState.swift`, `VolarApp.swift`, `SettingsView.swift`, `PopoverView.swift`, `VolarTask.swift`)
 Constructs the scheduler (B/A), runs `eligibilityDiff`→`notifyUnblocked` after mutations (FR-015),
-schedules resurface via `nextResurfaceDate` (FR-017), registers notification categories in VociApp,
-adds `VoiceDeliveryMode` setting + `VociTask.isSensitive`, presents `TriageView` on the weekly
+schedules resurface via `nextResurfaceDate` (FR-017), registers notification categories in VolarApp,
+adds `VoiceDeliveryMode` setting + `VolarTask.isSensitive`, presents `TriageView` on the weekly
 schedule, and — for conflict (T074) — after parse/before save calls `conflicts(...)` and renders
 ONE calm advisory line on the confirm card (ignore-with-Enter; never blocks; never auto-modifies).
 

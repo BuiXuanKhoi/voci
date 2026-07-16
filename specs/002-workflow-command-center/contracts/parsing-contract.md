@@ -4,7 +4,7 @@ Frozen seam between the Phase-3 parallel agents. Everyone codes against THIS, no
 files (proven Phase-2 pattern). Won't fully compile until all agents land + Mac verify; the
 contract guarantees consistency. Owner of each type is named; others reference by shape.
 
-## `ParsedTask` v2 — OWNED BY the NLParser agent (in `Voci/Sources/Model/NLParser.swift`)
+## `ParsedTask` v2 — OWNED BY the NLParser agent (in `Volar/Sources/Model/NLParser.swift`)
 
 The validated value the confirm card renders and `confirmSave` materializes. Assistive, never
 authoritative (constitution II). Codable. Replaces the v1 `ParsedTask`.
@@ -32,7 +32,7 @@ struct ParsedValue<T: Sendable & Equatable>: Sendable, Equatable {
     var isUncertain: Bool { confidence < 0.7 } // <0.7 → dashed "uncertain" chip; never auto-committed
 }
 
-/// A parsed blocking condition BEFORE resolution to VociCore.Condition.
+/// A parsed blocking condition BEFORE resolution to VolarCore.Condition.
 /// taskDone references a task by fuzzy title (resolved to a UUID via picker at confirm time,
 /// NEVER auto-attached below 0.7 — constitution II).
 enum ParsedCondition: Sendable, Equatable {
@@ -45,7 +45,7 @@ enum ParsedCondition: Sendable, Equatable {
 `Recurrence`, `ReminderPolicy`, `TaskKind` already exist (agent-B Phase-2, `Recurrence.swift`) —
 reuse, do not redefine.
 
-## `IntentParsing` — OWNED BY the Parsing agent (`Voci/Sources/Parsing/IntentParsing.swift`)
+## `IntentParsing` — OWNED BY the Parsing agent (`Volar/Sources/Parsing/IntentParsing.swift`)
 
 ```swift
 protocol IntentParser: Sendable {
@@ -80,7 +80,7 @@ Routing rules (R5):
   conditions below 0.7 show a task PICKER (never auto-attach).
 - Saving materializes ≤10 tasks through `TaskStore` validation (existing Phase-2 API): resolve
   `ParsedCondition.taskDone(titleQuery)` → a real task UUID (picker/fuzzy), build
-  `VociCore.Condition`s, create the task(s); if `followUpReview`, create a second `.review` task
+  `VolarCore.Condition`s, create the task(s); if `followUpReview`, create a second `.review` task
   depending on the first; persist `sourceTranscript` on every voice-created task.
 - Every user edit of a parsed attribute logs a `ParseCorrection` (local-only, FR-044).
 

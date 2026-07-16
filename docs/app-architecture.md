@@ -1,4 +1,4 @@
-# Voci macOS app — architecture & frozen contracts
+# Volar macOS app — architecture & frozen contracts
 
 **Status:** implementation spec authored by Opus (brain). Sonnet agents implement against the
 **frozen contracts** below so parallel work stays coherent. All Swift here is written on Windows
@@ -9,8 +9,8 @@ Design source of truth: `design/*.jsx` (React prototype). Fidelity choice = **na
 (keep the design's look/feel and tokens, but prefer standard macOS controls/materials over
 pixel-copying CSS). Dark-only, "Liquid Glass" aesthetic, default accent indigo `#6B6BFF`.
 
-Engine: `VociCore` package already exists (pure `nextTask(from:now:calendar:)` + `Task` value type).
-The app **must not** duplicate selection logic — it maps its UI model into `VociCore.Task` and calls
+Engine: `VolarCore` package already exists (pure `nextTask(from:now:calendar:)` + `Task` value type).
+The app **must not** duplicate selection logic — it maps its UI model into `VolarCore.Task` and calls
 `nextTask` to compute the single "active" task.
 
 ---
@@ -20,17 +20,17 @@ The app **must not** duplicate selection logic — it maps its UI model into `Vo
 | Concern | Decision |
 |---|---|
 | App type | Menu-bar app. `LSUIElement = true`. SwiftUI `MenuBarExtra` (window style) + `Window`/`WindowGroup` scenes. |
-| Min OS | macOS 26 (Xcode 26 toolchain), Swift 6 strict concurrency. Matches VociCore. |
-| Scaffold | **XcodeGen** `project.yml` at repo `Voci/`. anh Khôi runs `xcodegen generate` on Mac. Do NOT hand-write `.xcodeproj`. |
-| Package dep | App target depends on the local `VociCore` SwiftPM package (`../VociCore`). |
-| Persistence | **SwiftData** `@Model VociTask`, mapped to the UI struct `TaskItem` and to `VociCore.Task`. |
+| Min OS | macOS 26 (Xcode 26 toolchain), Swift 6 strict concurrency. Matches VolarCore. |
+| Scaffold | **XcodeGen** `project.yml` at repo `Volar/`. anh Khôi runs `xcodegen generate` on Mac. Do NOT hand-write `.xcodeproj`. |
+| Package dep | App target depends on the local `VolarCore` SwiftPM package (`../VolarCore`). |
+| Persistence | **SwiftData** `@Model VolarTask`, mapped to the UI struct `TaskItem` and to `VolarCore.Task`. |
 | State | One `@Observable final class AppState` (Observation framework) injected via `.environment`. |
 | Speech-in | `SFSpeechRecognizer` (on-device: `requiresOnDeviceRecognition = true`) + `AVAudioEngine` tap → live transcript. |
 | NL parse | On-device heuristic `NLParser` (protocol + `HeuristicNLParser`): `NSDataDetector` for dates/times, keyword scan for priority/duration. NO network. The design's "Parsing with AI" is satisfied on-device; a smarter parser is a later swap behind the protocol. |
 | Speech-out | `AVSpeechSynthesizer` (read-my-day, voice feedback). |
 | Global hotkey | `HotkeyManager` using `NSEvent` global+local monitors for ⌃⌥Space **keyDown → start, keyUp → stop** (hold-to-talk). Needs Accessibility permission — document it, don't block launch. |
 | Ambient visuals | SwiftUI `TimelineView(.animation)` + `Canvas` particle systems (rain/snow/fireflies). No Metal. |
-| Ambient sound | `AVAudioEngine` with a synthesized noise buffer + low-pass (mirror `useAmbientSound` in `voci-ambient.jsx`). |
+| Ambient sound | `AVAudioEngine` with a synthesized noise buffer + low-pass (mirror `useAmbientSound` in `volar-ambient.jsx`). |
 | Notifications | `UNUserNotificationCenter` for real reminders; the in-app `NotificationView` is a design artboard (optional preview). |
 | Glass | `.ultraThinMaterial` / `.regularMaterial` in a `ZStack` with token tint overlays. Helper `GlassBackground`. |
 
@@ -38,23 +38,23 @@ The app **must not** duplicate selection logic — it maps its UI model into `Vo
 
 ---
 
-## 2. File / target layout (new — under repo `Voci/`)
+## 2. File / target layout (new — under repo `Volar/`)
 
 ```
-Voci/
-  project.yml                     # XcodeGen — app target "Voci" + VociCore package ref
+Volar/
+  project.yml                     # XcodeGen — app target "Volar" + VolarCore package ref
   Sources/
     App/
-      VociApp.swift               # @main; MenuBarExtra + main Window + Settings scene; AppDelegate
+      VolarApp.swift               # @main; MenuBarExtra + main Window + Settings scene; AppDelegate
       AppState.swift              # @Observable store (frozen API §4)
     Design/
       Theme.swift                 # palette, accents, density, glass (frozen §3)
-      VocIcon.swift               # icon set (SF Symbols map + custom Shapes for non-SF ones)
+      VolarIcon.swift               # icon set (SF Symbols map + custom Shapes for non-SF ones)
       Glass.swift                 # GlassBackground modifier + material helpers
     Model/
-      TaskItem.swift              # UI/domain struct (frozen §4) + mapping to VociCore.Task
-      VociTask.swift              # SwiftData @Model + <-> TaskItem
-      TaskStore.swift             # SwiftData container + CRUD; exposes activeTask via VociCore.nextTask
+      TaskItem.swift              # UI/domain struct (frozen §4) + mapping to VolarCore.Task
+      VolarTask.swift              # SwiftData @Model + <-> TaskItem
+      TaskStore.swift             # SwiftData container + CRUD; exposes activeTask via VolarCore.nextTask
       NLParser.swift              # protocol + HeuristicNLParser + ParsedTask
       SampleData.swift            # ports SAMPLE_TASKS / SAMPLE_TRANSCRIPT_PARSED for previews & first run
     Speech/
@@ -80,7 +80,7 @@ Voci/
       NotificationView.swift      # in-app notification artboard (optional)
   Resources/
     Info.plist                    # LSUIElement, NSMicrophoneUsageDescription, NSSpeechRecognitionUsageDescription
-    Voci.entitlements             # app sandbox (if used): mic; else non-sandboxed for global hotkey
+    Volar.entitlements             # app sandbox (if used): mic; else non-sandboxed for global hotkey
     Assets.xcassets/              # AppIcon placeholder, AccentColor
 ```
 
@@ -92,7 +92,7 @@ Port `design/tokens.jsx`. All colors are **dark-only** literals. Use `Color(red:
 (sRGB, 0–1). rgba(255,255,255,a) → white at opacity a.
 
 ```
-enum VociColor {   // static let … : Color
+enum VolarColor {   // static let … : Color
   bg=#1C1C1E  surface=#2C2C2E  surfaceHi=#3A3A3C
   card=white@0.05  cardHover=white@0.08  border=white@0.08  borderHi=white@0.14
   textPri=white@0.88  textSec=white@0.45  textMut=white@0.25
@@ -100,7 +100,7 @@ enum VociColor {   // static let … : Color
 }
 
 struct Accent { let solid, hover, surface, glow: Color }
-enum VociAccent: String, CaseIterable, Identifiable { case indigo, teal, amber, magenta
+enum VolarAccent: String, CaseIterable, Identifiable { case indigo, teal, amber, magenta
   // indigo solid#6B6BFF hover#8B8BFF surface=solid@0.15 glow=solid@0.45
   // teal   solid#3DD5C7 hover#6FE3D8 …
   // amber  solid#FFB547 hover#FFC76B …
@@ -115,7 +115,7 @@ enum GlassLevel { case subtle, standard, heavy   // blur/bgOpacity = 14/0.92, 24
 Fonts: system (`Font.system(size:weight:)`), monospaced via `.monospaced` design (tabular numbers →
 `.monospacedDigit()`). Default: accent = `.indigo`, density = `.comfy`, glass = `.standard`.
 
-`VocIcon`: expose `VocIcon(_ name: VocIconName, size:, color:, weight:)` → `View`. Map to SF Symbols
+`VolarIcon`: expose `VolarIcon(_ name: VolarIconName, size:, color:, weight:)` → `View`. Map to SF Symbols
 where a clean equivalent exists (mic→"mic", focus→"scope", inbox→"tray", today/upcoming→"calendar",
 plus→"plus", search→"magnifyingglass", check→"checkmark", clock→"clock", bell→"bell",
 sparkle→"sparkles", flag→"flag", bolt→"bolt.fill", play→"play.fill", pause→"pause.fill",
@@ -131,14 +131,14 @@ by role.
 Views depend ONLY on these signatures. Do not change names/shapes in phase-2 agents.
 
 ```swift
-enum Priority: Int, Sendable { case high = 1, medium = 2, low = 3 }   // maps to VociCore priority Int
+enum Priority: Int, Sendable { case high = 1, medium = 2, low = 3 }   // maps to VolarCore priority Int
 enum When: Sendable { case now, later }
 
 struct TaskItem: Identifiable, Sendable, Equatable {
     let id: UUID
     var title: String
     var priority: Priority
-    var status: TaskStatus        // typealias to VociCore.TaskStatus (.todo/.inProgress/.done/.archived)
+    var status: TaskStatus        // typealias to VolarCore.TaskStatus (.todo/.inProgress/.done/.archived)
     var deadline: Date?
     var dependsOn: [UUID]
     var createdAt: Date
@@ -148,12 +148,12 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     // Derived: var done: Bool { status == .done }
     // Derived: var timeBadge: String?  (formatted deadline time, nil when none/done)
     // Derived: var durationLabel: String?
-    func toEngineTask() -> VociCore.Task   // maps into the engine value type
+    func toEngineTask() -> VolarCore.Task   // maps into the engine value type
 }
 
 @Observable @MainActor final class AppState {
     var tasks: [TaskItem]
-    var accent: VociAccent
+    var accent: VolarAccent
     var density: Density
     var glass: GlassLevel
     var ambient: AmbientMode            // .none/.rain/.snow/.embers/.custom
@@ -197,7 +197,7 @@ struct HeuristicNLParser: NLParser { … }   // NSDataDetector + keyword rules, 
 ```
 
 `activeTask` is highlighted as the first "Now" row, is the Focus target, and is what the menu-bar
-single-task label shows. This is the only place the app consumes `VociCore.nextTask`.
+single-task label shows. This is the only place the app consumes `VolarCore.nextTask`.
 
 ---
 
@@ -208,7 +208,7 @@ KeyBadge(_ text: String, accent: Bool = false)                 // ⌃ ⌥ Space 
 PriorityBadge(_ priority: Priority)                            // dot + High/Medium/Low pill
 TimeBadge(_ text: String, filled: Bool = false)               // accent time pill
 Spinner(color: Color)                                         // rotating ring
-ToolButton(icon: VocIconName, accent: Bool=false, tint: Bool=false, action: ()->Void)
+ToolButton(icon: VolarIconName, accent: Bool=false, tint: Bool=false, action: ()->Void)
 SectionHeader(_ title: String, count: Int?, accent: Bool=false) // "NOW", "LATER TODAY", "COMPLETED"
 GlassBackground(level: GlassLevel = .standard)                 // ViewModifier / background view
 ```
@@ -228,7 +228,7 @@ Keep motion subtle (design uses ~0.12–0.18s ease).
 | `box-shadow` glow | `.shadow(color: accent.glow, radius:, y:)` |
 | `fontVariantNumeric: tabular-nums` | `.monospacedDigit()` |
 | Waveform `requestAnimationFrame` sines | `TimelineView(.animation) { Canvas … }` layered sines |
-| Rain/snow/embers canvas | `TimelineView(.animation) { Canvas … }` particle arrays (port constants from `voci-ambient.jsx`) |
+| Rain/snow/embers canvas | `TimelineView(.animation) { Canvas … }` particle arrays (port constants from `volar-ambient.jsx`) |
 | `position:absolute; inset:0` overlays | `ZStack` full-bleed layers |
 | Traffic lights | Real macOS window chrome (don't draw them); artboard-only views may draw them |
 | Hover states | `.onHover` |
@@ -238,8 +238,8 @@ Keep motion subtle (design uses ~0.12–0.18s ease).
 ## 7. Phase plan (how Sonnet executes)
 
 - **Phase 1 — Foundation (1 Sonnet agent, run first, blocking):** `project.yml`, `Info.plist`,
-  `Theme.swift`, `VocIcon.swift`, `Glass.swift`, `TaskItem.swift`, `VociTask.swift`, `TaskStore.swift`,
-  `NLParser.swift`, `SampleData.swift`, `AppState.swift`, `VociApp.swift` (scenes wired; view bodies may
+  `Theme.swift`, `VolarIcon.swift`, `Glass.swift`, `TaskItem.swift`, `VolarTask.swift`, `TaskStore.swift`,
+  `NLParser.swift`, `SampleData.swift`, `AppState.swift`, `VolarApp.swift` (scenes wired; view bodies may
   be temporary stubs), `Components.swift`. Must compile-shape against §3–§5 exactly. Opus reviews &
   freezes before Phase 2.
 - **Phase 2 — Views (parallel Sonnet agents, each given the frozen §3–§6):**
@@ -248,8 +248,8 @@ Keep motion subtle (design uses ~0.12–0.18s ease).
   - C: `FocusOverlay` + `AmbientBackground` + `AmbientSound` + `VoicePlayback` + `HotkeyManager`.
   - D: `SettingsView` (+Toggle/Segmented/KeyRecorder) + `OnboardingView` + `MorningFrogView` +
        `TaskBreakdownView` + `MenuBarLabel` + `NotificationView`.
-- **Phase 3 — Integration & handoff (Opus):** wire all views into `VociApp`, reconcile any contract
-  drift, write `Voci/README.md` build steps (`xcodegen generate && open Voci.xcodeproj`), add backlog
+- **Phase 3 — Integration & handoff (Opus):** wire all views into `VolarApp`, reconcile any contract
+  drift, write `Volar/README.md` build steps (`xcodegen generate && open Volar.xcodeproj`), add backlog
   entries (Mac build unverified; Accessibility permission for hotkey; smarter NL parser; real ambient
   sound polish).
 

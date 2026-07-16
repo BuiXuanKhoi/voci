@@ -29,9 +29,9 @@ Templates requiring updates:
 Follow-up TODOs: none. RATIFICATION_DATE set to first adoption on 2026-07-12.
 -->
 
-# Voci Constitution
+# Volar Constitution
 
-Voci is a voice-first, ADHD-first task manager for macOS. This constitution governs the
+Volar is a voice-first, ADHD-first task manager for macOS. This constitution governs the
 voice → task intelligence layer and every artifact built on top of it. It is authoritative:
 where this document and any other practice conflict, this document wins.
 
@@ -154,7 +154,7 @@ removed decision is a feature.
 
 ## Governance
 
-This constitution supersedes all other development practices for Voci. Compliance is
+This constitution supersedes all other development practices for Volar. Compliance is
 expected in every plan, spec, task set, and code review.
 
 - **Amendments** require: a written rationale, a version bump per the policy below, update
@@ -169,7 +169,7 @@ expected in every plan, spec, task set, and code review.
   principles (I, III) explicitly. Complexity that deviates from a principle MUST be
   justified in the plan's Complexity Tracking table or the change is rejected.
 - **Runtime guidance**: agent and contributor runtime guidance lives in `CLAUDE.md` and the
-  spec at `docs/voci-voice-task-engine-spec.md`; those documents MUST NOT contradict this
+  spec at `docs/volar-voice-task-engine-spec.md`; those documents MUST NOT contradict this
   constitution.
 
 **Version**: 1.0.0 | **Ratified**: 2026-07-12 | **Last Amended**: 2026-07-12

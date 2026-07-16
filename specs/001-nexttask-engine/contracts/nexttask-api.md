@@ -1,6 +1,6 @@
-# Contract: VociCore selection API
+# Contract: VolarCore selection API
 
-Public surface of the `VociCore` module for this feature. This is the behavioral contract the
+Public surface of the `VolarCore` module for this feature. This is the behavioral contract the
 implementation and tests are written against. Signatures are Swift; semantics are normative.
 
 ## Types

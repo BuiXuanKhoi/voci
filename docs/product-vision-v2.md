@@ -1,4 +1,4 @@
-# Voci — Vision v2: Trợ lý Executive Function cho não ADHD (2026-07-15 · định vị siết lại 2026-07-16)
+# Volar — Vision v2: Trợ lý Executive Function cho não ADHD (2026-07-15 · định vị siết lại 2026-07-16)
 
 Định vị đã dịch chuyển (chốt 2026-07-15, siết lại sau deep-research validate thị trường
 2026-07-16): không còn là "voice to-do app", và KHÔNG dẫn đầu bằng "voice AI app" — mà là
@@ -6,18 +6,18 @@
 là INTERFACE (cách thao tác); engine-decides — "nói một câu → app quyết giùm bạn làm gì
 tiếp" — mới là VALUE cốt lõi, thứ thật sự giữ chân user.
 
-**Vì sao không dẫn đầu bằng "voice AI app"**: gọi tên như vậy, thị trường sẽ đọc Voci
+**Vì sao không dẫn đầu bằng "voice AI app"**: gọi tên như vậy, thị trường sẽ đọc Volar
 thành một app voice-dictation (giọng → chữ) và so trực tiếp với Wispr Flow (định giá
-~$2 tỷ) cùng 17+ app dictation khác trên macOS — Voci thua ngay từ khung so sánh, vì
+~$2 tỷ) cùng 17+ app dictation khác trên macOS — Volar thua ngay từ khung so sánh, vì
 phần speech-to-text chỉ là hạ tầng, không phải sản phẩm. Phải dẫn đầu bằng outcome cho
 người ADHD, voice chỉ là cách làm.
 
-**Khác biệt then chốt (đây mới là moat thật)**: Voci KHÁC hẳn nhóm voice-dictation
+**Khác biệt then chốt (đây mới là moat thật)**: Volar KHÁC hẳn nhóm voice-dictation
 (Wispr Flow, Superwhisper, và 17+ app macOS khác: giọng → chữ, dừng ở đó) và KHÁC nhóm
-list tĩnh visual-first (Tiimo — visual schedule, Todoist — checklist). Voci là
+list tĩnh visual-first (Tiimo — visual schedule, Todoist — checklist). Volar là
 **giọng → hành động + engine quyết định**: không bắt user gõ, không bắt user nhìn 30
 dòng rồi tự chọn việc tiếp theo. Cả hai nhóm đối thủ trên đều thiếu vế "engine quyết"
-này — đó là khoảng trống Voci đứng vào, và là moat cần bảo vệ.
+này — đó là khoảng trống Volar đứng vào, và là moat cần bảo vệ.
 
 ## Moat hiện có (4 trụ, tái framing sau deep-research 2026-07-16)
 
@@ -96,7 +96,7 @@ Tiimo/Blabby đang hẹp dần.
 
 - Kanban/board view phức tạp, project hierarchy sâu — quay lại thành Jira mini, phản
   engine-decides.
-- Chat AI tổng quát trong app — Voci điều phối AI, không thay thế AI.
+- Chat AI tổng quát trong app — Volar điều phối AI, không thay thế AI.
 - Social/body-doubling, medication tracking — ngoài scope.
 
 ## Freemium v2 (chốt cấu trúc 2026-07-15 — giá bán quyết sau)
@@ -131,7 +131,7 @@ quota free = DeviceCheck (không cần đăng nhập).
    thiệu Pro hiện TRƯỚC khi vào app lần đầu (không chặn cứng — chỉ show trial 14 ngày,
    user luôn bấm qua được để dùng free). Data 2025/26 (RevenueCat): freemium thuần
    convert median chỉ 2.1% (RPI $0.38) trong khi hard-paywall lên tới 10.7% (RPI $3.09)
-   — nhóm thấy paywall ngay từ onboarding convert cao hơn hẳn nhóm không thấy. Voci vẫn
+   — nhóm thấy paywall ngay từ onboarding convert cao hơn hẳn nhóm không thấy. Volar vẫn
    giữ freemium (không khoá tính năng) nhưng học chiến thuật "cho thấy Pro sớm" của
    hard-paywall để nâng conversion mà không phá nguyên tắc free-feature.
 
@@ -216,7 +216,7 @@ parse soft-cap ~100/ngày — vượt thì hàng đợi chậm lại, không ch�
   miễn phí trong Pro/Max; OpenAI có Codex macOS app riêng; Conductor (macOS) miễn phí.
 - **Voice-dictation wedge đã đóng**: Wispr Flow định giá ~$2 tỷ, 17+ app dictation khác
   trên macOS, on-device STT miễn phí đã bị commoditize hàng loạt → free WhisperKit tier
-  của Voci là table-stakes, KHÔNG phải hook để thu hút user.
+  của Volar là table-stakes, KHÔNG phải hook để thu hút user.
 - **Rủi ro chí mạng cần theo dõi sát**:
   1. Anthropic/OpenAI mở rộng Agent View + voice sang workflow phi-dev (non-dev).
   2. Blabby AI hoặc Tiimo thêm voice + engine-decides vào sản phẩm của họ.

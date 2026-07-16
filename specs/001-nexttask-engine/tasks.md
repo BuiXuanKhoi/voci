@@ -18,8 +18,8 @@ increment. All paths are relative to repo root.
 
 ## Path Conventions
 
-Single Swift package `VociCore/` at repo root (see plan.md → Project Structure):
-`VociCore/Sources/VociCore/…`, `VociCore/Tests/VociCoreTests/…`.
+Single Swift package `VolarCore/` at repo root (see plan.md → Project Structure):
+`VolarCore/Sources/VolarCore/…`, `VolarCore/Tests/VolarCoreTests/…`.
 
 ---
 
@@ -27,8 +27,8 @@ Single Swift package `VociCore/` at repo root (see plan.md → Project Structure
 
 **Purpose**: Create the dependency-free Swift package skeleton.
 
-- [ ] T001 Create the `VociCore` Swift package layout at repo root: `VociCore/Package.swift`, `VociCore/Sources/VociCore/`, `VociCore/Tests/VociCoreTests/`
-- [ ] T002 Configure `VociCore/Package.swift`: `swift-tools-version:6.0`, `platforms: [.macOS(.v26)]`, a library target `VociCore` (no dependencies) and a test target `VociCoreTests` using Swift Testing
+- [ ] T001 Create the `VolarCore` Swift package layout at repo root: `VolarCore/Package.swift`, `VolarCore/Sources/VolarCore/`, `VolarCore/Tests/VolarCoreTests/`
+- [ ] T002 Configure `VolarCore/Package.swift`: `swift-tools-version:6.0`, `platforms: [.macOS(.v26)]`, a library target `VolarCore` (no dependencies) and a test target `VolarCoreTests` using Swift Testing
 
 ---
 
@@ -38,8 +38,8 @@ Single Swift package `VociCore/` at repo root (see plan.md → Project Structure
 
 **⚠️ CRITICAL**: No user-story work can begin until this phase is complete.
 
-- [ ] T003 Implement the `Task` value type and `TaskStatus` enum in `VociCore/Sources/VociCore/Task.swift` per data-model.md (fields: `id`, `title`, `status`, `priority: Int?`, `deadline: Date?`, `dependsOn: [UUID]`, `createdAt`; conform `Sendable, Equatable, Identifiable`; public memberwise init)
-- [ ] T004 Add deterministic test fixtures in `VociCore/Tests/VociCoreTests/Fixtures.swift`: a `makeTask(...)` builder with sensible defaults, a fixed reference `now`, and a fixed Gregorian `Calendar` (explicit timezone) so all tests are reproducible (depends on T003)
+- [ ] T003 Implement the `Task` value type and `TaskStatus` enum in `VolarCore/Sources/VolarCore/Task.swift` per data-model.md (fields: `id`, `title`, `status`, `priority: Int?`, `deadline: Date?`, `dependsOn: [UUID]`, `createdAt`; conform `Sendable, Equatable, Identifiable`; public memberwise init)
+- [ ] T004 Add deterministic test fixtures in `VolarCore/Tests/VolarCoreTests/Fixtures.swift`: a `makeTask(...)` builder with sensible defaults, a fixed reference `now`, and a fixed Gregorian `Calendar` (explicit timezone) so all tests are reproducible (depends on T003)
 
 **Checkpoint**: Model + fixtures ready — user stories can begin.
 
@@ -55,12 +55,12 @@ the tier rules and is identical across repeated/shuffled-input runs.
 
 ### Tests for User Story 1 (write first, ensure they FAIL) ⚠️
 
-- [ ] T005 [US1] Write ordering & determinism tests in `VociCore/Tests/VociCoreTests/NextTaskTests.swift` covering §6.2 #1 (in-progress beats higher-priority to-do), #2 (overdue beats priority-1 no-deadline), #7 (deadline-tomorrow does NOT outrank priority-today), #4 (identical tasks → stable `id` tiebreak), FR-007 (a `nil`-priority task sorts AFTER an explicit priority-4 task), clarify #10 (multiple in-progress → single stable result), and empty/all-done input → `nil`; include an input-order-shuffle assertion for SC-001
+- [ ] T005 [US1] Write ordering & determinism tests in `VolarCore/Tests/VolarCoreTests/NextTaskTests.swift` covering §6.2 #1 (in-progress beats higher-priority to-do), #2 (overdue beats priority-1 no-deadline), #7 (deadline-tomorrow does NOT outrank priority-today), #4 (identical tasks → stable `id` tiebreak), FR-007 (a `nil`-priority task sorts AFTER an explicit priority-4 task), clarify #10 (multiple in-progress → single stable result), and empty/all-done input → `nil`; include an input-order-shuffle assertion for SC-001
 
 ### Implementation for User Story 1
 
-- [ ] T006 [US1] Implement `orderedBefore(now:calendar:) -> (Task, Task) -> Bool` in `VociCore/Sources/VociCore/NextTask.swift` — first-difference-wins over the 5 tiers (status → today/overdue deadline → priority → createdAt → `id` string), with a `nil`-priority-last helper and a today/overdue classifier using the injected `calendar` (contract C-O1..C-O4)
-- [ ] T007 [US1] Implement `nextTask(from:now:calendar: .current) -> Task?` in `VociCore/Sources/VociCore/NextTask.swift` using status-only eligibility (`.todo`/`.inProgress`) and `eligible.min(by: orderedBefore(now:calendar:))` (contract C-S1, C-S3, C-S5; depends on T006)
+- [ ] T006 [US1] Implement `orderedBefore(now:calendar:) -> (Task, Task) -> Bool` in `VolarCore/Sources/VolarCore/NextTask.swift` — first-difference-wins over the 5 tiers (status → today/overdue deadline → priority → createdAt → `id` string), with a `nil`-priority-last helper and a today/overdue classifier using the injected `calendar` (contract C-O1..C-O4)
+- [ ] T007 [US1] Implement `nextTask(from:now:calendar: .current) -> Task?` in `VolarCore/Sources/VolarCore/NextTask.swift` using status-only eligibility (`.todo`/`.inProgress`) and `eligible.min(by: orderedBefore(now:calendar:))` (contract C-S1, C-S3, C-S5; depends on T006)
 - [ ] T008 [US1] Run T005 tests; make all pass, hardening the comparator's strict-total-order guarantees (irreflexive/asymmetric/transitive) so `min(by:)` is well-defined (depends on T007)
 
 **Checkpoint**: US1 fully functional — deterministic single-task selection works standalone (MVP).
@@ -71,18 +71,18 @@ the tier rules and is identical across repeated/shuffled-input runs.
 
 **Goal**: Marking the active task done makes the next call to `nextTask()` return the next
 correct task. At engine level this is re-invocation after a status change; the menu-bar
-recompute/animation is app-side and out of scope for `VociCore`.
+recompute/animation is app-side and out of scope for `VolarCore`.
 
 **Independent Test**: Given a set where the active task is now `.done`, assert `nextTask()`
 returns the next eligible task; when it was the only eligible task, assert `nil`.
 
 ### Tests for User Story 2 (write first, ensure they FAIL/PASS as noted) ⚠️
 
-- [ ] T009 [US2] Write auto-advance tests in `VociCore/Tests/VociCoreTests/AutoAdvanceTests.swift` — completing the active task (flip status to `.done`) yields the next correct `nextTask()`; sole-eligible task completed → `nil` (US2 acceptance scenarios 1 & 3)
+- [ ] T009 [US2] Write auto-advance tests in `VolarCore/Tests/VolarCoreTests/AutoAdvanceTests.swift` — completing the active task (flip status to `.done`) yields the next correct `nextTask()`; sole-eligible task completed → `nil` (US2 acceptance scenarios 1 & 3)
 
 ### Implementation for User Story 2
 
-- [ ] T010 [US2] Confirm US2 needs no new engine code (re-invoking `nextTask()` already excludes `.done`); add a doc comment in `VociCore/Sources/VociCore/NextTask.swift` noting recompute/transition is the app's responsibility, and make T009 green (depends on T007)
+- [ ] T010 [US2] Confirm US2 needs no new engine code (re-invoking `nextTask()` already excludes `.done`); add a doc comment in `VolarCore/Sources/VolarCore/NextTask.swift` noting recompute/transition is the app's responsibility, and make T009 green (depends on T007)
 
 **Checkpoint**: US1 + US2 both pass independently.
 
@@ -98,11 +98,11 @@ prerequisite `.done` (or `.archived`, or deleting it) lets the dependent be sele
 
 ### Tests for User Story 3 (write first, ensure they FAIL) ⚠️
 
-- [ ] T011 [US3] Write eligibility tests in `VociCore/Tests/VociCoreTests/EligibilityTests.swift` covering §6.2 #3 (priority-1 blocked by unfinished dep skipped; unblocks when dep `.done`), #6 (completing a task cascades → dependent becomes the new `nextTask()`), #8 (all-blocked graph → `nil`), clarify #9 (archived prerequisite unblocks), and deleted-prerequisite unblocks
+- [ ] T011 [US3] Write eligibility tests in `VolarCore/Tests/VolarCoreTests/EligibilityTests.swift` covering §6.2 #3 (priority-1 blocked by unfinished dep skipped; unblocks when dep `.done`), #6 (completing a task cascades → dependent becomes the new `nextTask()`), #8 (all-blocked graph → `nil`), clarify #9 (archived prerequisite unblocks), and deleted-prerequisite unblocks
 
 ### Implementation for User Story 3
 
-- [ ] T012 [US3] Extend eligibility in `VociCore/Sources/VociCore/NextTask.swift`: build a `[UUID: TaskStatus]` map once per call; treat a prerequisite as resolved when its task is `.done`, `.archived`, or absent (deleted); a task is eligible only if ALL `dependsOn` are resolved (contract C-S2; FR-003/FR-013; depends on T007)
+- [ ] T012 [US3] Extend eligibility in `VolarCore/Sources/VolarCore/NextTask.swift`: build a `[UUID: TaskStatus]` map once per call; treat a prerequisite as resolved when its task is `.done`, `.archived`, or absent (deleted); a task is eligible only if ALL `dependsOn` are resolved (contract C-S2; FR-003/FR-013; depends on T007)
 - [ ] T013 [US3] Run T011 tests; make all pass and confirm US1/US2 tests still green (depends on T012)
 
 **Checkpoint**: US1 + US2 + US3 pass independently.
@@ -119,11 +119,11 @@ valid non-closing edge → accepted.
 
 ### Tests for User Story 4 (write first, ensure they FAIL) ⚠️
 
-- [ ] T014 [US4] Write cycle-detection tests in `VociCore/Tests/VociCoreTests/DependencyGraphTests.swift` covering §6.2 #5 (A→B then B→A rejected), a longer chain A→B→C then C→A rejected, self-dependency rejected, and a valid edge accepted (no throw)
+- [ ] T014 [US4] Write cycle-detection tests in `VolarCore/Tests/VolarCoreTests/DependencyGraphTests.swift` covering §6.2 #5 (A→B then B→A rejected), a longer chain A→B→C then C→A rejected, self-dependency rejected, and a valid edge accepted (no throw)
 
 ### Implementation for User Story 4
 
-- [ ] T015 [US4] Implement `DependencyError` and `validateDependency(from:dependsOn:in:) throws` + `wouldCreateCycle(from:dependsOn:in:) -> Bool` in `VociCore/Sources/VociCore/DependencyGraph.swift` — reject self-edge (`.selfDependency`); DFS from `target` over existing `dependsOn` edges, and if `source` is reachable throw `.cycle(from:to:)` carrying titles (contract C-D1..C-D4; FR-011/FR-012)
+- [ ] T015 [US4] Implement `DependencyError` and `validateDependency(from:dependsOn:in:) throws` + `wouldCreateCycle(from:dependsOn:in:) -> Bool` in `VolarCore/Sources/VolarCore/DependencyGraph.swift` — reject self-edge (`.selfDependency`); DFS from `target` over existing `dependsOn` edges, and if `source` is reachable throw `.cycle(from:to:)` carrying titles (contract C-D1..C-D4; FR-011/FR-012)
 - [ ] T016 [US4] Run T014 tests; make all pass (depends on T015)
 
 **Checkpoint**: All four user stories independently functional.
@@ -134,9 +134,9 @@ valid non-closing edge → accepted.
 
 **Purpose**: Validate the full release gate and document the public surface.
 
-- [ ] T017 [P] Run the full suite (`cd VociCore && swift test`) and confirm all 10 release-gate scenarios in quickstart.md are green; run twice to spot-check determinism (SC-001)
-- [ ] T018 [P] Document the `VociCore` public API in `VociCore/README.md`, linking to `specs/001-nexttask-engine/contracts/nexttask-api.md`
-- [ ] T019 Integration note: when the Voci app target exists, add `VociCore` as a package dependency and mark the call site where SwiftData `@Model` objects are mapped to `Task` snapshots before `nextTask()` (mapping implementation is a separate feature)
+- [ ] T017 [P] Run the full suite (`cd VolarCore && swift test`) and confirm all 10 release-gate scenarios in quickstart.md are green; run twice to spot-check determinism (SC-001)
+- [ ] T018 [P] Document the `VolarCore` public API in `VolarCore/README.md`, linking to `specs/001-nexttask-engine/contracts/nexttask-api.md`
+- [ ] T019 Integration note: when the Volar app target exists, add `VolarCore` as a package dependency and mark the call site where SwiftData `@Model` objects are mapped to `Task` snapshots before `nextTask()` (mapping implementation is a separate feature)
 
 ---
 

@@ -1,4 +1,4 @@
-# Phase 0 Research: Voci v2 — Workflow Command Center
+# Phase 0 Research: Volar v2 — Workflow Command Center
 
 All Technical Context unknowns resolved. Format: Decision / Rationale / Alternatives considered.
 Source decision record: `docs/task-model-v1.md`, `docs/adhd-automation-v1.md`,
@@ -39,13 +39,13 @@ Source decision record: `docs/task-model-v1.md`, `docs/adhd-automation-v1.md`,
 - **Alternatives**: keep NSEvent monitor (rejected: permission + review risk); MenuBarExtra-only
   activation (rejected: kills the one-breath capture promise).
 
-## R4. Agent-completion signal: `voci://` URL scheme + Claude Code Stop-hook
+## R4. Agent-completion signal: `volar://` URL scheme + Claude Code Stop-hook
 
-- **Decision**: Register `CFBundleURLTypes` scheme `voci`; endpoint `voci://ai-done?cwd=<path>`
+- **Decision**: Register `CFBundleURLTypes` scheme `volar`; endpoint `volar://ai-done?cwd=<path>`
   (tty param reserved for the deferred typing feature). One-button connect: detect `~/.claude/`,
   NSOpenPanel pre-targeted at it (security-scoped bookmark, 2 clicks total), preview the exact
   JSON hook entry, backup `settings.json`, additive merge into `hooks.Stop`, test-signal
-  round-trip, disconnect removes only the `voci://`-marked entry. Signals are idempotent, can
+  round-trip, disconnect removes only the `volar://`-marked entry. Signals are idempotent, can
   only move a waiting task to needs-review, never complete anything.
 - **Rationale**: Cooperative push is the only privacy-acceptable detection (no notification-DB /
   AX / screen reading — constitution I); URL scheme has no listening port (unlike localhost HTTP).

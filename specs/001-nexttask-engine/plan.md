@@ -6,12 +6,12 @@
 
 ## Summary
 
-Implement the deterministic `nextTask()` selection engine that powers Voci's single-task
+Implement the deterministic `nextTask()` selection engine that powers Volar's single-task
 menu bar. Given an immutable snapshot of tasks and a reference time, it returns the one task
 the user should do next — or `nil` — via a pure, side-effect-free, total-order comparator.
 The engine also owns dependency-graph integrity: it validates every new dependency edge and
 rejects any that would create a cycle. The technical approach isolates this logic in a
-standalone, dependency-free Swift package module (`VociCore`) so it can be exhaustively unit
+standalone, dependency-free Swift package module (`VolarCore`) so it can be exhaustively unit
 tested independently of SwiftUI, SwiftData, and the clock — directly satisfying constitution
 Principle III (Deterministic, Pure, Test-Gated Core).
 
@@ -33,7 +33,7 @@ prerequisite, multiple in-progress) are the release gate.
 **Target Platform**: macOS 26+ on Apple Silicon. The engine itself is platform-agnostic pure
 Swift and will build/test on any Swift 6 toolchain.
 
-**Project Type**: Single desktop app; this feature is an internal library module (`VociCore`)
+**Project Type**: Single desktop app; this feature is an internal library module (`VolarCore`)
 consumed by the app target.
 
 **Performance Goals**: Selection completes in well under 1 ms for a realistic personal task
@@ -61,7 +61,7 @@ tiny dependency graph. No concurrency inside the engine (it is a synchronous pur
 
 **Result**: PASS — no violations. Complexity Tracking table below is empty (nothing to justify).
 
-**Post-design re-check (after Phase 1)**: The chosen design — a dependency-free `VociCore`
+**Post-design re-check (after Phase 1)**: The chosen design — a dependency-free `VolarCore`
 package, value-type `Task` snapshot, and an injectable `Calendar` — strengthens Principle III
 (purity/determinism/testability) and introduces no new violations. Gate remains PASS.
 
@@ -76,7 +76,7 @@ specs/001-nexttask-engine/
 ├── data-model.md        # Phase 1 output
 ├── quickstart.md        # Phase 1 output
 ├── contracts/           # Phase 1 output
-│   └── nexttask-api.md   # Public API + behavioral contract for VociCore
+│   └── nexttask-api.md   # Public API + behavioral contract for VolarCore
 └── spec.md              # Feature specification (from /speckit-specify + /speckit-clarify)
 ```
 
@@ -84,27 +84,27 @@ specs/001-nexttask-engine/
 
 The pure selection logic lives in a standalone Swift package module, decoupled from the app's
 UI and persistence layers so it stays testable and side-effect-free (Principle III). The macOS
-app target depends on `VociCore`.
+app target depends on `VolarCore`.
 
 ```text
-VociCore/                         # Swift package: pure domain logic (no UI, no persistence)
+VolarCore/                         # Swift package: pure domain logic (no UI, no persistence)
 ├── Package.swift
 ├── Sources/
-│   └── VociCore/
+│   └── VolarCore/
 │       ├── Task.swift            # Task value type, TaskStatus, TaskPriority helpers
 │       ├── NextTask.swift        # nextTask(from:now:) + orderedBefore(now:)
 │       └── DependencyGraph.swift # validateDependency / wouldCreateCycle (DFS)
 └── Tests/
-    └── VociCoreTests/
+    └── VolarCoreTests/
         ├── NextTaskTests.swift        # §6.2 cases #1,2,4,7,8 + multiple-in-progress
         ├── EligibilityTests.swift     # §6.2 cases #3,6 + archived/deleted prerequisite
         └── DependencyGraphTests.swift # §6.2 case #5 (cycle rejection) + valid-edge accept
 
-Voci/                             # Existing macOS app target (SwiftUI + SwiftData)
-└── ...                           # Consumes VociCore; maps @Model -> Task snapshot before calling nextTask
+Volar/                             # Existing macOS app target (SwiftUI + SwiftData)
+└── ...                           # Consumes VolarCore; maps @Model -> Task snapshot before calling nextTask
 ```
 
-**Structure Decision**: Introduce a dependency-free `VociCore` Swift package holding the value
+**Structure Decision**: Introduce a dependency-free `VolarCore` Swift package holding the value
 type `Task` and the pure engine. The app maps its SwiftData `@Model` objects into `Task`
 snapshots at call time. This keeps `nextTask()` a pure function of its inputs — the precondition
 for the exhaustive, deterministic test suite the constitution mandates — and prevents SwiftUI /

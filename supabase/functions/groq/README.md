@@ -1,7 +1,7 @@
 # `groq` Edge Function — not implemented
 
 This directory is a placeholder. The Groq speech-to-text proxy (`/functions/v1/groq`,
-paid-tier audio transcription — see `Voci/Sources/Speech/GroqTranscriptionClient.swift` and its
+paid-tier audio transcription — see `Volar/Sources/Speech/GroqTranscriptionClient.swift` and its
 `GroqCredentialProvider` abstraction, which already expects a proxy base URL + short-lived token
 in production) is a **separate, not-yet-scheduled backlog item**.
 

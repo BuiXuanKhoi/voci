@@ -1,10 +1,10 @@
-# Phase 1 Data Model: Voci v2 — Workflow Command Center
+# Phase 1 Data Model: Volar v2 — Workflow Command Center
 
 Two layers, one direction of flow: the **persisted layer** (SwiftData, app target) maps into
-the **engine layer** (pure value types, `VociCore`) at call time. The engine never sees
+the **engine layer** (pure value types, `VolarCore`) at call time. The engine never sees
 persistence; the app never re-implements eligibility.
 
-## Engine layer (`VociCore` — pure, Sendable, Equatable)
+## Engine layer (`VolarCore` — pure, Sendable, Equatable)
 
 ### `Task` (value type — replaces the 001 shape)
 
@@ -50,7 +50,7 @@ edges only) with the same human-readable `DependencyError` as 001.
 
 ## Persisted layer (SwiftData, app target)
 
-### `VociTask` (@Model — extends existing `TaskItem` shape)
+### `VolarTask` (@Model — extends existing `TaskItem` shape)
 
 Engine fields above, plus:
 
@@ -121,7 +121,7 @@ auto-committed (constitution II). Decode failure anywhere → title-only + trans
 
 ## Validation rules (enforced at persistence boundary)
 
-1. `.taskDone` insertion → cycle/self check via `VociCore.validateCondition` (reject with
+1. `.taskDone` insertion → cycle/self check via `VolarCore.validateCondition` (reject with
    human-readable message).
 2. `recurrence != nil` ⇒ task has no children.
 3. `parentId` must reference an existing task; parent cannot be its own descendant (cycle
@@ -134,7 +134,7 @@ auto-committed (constitution II). Decode failure anywhere → title-only + trans
 
 ## Addendum 2026-07-16 — spoken reminders + capture-time conflict check
 
-**Engine (VociCore) — conflict check (pure, FR-011c)**
+**Engine (VolarCore) — conflict check (pure, FR-011c)**
 
 ```swift
 public enum TaskConflict: Sendable, Equatable {
@@ -160,7 +160,7 @@ auto-modifies (constitution II/V). Calendar integration is P3 — until then `bu
 (capacity still works from task estimates alone).
 
 **Persisted layer additions**
-- `VociTask.isSensitive: Bool` (default `false`) — sensitive tasks are spoken only as a generic
+- `VolarTask.isSensitive: Bool` (default `false`) — sensitive tasks are spoken only as a generic
   phrase (FR-014b), detail visual-only.
 - Settings: `VoiceDeliveryMode` (`visualOnly` / `visualPlusVoice` (default) / `voiceOnly`) —
   global, in `UserDefaults`.

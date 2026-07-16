@@ -6,20 +6,20 @@ A validation guide to prove the engine works end-to-end. Implementation code liv
 ## Prerequisites
 
 - macOS with the Xcode 26 / Swift 6 toolchain (`swift --version` → 6.x).
-- The `VociCore` Swift package present at repo root (see `plan.md` → Project Structure).
+- The `VolarCore` Swift package present at repo root (see `plan.md` → Project Structure).
 
 ## Build & test
 
 From the package directory:
 
 ```bash
-cd VociCore
+cd VolarCore
 swift build
-swift test                     # runs the full VociCore suite
+swift test                     # runs the full VolarCore suite
 swift test --filter NextTask   # just the selection cases, while iterating
 ```
 
-Or from Xcode: open the workspace, select the `VociCore` scheme, `⌘U`.
+Or from Xcode: open the workspace, select the `VolarCore` scheme, `⌘U`.
 
 ## Success criteria (release gate)
 
@@ -45,7 +45,7 @@ test — the selected task MUST be identical.
 ## Manual smoke (optional, in a scratch executable or REPL)
 
 ```swift
-import VociCore
+import VolarCore
 import Foundation
 
 let now = Date(timeIntervalSince1970: 1_752_300_000)  // fixed reference time for reproducibility

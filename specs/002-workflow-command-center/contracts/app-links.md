@@ -1,10 +1,10 @@
-# Contract: `voci://` App Links (inbound signals)
+# Contract: `volar://` App Links (inbound signals)
 
 Registered via `CFBundleURLTypes`. Sandbox-compatible; no listening ports. All endpoints are
 **inbound, one-way, idempotent, and non-destructive**: a signal may surface work for review
 but can never complete, delete, or create tasks.
 
-## `voci://ai-done`
+## `volar://ai-done`
 
 Fired by external agent tooling when an agent run finishes.
 
@@ -22,7 +22,7 @@ log locally, ignore silently.
 presentation); `DelegationMeta` cleared; menu-bar WIP counter decrements. Duplicate signals
 for an already-reviewed task are no-ops.
 
-## `voci://capture`
+## `volar://capture`
 
 | Param | Required | Meaning |
 |---|---|---|
@@ -34,13 +34,13 @@ Used by the Services/share-extension path (FR-040). Never bypasses the confirm c
 ## Claude Code hook (installed by "Connect Claude Code")
 
 Entry appended to `~/.claude/settings.json` → `hooks.Stop` (additive merge; marker = command
-contains `voci://`):
+contains `volar://`):
 
 ```json
-{ "type": "command", "command": "open \"voci://ai-done?cwd=$PWD\"" }
+{ "type": "command", "command": "open \"volar://ai-done?cwd=$PWD\"" }
 ```
 
-Install contract: preview exact JSON → backup `settings.json.voci-backup-<timestamp>` →
+Install contract: preview exact JSON → backup `settings.json.volar-backup-<timestamp>` →
 parse-validate → merge (never replaces existing hooks) → write → test-signal round-trip
 confirmation. Uninstall removes only marker-matching entries. File access via user-granted
 security-scoped bookmark to `~/.claude` (NSOpenPanel pre-targeted, one grant, persisted).

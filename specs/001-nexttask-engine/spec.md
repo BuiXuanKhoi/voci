@@ -6,7 +6,7 @@
 
 **Status**: Draft
 
-**Input**: User description: "nextTask() engine — deterministic task selector (pure function) powering the single-task menu bar for the Voci macOS app. Source: docs/voci-voice-task-engine-spec.md §3, §6, §6.1, §6.2."
+**Input**: User description: "nextTask() engine — deterministic task selector (pure function) powering the single-task menu bar for the Volar macOS app. Source: docs/volar-voice-task-engine-spec.md §3, §6, §6.1, §6.2."
 
 ## Clarifications
 

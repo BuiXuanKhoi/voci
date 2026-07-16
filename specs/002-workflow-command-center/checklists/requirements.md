@@ -1,4 +1,4 @@
-# Specification Quality Checklist: Voci v2 — Voice-first Workflow Command Center
+# Specification Quality Checklist: Volar v2 — Voice-first Workflow Command Center
 
 **Purpose**: Validate specification completeness and quality before proceeding to planning
 **Created**: 2026-07-15
