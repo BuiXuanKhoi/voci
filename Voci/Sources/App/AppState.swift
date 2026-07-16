@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Network
 import Observation
+import UserNotifications
 import VociCore
 
 /// Ambient visual mode — mirrors the prototype's `ambient` prop
@@ -37,6 +38,24 @@ enum SpeechEngineChoice: String, Sendable, Equatable, CaseIterable, Identifiable
         case .appleOnDevice: return "Apple (on-device)"
         case .whisperKit: return "WhisperKit (on-device)"
         case .groq: return "Groq (cloud)"
+        }
+    }
+}
+
+/// How reminders are delivered (Phase 4 contract B): the visual `UNUserNotificationCenter`
+/// notification always fires; this only gates the ADDITIONAL spoken channel
+/// (`VoiceReminderChannel`, sibling-owned). Persisted under `AppState.voiceDeliveryModeKey` — the
+/// exact seam `ReminderScheduler`/`VoiceReminderChannel` are expected to read directly from
+/// `UserDefaults`, since the frozen `ReminderScheduler.init(store:voice:gate:)` takes no policy
+/// parameter (read out-of-band rather than injected).
+enum VoiceDeliveryMode: String, Sendable, Equatable, Hashable, CaseIterable, Identifiable {
+    case visualOnly, visualPlusVoice, voiceOnly
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .visualOnly: return "Visual only"
+        case .visualPlusVoice: return "Visual + voice"
+        case .voiceOnly: return "Voice only"
         }
     }
 }
@@ -80,6 +99,17 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// choice. Never populated by a guess below that bar (constitution II) — an unresolved
     /// `.taskDone` is simply absent here and gets dropped at save, not committed.
     var resolvedTaskDone: [Int: UUID] = [:]
+    /// T074 (conflict advisory, `contracts/phase4-contract.md` §C/§E): computed ONCE, right when
+    /// this draft is created from a fresh parse (`AppState.runParse`) — never recomputed per chip
+    /// edit (self-review "performance"). Empty = clean capture; `PopoverView` renders AT MOST the
+    /// first entry as a single calm line. Never re-derived at Save time either: the advisory is
+    /// informational only and never blocks/gates `confirmSave()` (constitution II — never
+    /// auto-act on it).
+    var conflicts: [VociCore.TaskConflict] = []
+    /// User tapped the advisory row to dismiss it (glance-and-dismiss, same one-way convention as
+    /// every other chip on this card — see `PopoverView.conflictAdvisoryRow`). Never re-surfaces
+    /// within this confirm session; recording again starts fresh, same as every other draft field.
+    var conflictDismissed: Bool = false
 }
 
 @Observable
@@ -130,6 +160,19 @@ final class AppState {
     /// The transcript awaiting a decision in `pendingCloudConsent`, resumed by `resolveCloudConsent`.
     private var pendingParseTranscript: String?
 
+    // MARK: - Phase 4: reminder / voice-delivery / triage settings (contract E)
+
+    /// Persisted (`voiceDeliveryModeKey`); default `.visualPlusVoice` per contract B.
+    private(set) var voiceDeliveryMode: VoiceDeliveryMode
+    /// Persisted (`globalReminderPolicyKey`); default `ReminderPolicy.defaultPolicy`.
+    private(set) var globalReminderPolicy: ReminderPolicy
+    /// FR-018 weekly triage: task id -> instant last explicitly "kept" via `triageKeep(_:)`, so
+    /// `staleTasks` doesn't immediately re-offer something the user just decided to keep. Falls
+    /// back to `createdAt` for any task never explicitly kept (best available staleness proxy —
+    /// see `staleTasks`'s doc comment for the full seam note). Lightly persisted so a relaunch
+    /// mid-week doesn't lose "just kept" state.
+    private var triageKeptAt: [UUID: Date]
+
     // Focus session
     var focusActive: Bool
     var focusPaused: Bool
@@ -147,6 +190,11 @@ final class AppState {
 
     var showMorningFrog = false
     var showBreakdown = false
+    /// T034/FR-018: the weekly stale-task triage batch card (`TriageView`, sibling-owned §D).
+    /// `VociApp`'s main-window `.task` gates setting this `true` to once per ISO week (mirrors
+    /// `frogLastShown`'s once-per-day pattern) and only when `staleTasks` is non-empty — this flag
+    /// itself carries no additional gating so previews/tests can drive it directly.
+    var showTriage = false
     var reminderBanner: ReminderBanner? = nil
     /// The task currently shown in the detail sheet, by id — `nil` means the sheet is closed.
     /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
@@ -190,6 +238,21 @@ final class AppState {
     /// routed to instead of hardcoding `speech`.
     private var runningEngine: SpeechEngine?
 
+    // MARK: - Phase 4: reminder subsystem (contract A/B, sibling-owned types) — constructed once
+    // here at init so the whole app shares one instance. `store` may be `nil` (container-init
+    // failure degrades gracefully — see `VociApp.init`'s doc comment), so `scheduler` is optional
+    // too rather than requiring a non-optional `TaskStore` the app doesn't always have.
+    // `voiceChannel`/`reminderGate` are unconditional (they don't need a store) so Settings/other
+    // call sites can always reach them even in the no-store fallback.
+    let voiceChannel: VoiceReminderChannel
+    let reminderGate: ReminderContextGate
+    let scheduler: ReminderScheduler?
+    /// `NotificationActions.swift`'s own doc comment names this exact seam: construct one instance
+    /// after the scheduler and assign it as `UNUserNotificationCenter.current().delegate` — kept
+    /// as a strong reference here for the app's lifetime (the `delegate` property itself is
+    /// `weak`, so nothing else may retain it). Wired in `activateServices()` below.
+    let notificationDelegate: ReminderNotificationDelegate?
+
     // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
 
     private static let ambientKey = "voci.ambient"
@@ -200,6 +263,17 @@ final class AppState {
     /// One-time cloud-parse consent. `fileprivate` (not `private`) so `DefaultCloudParseGate`
     /// (bottom of this file) can read the same key from `isOptedIn()`.
     fileprivate static let cloudParseConsentKey = "voci.cloudParseConsent"
+    /// Phase 4 (T033): `static`/internal, NOT `private` — this is the exact key
+    /// `ReminderScheduler`/`VoiceReminderChannel` (contract A/B, `Sources/Reminders/**`,
+    /// sibling-owned) are expected to read directly, since their frozen inits take no policy
+    /// parameter. Raw values match `VoiceDeliveryMode`'s cases exactly.
+    static let voiceDeliveryModeKey = "voci.voiceDeliveryMode"
+    /// Same seam as above, for the global default `ReminderPolicy` (used when a task has no
+    /// `reminderOverride`) — JSON-encoded `ReminderPolicy` (`Recurrence.swift`).
+    static let globalReminderPolicyKey = "voci.globalReminderPolicy"
+    /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
+    /// file; no sibling reads this one.
+    private static let triageKeptAtKey = "voci.triageKeptAt"
 
     init(
         store: TaskStore? = nil,
@@ -232,6 +306,23 @@ final class AppState {
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
         self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .appleOnDevice
         self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
+        self.voiceDeliveryMode = VoiceDeliveryMode(
+            rawValue: UserDefaults.standard.string(forKey: Self.voiceDeliveryModeKey) ?? ""
+        ) ?? .visualPlusVoice
+        if let policyData = UserDefaults.standard.data(forKey: Self.globalReminderPolicyKey),
+           let decodedPolicy = try? JSONDecoder().decode(ReminderPolicy.self, from: policyData) {
+            self.globalReminderPolicy = decodedPolicy
+        } else {
+            self.globalReminderPolicy = .defaultPolicy
+        }
+        if let raw = UserDefaults.standard.dictionary(forKey: Self.triageKeptAtKey) as? [String: Double] {
+            self.triageKeptAt = raw.reduce(into: [:]) { partial, pair in
+                guard let id = UUID(uuidString: pair.key) else { return }
+                partial[id] = Date(timeIntervalSince1970: pair.value)
+            }
+        } else {
+            self.triageKeptAt = [:]
+        }
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -242,6 +333,21 @@ final class AppState {
         self.focusIndex = 0
         self.router = router
         self.clock = clock
+        // Phase 4 (T033): construct the reminder subsystem once `self.store` (assigned at the
+        // very top of this init) is settled. `self.voice` is safe to read here even though it
+        // isn't assigned inside this init body — like every other stored property with a default
+        // expression (`let voice = VoicePlayback()`), it's already initialized as part of this
+        // instance's construction before any of this init's own statements run.
+        self.voiceChannel = VoiceReminderChannel(playback: self.voice)
+        self.reminderGate = ReminderContextGate()
+        if let store {
+            let realScheduler = ReminderScheduler(store: store, voice: self.voiceChannel, gate: self.reminderGate)
+            self.scheduler = realScheduler
+            self.notificationDelegate = ReminderNotificationDelegate(scheduler: realScheduler)
+        } else {
+            self.scheduler = nil
+            self.notificationDelegate = nil
+        }
         speech.setLocale(Locale(identifier: self.recognitionLocaleID))
     }
 
@@ -268,8 +374,10 @@ final class AppState {
     // MARK: - Task CRUD
 
     func addTask(_ t: TaskItem) {
+        let before = tasks
         tasks.insert(t, at: 0)
         store?.add(t)
+        notifyEligibilityAndScheduleResurface(before: before, now: clock())
     }
 
     /// Mirrors `voci-mac.jsx`'s `toggleTask`: marking a task done always bumps it to `.later`
@@ -291,8 +399,11 @@ final class AppState {
             }
             return
         }
-        store.toggle(id)
+        let before = tasks
+        let now = clock()
+        store.toggle(id, now: now)
         tasks = store.fetchAll()
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
     }
 
     /// Store-backed path: `TaskStore.delete` strips the id from every other task's `.taskDone`
@@ -304,8 +415,17 @@ final class AppState {
             tasks.removeAll { $0.id == id }
             return
         }
-        store.delete(id)
+        let now = clock()
+        // `TaskStore.delete` already computes its own before/after `eligibilityDiff` internally
+        // (stripping this id from every other task's `.taskDone` conditions first) — reuse that
+        // result directly instead of recomputing the same diff a second time here (self-review
+        // "performance": exactly one `eligibilityDiff` per mutation).
+        let newlyEligible = store.delete(id, now: now)
         tasks = store.fetchAll()
+        if !newlyEligible.isEmpty {
+            scheduler?.notifyUnblocked(taskIds: newlyEligible)
+        }
+        scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: now)
     }
 
     // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
@@ -540,7 +660,16 @@ final class AppState {
             // router already enforces the 10-task cap; this survives a malformed/hostile result
             // regardless.
             let capped = Array(results.prefix(TaskStore.maxBatchSize))
-            self.confirmDrafts = capped.map { self.preResolveConditions(ConfirmDraft(task: $0)) }
+            // T074: conflict advisory computed ONCE per parse, right here — never per keystroke/
+            // per chip-edit (self-review "performance"). `conflictNow` is a single fresh clock
+            // read shared by every draft in the batch so a multi-task confirm scores consistently
+            // against the same "now" instant.
+            let conflictNow = self.clock()
+            self.confirmDrafts = capped.map { parsed in
+                var draft = self.preResolveConditions(ConfirmDraft(task: parsed))
+                draft.conflicts = self.computeConflicts(for: draft, now: conflictNow)
+                return draft
+            }
             if self.confirmDrafts.isEmpty {
                 self.captureErrorDetail = "Didn't catch that."
                 self.captureState = .error
@@ -674,6 +803,14 @@ final class AppState {
         confirmDrafts.removeAll { $0.id == draftID }
     }
 
+    /// T074: dismisses the (at most one) conflict advisory line for one draft — never re-derives
+    /// or re-runs `conflicts(...)`; just stops rendering it, exactly like every other chip's
+    /// dismiss (constitution II — this is the user acting, not the system auto-modifying).
+    func dismissConflictAdvisory(forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].conflictDismissed = true
+    }
+
     /// Constitution V / FR-044: every chip edit is logged locally (never egressed) as the signal
     /// for improving parsing over time. Goes through `TaskStore.recordCorrection` (added
     /// alongside this task, since `ParseCorrectionLog.record` — the real T026 API,
@@ -712,6 +849,10 @@ final class AppState {
         guard !confirmDrafts.isEmpty else { return }
         captureState = .saving
         let now = clock()
+        // T031: snapshot taken BEFORE this batch materializes, so the eligibility diff below sees
+        // exactly what this save changed (and nothing from a concurrent mutation elsewhere, since
+        // this whole method runs synchronously on @MainActor).
+        let before = tasks
 
         var itemsToSave: [TaskItem] = []
         for draft in confirmDrafts {
@@ -729,6 +870,7 @@ final class AppState {
             // No-store fallback (previews/tests without a TaskStore) — mirrors `addTask`'s own
             // no-store branch: in-memory only, no validation (there is no store to validate against).
             tasks.insert(contentsOf: itemsToSave.reversed(), at: 0)
+            notifyEligibilityAndScheduleResurface(before: before, now: now)
             finishSaveUI(titles: itemsToSave.map(\.title))
             return
         }
@@ -754,6 +896,7 @@ final class AppState {
             }
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
             tasks = store.fetchAll()
+            notifyEligibilityAndScheduleResurface(before: before, now: now)
             finishSaveUI(titles: itemsToSave.map(\.title))
         } catch {
             // Cycle rejection / batch-too-large / any other `TaskStoreError` surfaces its
@@ -763,6 +906,7 @@ final class AppState {
             // from the store here too, so the UI never shows stale/duplicate state for the part
             // that did save — the user only re-confirms what's genuinely still outstanding.
             tasks = store.fetchAll()
+            notifyEligibilityAndScheduleResurface(before: before, now: now)
             captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             captureState = .error
         }
@@ -1027,6 +1171,192 @@ final class AppState {
         reminderBanner = nil
     }
 
+    // MARK: - Phase 4: eligibility auto-unblock + afterDate resurface (T031/T032, FR-015/FR-017)
+
+    /// One monotonic guard for the local resurface-refresh continuation in `scheduleNextResurface`
+    /// below — mirrors `captureSession`'s pattern: every mutation recomputes the next resurface
+    /// date, so a still-pending sleep from an earlier (now-superseded) computation must not fire.
+    private var resurfaceSession = 0
+
+    /// Shared tail for every real task mutation (T031): diffs eligibility across the snapshot
+    /// just before/after the mutation and notifies the scheduler once per newly-unblocked task
+    /// (FR-015), then recomputes the next `.afterDate` resurface (FR-017/T032). Centralizing this
+    /// here — rather than repeating the diff+notify+reschedule sequence at every call site — keeps
+    /// every mutation path honest as more get added. `deleteTask` is the one exception: it reuses
+    /// `TaskStore.delete`'s own already-computed diff instead of calling this (self-review
+    /// "performance": exactly one `eligibilityDiff` per mutation, never two).
+    ///
+    /// NOTE (self-review "conflict"): the task brief describes this as
+    /// `VociCore.eligibilityDiff(before:after:now:calendar:)`; the actual landed signature in
+    /// `VociCore/Sources/VociCore/Snapshots.swift` is `eligibilityDiff(before:after:now:)` — no
+    /// `calendar` parameter. This wiring follows the real, already-compiled signature.
+    private func notifyEligibilityAndScheduleResurface(before: [TaskItem], now: Date) {
+        let beforeSnapshot = before.map { $0.snapshot() }
+        let afterSnapshot = tasks.map { $0.snapshot() }
+        let newlyEligible = VociCore.eligibilityDiff(before: beforeSnapshot, after: afterSnapshot, now: now)
+        if !newlyEligible.isEmpty {
+            scheduler?.notifyUnblocked(taskIds: newlyEligible)
+        }
+        scheduleNextResurface(from: afterSnapshot, now: now)
+    }
+
+    /// T032/FR-017: finds the earliest strictly-future `.afterDate` across the CURRENT snapshot
+    /// (pure `VociCore.nextResurfaceDate`), tells the durable scheduler about it (contract A), and
+    /// ALSO arms a local one-shot continuation so the menu bar (`activeTask`, derived from `tasks`)
+    /// updates the instant it passes even while the app stays running and nothing else happens to
+    /// touch `tasks` in the meantime. This is NOT polling — a single scheduled continuation per
+    /// mutation, invalidated by `resurfaceSession` the moment a later mutation supersedes it, not
+    /// a repeating timer/re-check loop.
+    private func scheduleNextResurface(from snapshot: [VociCore.Task], now: Date) {
+        resurfaceSession += 1
+        let session = resurfaceSession
+        guard let date = VociCore.nextResurfaceDate(in: snapshot, after: now) else { return }
+        // `nextResurfaceDate` only returns the winning `Date`, not which task owns it — recover
+        // the owner by re-scanning for the first task carrying that exact date (deterministic:
+        // same snapshot, same earliest-date rule `nextResurfaceDate` itself applies).
+        guard let taskId = snapshot.first(where: { task in
+            task.conditions.contains { condition in
+                if case .afterDate(let d) = condition { return d == date }
+                return false
+            }
+        })?.id else { return }
+        scheduler?.scheduleResurface(at: date, taskId: taskId)
+
+        // Defensive cap (self-review "client-exploit"): a corrupted/hostile store could carry an
+        // absurd far-future `.afterDate`; clamp the LOCAL convenience wake so `UInt64(seconds *
+        // 1e9)` can never come close to overflowing. The durable scheduler above already has the
+        // real, un-clamped date — this only bounds the optional live-refresh nicety.
+        let delaySeconds = min(max(date.timeIntervalSince(now), 0), 60 * 60 * 24 * 365 * 5)
+        _Concurrency.Task { @MainActor [weak self] in
+            try? await _Concurrency.Task.sleep(nanoseconds: UInt64(delaySeconds * 1_000_000_000))
+            guard let self, self.resurfaceSession == session else { return }
+            if let store = self.store {
+                self.tasks = store.fetchAll()
+            } else {
+                // No store to refresh from (previews/tests) — still nudge Observation so any
+                // observer recomputing `activeTask` at this instant actually re-renders.
+                self.tasks = self.tasks
+            }
+        }
+    }
+
+    // MARK: - Phase 4: capture-time conflict advisory (T074, FR-011c)
+
+    /// Builds the throwaway `VociCore.Task` `conflicts(forAdding:...)` needs, from exactly the
+    /// same resolved/dismissed/accepted state `materialize`/`resolvedConditions` would use, so the
+    /// advisory reflects what would ACTUALLY be saved — not the raw unconfirmed parse. Never
+    /// persisted; reuses `draft.id` (a `Swift.UUID`, collision-safe) as the candidate's id purely
+    /// as a stable placeholder. `busyIntervals: []` until the P3 calendar integration lands
+    /// (contract C); `frogId` comes from today's frog if one is set, else `nil`.
+    private func computeConflicts(for draft: ConfirmDraft, now: Date) -> [VociCore.TaskConflict] {
+        let deadline = resolvedValue(draft.task.deadline, kind: .deadline, draft: draft)
+        let estimate = resolvedValue(draft.task.estimateMinutes, kind: .estimate, draft: draft)
+        let priorityInt = resolvedValue(draft.task.priority, kind: .priority, draft: draft)
+        let candidate = VociCore.Task(
+            id: draft.id,
+            title: draft.task.title,
+            status: .todo,
+            priority: priorityInt,
+            deadline: deadline,
+            conditions: resolvedConditions(draft),
+            estimateMinutes: estimate,
+            parentId: nil,
+            createdAt: now
+        )
+        return VociCore.conflicts(
+            forAdding: candidate,
+            into: tasks.map { $0.snapshot() },
+            now: now,
+            calendar: .current,
+            busyIntervals: [],
+            frogId: frogTask?.id
+        )
+    }
+
+    // MARK: - Phase 4: weekly stale-task triage (T034, FR-018)
+
+    private static let staleThreshold: TimeInterval = 7 * 24 * 60 * 60
+    private static let triageDeferInterval: TimeInterval = 3 * 24 * 60 * 60
+
+    /// Open tasks eligible for the weekly triage batch (`TriageView`, sibling-owned §D): untouched
+    /// for at least `staleThreshold`.
+    ///
+    /// NOTE (self-review "conflict"/seam, flagged in this task's final report): there is no
+    /// `lastTouchedAt`/staleness field on `TaskItem`/`VociTask` today — `TaskItem.swift` isn't one
+    /// of this task's 5 owned files, so adding one is out of scope here. `createdAt` is used as
+    /// the best available proxy for "untouched," and `triageKeep(_:)` below tracks an explicit
+    /// "kept" instant in `triageKeptAt` (this file only) so a kept task doesn't immediately
+    /// re-qualify. A real per-task `lastTouchedAt` (bumped on any edit) would be materially more
+    /// accurate and is a good follow-up.
+    var staleTasks: [TaskItem] {
+        let cutoff = clock().addingTimeInterval(-Self.staleThreshold)
+        return openTasks.filter { (triageKeptAt[$0.id] ?? $0.createdAt) <= cutoff }
+    }
+
+    /// Triage "Keep": no destructive/creative side effect on the task itself — just resets this
+    /// task's staleness clock so it doesn't reappear in next week's batch.
+    func triageKeep(_ item: TaskItem) {
+        triageKeptAt[item.id] = clock()
+        persistTriageKeptAt()
+    }
+
+    /// Triage "Break down": opens the existing breakdown sheet.
+    ///
+    /// NOTE (self-review "conflict"/seam, flagged in final report): the current `TaskBreakdownView`
+    /// sheet (mounted in `VociApp.swift`, pre-existing Phase-3 wiring, `backlog.md` ~line 50) has
+    /// no per-task target yet — it always shows its fixed sample content regardless of which task
+    /// triggered it, exactly like the existing context-menu "Break down into steps…" entry point.
+    /// This reuses that same limitation rather than fixing it (fixing it touches
+    /// `TaskBreakdownView.swift`, not one of this task's 5 owned files).
+    func triageBreakdown(_ item: TaskItem) {
+        showBreakdown = true
+    }
+
+    /// Triage "Defer": adds a `.afterDate` condition `triageDeferInterval` out, matching FR-017's
+    /// resurface mechanism exactly — a deferred task automatically resurfaces (no polling) once
+    /// that date passes, same as any other `.afterDate` task.
+    func triageDefer(_ item: TaskItem) {
+        let now = clock()
+        guard let store else {
+            if let index = tasks.firstIndex(where: { $0.id == item.id }) {
+                tasks[index].conditions.append(.afterDate(now.addingTimeInterval(Self.triageDeferInterval)))
+            }
+            return
+        }
+        let before = tasks
+        try? store.addCondition(.afterDate(now.addingTimeInterval(Self.triageDeferInterval)), to: item.id)
+        tasks = store.fetchAll()
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+    }
+
+    /// Triage "Drop": a plain delete — same path (and same FR-015 re-eligibility notification) as
+    /// any other task deletion.
+    func triageDrop(_ item: TaskItem) {
+        deleteTask(item.id)
+    }
+
+    private func persistTriageKeptAt() {
+        let raw = Dictionary(uniqueKeysWithValues: triageKeptAt.map { ($0.key.uuidString, $0.value.timeIntervalSince1970) })
+        UserDefaults.standard.set(raw, forKey: Self.triageKeptAtKey)
+    }
+
+    // MARK: - Phase 4: settings (T033 VoiceDeliveryMode + global ReminderPolicy)
+
+    /// Persists the delivery-mode choice at the exact key `voiceDeliveryModeKey` documents
+    /// `ReminderScheduler`/`VoiceReminderChannel` are expected to read.
+    func setVoiceDeliveryMode(_ mode: VoiceDeliveryMode) {
+        voiceDeliveryMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: Self.voiceDeliveryModeKey)
+    }
+
+    /// Persists the global default `ReminderPolicy` at `globalReminderPolicyKey`.
+    func setGlobalReminderPolicy(_ policy: ReminderPolicy) {
+        globalReminderPolicy = policy
+        if let data = try? JSONEncoder().encode(policy) {
+            UserDefaults.standard.set(data, forKey: Self.globalReminderPolicyKey)
+        }
+    }
+
     // MARK: - Service activation (Phase 3: call once from the main window's `.task`)
 
     /// Starts the global ⌃⌥M toggle-capture hotkey. `HotkeyManager.start` already calls
@@ -1037,6 +1367,18 @@ final class AppState {
     /// fallback path (unlike the pre-Carbon `NSEvent` monitor it replaced).
     func activateServices() {
         hotkey.start(appState: self)
+        // T033 (constitution IV): rebuild the reminder heap from durable storage on every
+        // launch — no reminder may exist only in memory. Sleep/wake recovery is ALSO wired here
+        // (redundantly-but-safely) in `VociApp.swift` via `NSWorkspace.shared.notificationCenter`
+        // — see that file's `.onReceive` for why: `ReminderScheduler.init` already registers its
+        // own wake observer, but on `NotificationCenter.default` rather than
+        // `NSWorkspace.shared.notificationCenter`, which is where `NSWorkspace.didWakeNotification`
+        // actually posts (self-review "conflict", flagged in this task's final report — not this
+        // file's bug to fix, since `ReminderScheduler.swift` is sibling-owned).
+        scheduler?.rebuildFromStorage()
+        // NotificationActions.swift's documented seam: assign the action-routing delegate once a
+        // real scheduler/store exists (nil in the no-store fallback, matching `scheduler` itself).
+        UNUserNotificationCenter.current().delegate = notificationDelegate
     }
 }
 

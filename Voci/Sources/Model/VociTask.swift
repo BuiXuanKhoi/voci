@@ -95,6 +95,22 @@ final class VociTask {
     var switchAwayCount: Int = 0
     var completedAt: Date?
     var parentId: UUID?
+    /// Phase 4 (T072-support, `contracts/phase4-contract.md` §E + §B): when `true`, the spoken
+    /// reminder channel (`VoiceReminderChannel.speakReminder`, sibling-owned §B) MUST speak a
+    /// generic phrase ("You have a reminder") instead of this task's title — never announce a
+    /// sensitive task's content out loud. Migration-safe default `false` (lightweight SwiftData
+    /// migration of existing rows, same convention as `kindRaw`/`switchAwayCount` above).
+    ///
+    /// SEAM NOTE (self-review "conflict", flagged in this task's final report): this field exists
+    /// ONLY here on the persisted model, deliberately NOT threaded through `TaskItem`/`TaskStore`/
+    /// any task-editing UI — none of those files are among this task's 5 owned files
+    /// (`TaskItem.swift` in particular is out of scope), and the contract explicitly calls the UI
+    /// toggle "optional/nice-to-have." Every task currently defaults to `false` (never sensitive)
+    /// until a future change wires a real read/write path from the UI down to this attribute. The
+    /// Reminders agent's fire-time fresh reload (constitution IV already requires re-reading the
+    /// task from storage at fire time) is expected to read this attribute directly off `VociTask`
+    /// rather than via `TaskItem`, which doesn't carry it.
+    var isSensitive: Bool = false
     // Literal (not `Self.emptyJSONArray`) so the `@Model` macro sees a plain, unambiguous default
     // expression for schema/lightweight-migration inference rather than a cross-property
     // reference. // UNVERIFIED: confirm this attribute default is honored for existing rows on

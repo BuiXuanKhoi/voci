@@ -1,5 +1,8 @@
 // Sources/Views/PopoverView.swift — 5-state quick-capture popover (spec §4/§5, voci-popover.jsx)
 import SwiftUI
+// T074: `TaskConflict` (contract C, `VociCore/Sources/VociCore/ConflictCheck.swift`, sibling-owned
+// — not yet landed) is the only VociCore symbol this file needs directly.
+import VociCore
 
 /// Ported from `design/voci-popover.jsx`'s `VociPopover`, driven entirely by
 /// `appState.captureState` (`.idle/.recording/.parsing/.parsed/.saving/.done/.error`) instead of
@@ -253,6 +256,51 @@ struct PopoverView: View {
             }
             attributeChips(draft)
             conditionRows(draft)
+            conflictAdvisoryRow(draft)
+        }
+    }
+
+    /// T074: AT MOST ONE calm advisory line — never a dialog, never a red/shame color (FR-036),
+    /// never blocking (`Enter` still saves regardless — this row has no bearing on `actionsRow`'s
+    /// Save button at all). Tapping it only dismisses the row itself; it never auto-modifies the
+    /// draft (constitution II) — a fuller "bump the deadline" quick-action is a reasonable future
+    /// enhancement but is NOT implemented here (self-review note, flagged in the final report as a
+    /// deliberate scope decision, not an oversight).
+    @ViewBuilder
+    private func conflictAdvisoryRow(_ draft: ConfirmDraft) -> some View {
+        if let conflict = draft.conflicts.first, !draft.conflictDismissed {
+            HStack(alignment: .top, spacing: 6) {
+                Text("\u{26A0}\u{FE0F}")
+                    .font(.system(size: 11))
+                Text(conflictAdvisoryText(conflict))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VociColor.textSec)
+                    .lineLimit(2)
+                Spacer(minLength: 4)
+            }
+            .padding(.top, 2)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                appState.dismissConflictAdvisory(forDraft: draft.id)
+            }
+        }
+    }
+
+    /// One short, calm sentence per `TaskConflict` case (contract C) — no exclamation-mark alarm
+    /// copy, matching the example in the task brief ("3 tasks already due tomorrow — add anyway?").
+    private func conflictAdvisoryText(_ conflict: TaskConflict) -> String {
+        switch conflict {
+        case .deadlineCapacity(let existingCount, _, let windowEnd):
+            let day = windowEnd.formatted(.dateTime.weekday(.wide))
+            return "\(existingCount) task\(existingCount == 1 ? "" : "s") already due \(day) — add anyway?"
+        case .deadlineCollision(_, let title):
+            return "Clashes with \u{201C}\(title)\u{201D} — add anyway?"
+        case .dependsOnBlocked(_, let title):
+            return "Waiting on \u{201C}\(title)\u{201D}, which is overdue"
+        case .competesWithFrog(_, let title):
+            return "Competes with today's frog, \u{201C}\(title)\u{201D}"
+        case .possibleDuplicate(_, let title, _):
+            return "Looks similar to \u{201C}\(title)\u{201D} — add anyway?"
         }
     }
 

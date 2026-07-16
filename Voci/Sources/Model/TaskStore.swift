@@ -249,6 +249,16 @@ final class TaskStore {
         return all.first { $0.id == winner.id }
     }
 
+    /// Reminders subsystem seam (specs/002-workflow-command-center/contracts/phase4-contract.md
+    /// §B): `VociTask.isSensitive` is deliberately not threaded through `TaskItem` (see that
+    /// field's doc comment in `VociTask.swift`) — `ReminderScheduler`'s fire-time fresh reload
+    /// needs to read it directly off the persisted model instead. Defaults to `false` (never
+    /// sensitive) for an unknown/deleted id, matching every other "task not found" fallback in
+    /// this file.
+    func isSensitive(_ id: UUID) -> Bool {
+        fetchModel(id)?.isSensitive ?? false
+    }
+
     // MARK: - Completion internals
 
     /// Walks from `model` up through `parentId` links, completing (with recurrence reset where

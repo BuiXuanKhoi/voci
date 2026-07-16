@@ -1,6 +1,7 @@
 // Sources/App/VociApp.swift — @main entry point: scenes, environment injection, delegate hookup
 import SwiftUI
 import AppKit
+import Combine
 import UserNotifications
 
 @main
@@ -10,6 +11,9 @@ struct VociApp: App {
     @AppStorage("hasOnboardedV1") private var hasOnboarded = false
     /// Day key ("yyyy-MM-dd") the morning-frog sheet was last shown on — gates it to once/day.
     @AppStorage("morningFrogLastShown") private var frogLastShown = ""
+    /// ISO year-week key ("2026-W29") the weekly stale-task triage batch (T034/FR-018) was last
+    /// shown on — gates it to once/week, mirroring `frogLastShown`'s once/day pattern.
+    @AppStorage("triageLastShownWeek") private var triageLastShownWeek = ""
 
     init() {
         // Degrade gracefully: if the SwiftData container fails to initialize for any reason,
@@ -52,6 +56,32 @@ struct VociApp: App {
                         appState.showMorningFrog = true
                         frogLastShown = day
                     }
+
+                    // T034/FR-018: weekly stale-task triage — once per ISO week, once onboarding
+                    // is done, and only when there's actually something stale to review (skipped
+                    // otherwise; `TriageView` itself also no-ops on an empty batch as a second
+                    // line of defense).
+                    let weekKey = {
+                        var cal = Calendar(identifier: .iso8601)
+                        cal.locale = Locale(identifier: "en_US_POSIX")
+                        let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: Date())
+                        return "\(comps.yearForWeekOfYear ?? 0)-W\(comps.weekOfYear ?? 0)"
+                    }()
+                    if hasOnboarded, triageLastShownWeek != weekKey, !appState.staleTasks.isEmpty {
+                        appState.showTriage = true
+                        triageLastShownWeek = weekKey
+                    }
+                }
+                .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
+                    // Constitution IV: sleep/wake recovery re-evaluates overdue `.scheduled`
+                    // reminders and fires immediately if still due. `ReminderScheduler.init`
+                    // (sibling-owned) ALSO registers its own wake observer, but on
+                    // `NotificationCenter.default` — `NSWorkspace.didWakeNotification` actually
+                    // posts on `NSWorkspace.shared.notificationCenter` (used here), so that
+                    // internal observer may never fire (self-review "conflict", flagged in this
+                    // task's final report). This `.onReceive` is the one guaranteed-correct path;
+                    // `rebuildFromStorage()` is documented idempotent, so redundancy here is safe.
+                    appState.scheduler?.rebuildFromStorage()
                 }
                 .sheet(isPresented: Binding(
                     get: { !hasOnboarded },
@@ -91,6 +121,20 @@ struct VociApp: App {
                     TaskDetailView()
                         .environment(appState)
                         .frame(minWidth: 480, minHeight: 520)
+                }
+                .sheet(isPresented: Binding(
+                    get: { appState.showTriage },
+                    set: { presented in if !presented { appState.showTriage = false } }
+                )) {
+                    TriageView(
+                        items: appState.staleTasks,
+                        onKeep: { appState.triageKeep($0) },
+                        onBreakdown: { appState.triageBreakdown($0) },
+                        onDefer: { appState.triageDefer($0) },
+                        onDrop: { appState.triageDrop($0) }
+                    )
+                    .environment(appState)
+                    .frame(minWidth: 560, minHeight: 480)
                 }
         }
 
@@ -146,5 +190,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // (EXC_BREAKPOINT) when UserNotifications invokes it on its background queue — the same
         // failure mode as the SpeechCapture authorization callback.
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { @Sendable _, _ in }
+
+        // T033 (contracts/phase4-contract.md §A/§E): replaces the old auth-only setup with real
+        // category registration — deadline (Done/Snooze 10m/Tomorrow), unblocked-ready, and
+        // overdue-reschedule (tonight/tomorrow/weekend) actions (tasks.md T030,
+        // `Sources/Reminders/NotificationActions.swift`, sibling-owned — its own doc comment names
+        // this exact call site: "call this once from VociApp/AppDelegate ... alongside the existing
+        // requestAuthorization call"). The matching `UNUserNotificationCenter.current().delegate =
+        // ...` assignment is NOT here — it needs a live `ReminderScheduler`/`TaskStore`, neither of
+        // which exists yet at this point in app launch (see the note below); that's wired instead
+        // in `AppState.activateServices()`, called once `AppState`/`TaskStore` exist.
+        NotificationActions.registerCategories()
     }
 }

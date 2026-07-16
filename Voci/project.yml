@@ -51,3 +51,33 @@ targets:
         product: VociCore
       - package: WhisperKit
         product: WhisperKit
+  # UNVERIFIED (feature 002, T027): added on Windows without an Xcode/xcodegen toolchain to
+  # verify against — confirm on Mac that `xcodegen generate` produces a working `VociTests`
+  # bundle target/scheme and that it actually builds & runs (`xcodebuild test`). No test target
+  # existed in this file before this task.
+  VociTests:
+    type: bundle.unit-test
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: Tests
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+    dependencies:
+      - target: Voci
+      - package: VociCore
+        product: VociCore
+schemes:
+  Voci:
+    build:
+      targets:
+        Voci: all
+        VociTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - VociTests

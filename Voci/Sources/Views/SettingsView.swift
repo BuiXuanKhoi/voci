@@ -40,7 +40,6 @@ struct SettingsView: View {
     // Cosmetic-only local settings state (not part of the frozen AppState API).
     @State private var launchAtLogin = true
     @State private var defaultDuration = 30
-    @State private var defaultReminder = 15 // minutes; 0 == "None"
     @State private var hyperfocusInterrupt = 90
     @State private var showMorningFrog = true
     @State private var captureAppContext = true
@@ -189,12 +188,6 @@ struct SettingsView: View {
                     .init(id: 15, label: "15"), .init(id: 30, label: "30"), .init(id: 60, label: "60 min"),
                 ])
             }
-            SettingsRow(label: "Default reminder before deadline", hint: "When to nudge you before a task is due.") {
-                Segmented(value: $defaultReminder, options: [
-                    .init(id: 5, label: "5"), .init(id: 15, label: "15"),
-                    .init(id: 30, label: "30 min"), .init(id: 0, label: "None"),
-                ])
-            }
             SettingsRow(label: "Hyperfocus interrupt after", hint: "Voci checks in if you've been deep on one task this long.") {
                 Segmented(value: $hyperfocusInterrupt, options: [
                     .init(id: 60, label: "60"), .init(id: 90, label: "90"), .init(id: 120, label: "120 min"),
@@ -270,6 +263,65 @@ struct SettingsView: View {
             SettingsRow(label: "Focus mode aware", hint: "Stay silent while macOS Focus is on.") {
                 VociToggle(isOn: $focusModeAware)
             }
+            // Phase 4 (T033): the two rows below are wired for real to `AppState` (unlike the
+            // toggles above, still cosmetic-only local `@State` — out of this task's scope).
+            SettingsRow(
+                label: "Default reminders before deadline",
+                hint: "Applies to any task without its own custom reminder — the global default the reminder scheduler falls back to."
+            ) {
+                Segmented(
+                    value: Binding(
+                        get: { ReminderPolicyPreset(matching: appState.globalReminderPolicy) },
+                        set: { appState.setGlobalReminderPolicy($0.policy) }
+                    ),
+                    options: ReminderPolicyPreset.allCases.map { SegmentOption(id: $0, label: $0.label) }
+                )
+            }
+            SettingsRow(
+                label: "Voice delivery",
+                hint: "Visual notifications always show. Voice is an extra, on-device-spoken nudge for urgent or unacknowledged reminders."
+            ) {
+                Segmented(
+                    value: Binding(
+                        get: { appState.voiceDeliveryMode },
+                        set: { appState.setVoiceDeliveryMode($0) }
+                    ),
+                    options: VoiceDeliveryMode.allCases.map { SegmentOption(id: $0, label: $0.label) }
+                )
+            }
+        }
+    }
+
+    /// Named presets over the full `ReminderPolicy` shape (`Recurrence.swift`) so the Settings row
+    /// above can stay a simple `Segmented` control rather than a free-form offsets editor — mirrors
+    /// this file's existing convention for other multi-value settings (`Density`, `AmbientMode`).
+    private enum ReminderPolicyPreset: String, CaseIterable, Identifiable, Hashable {
+        case dayHourAt, hourAt, atOnly, none
+
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .dayHourAt: return "1 day, 1 hour, at deadline"
+            case .hourAt: return "1 hour, at deadline"
+            case .atOnly: return "At deadline"
+            case .none: return "None"
+            }
+        }
+
+        var policy: ReminderPolicy {
+            switch self {
+            case .dayHourAt: return .defaultPolicy
+            case .hourAt: return ReminderPolicy(offsets: [-3600, 0], repeatEvery: nil)
+            case .atOnly: return ReminderPolicy(offsets: [0], repeatEvery: nil)
+            case .none: return ReminderPolicy(offsets: [], repeatEvery: nil)
+            }
+        }
+
+        /// Falls back to `.dayHourAt` for a policy that doesn't match any named preset (e.g. one
+        /// set by a future finer-grained editor) rather than crashing on an unrecognized shape.
+        init(matching policy: ReminderPolicy) {
+            self = Self.allCases.first { $0.policy == policy } ?? .dayHourAt
         }
     }
 
