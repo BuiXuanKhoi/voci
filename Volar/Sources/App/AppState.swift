@@ -112,6 +112,27 @@ struct ConfirmDraft: Identifiable, Equatable {
     var conflictDismissed: Bool = false
 }
 
+// MARK: - Phase 5 (T036): voice-done confirm state (contract A `VoiceDoneIntent`/`VoiceMatch`)
+
+/// Which voice-done intent (contract A) a `VoiceDoneConfirm` answers — mirrors
+/// `VoiceDoneIntent`'s two actionable cases (`.notACompletion` never reaches this type; it falls
+/// straight through to the ordinary capture flow in `finishRecording` instead).
+enum VoiceDoneAction: Sendable, Equatable {
+    case complete
+    case clearExternal
+}
+
+/// The pending glance-and-dismiss confirm for a `.complete`/`.clearExternal` voice-done match
+/// (constitution II: never silently complete/clear a task — always surfaced here for an explicit
+/// tap first). One candidate -> `PopoverView` renders a single one-tap/one-word confirm; several
+/// -> a bounded disambiguation list (the defensive cap is applied where this is constructed, in
+/// `presentVoiceDoneConfirm` below — self-review "client-exploit").
+struct VoiceDoneConfirm: Identifiable, Equatable {
+    let id = UUID()
+    let action: VoiceDoneAction
+    let candidates: [VoiceMatch]
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -135,6 +156,17 @@ final class AppState {
     /// v1 single `ParsedTask?` now that one utterance can yield a compound/multi-task result
     /// (contract "Confirm + materialize": multi-task confirm, ≤10). Empty = nothing to confirm.
     var confirmDrafts: [ConfirmDraft] = []
+    /// T036: populated INSTEAD OF `confirmDrafts` when `finishRecording` classifies the transcript
+    /// as `.complete`/`.clearExternal` (contract A) — routes to a distinct one-tap/disambiguation
+    /// card in `PopoverView` rather than the normal parsed-task confirm card. `nil` = no voice-done
+    /// confirm pending. Additive state (not part of the frozen §4 surface), mutually exclusive
+    /// with `confirmDrafts` (a given `finishRecording` call populates at most one of the two).
+    var voiceDoneConfirm: VoiceDoneConfirm?
+    /// T036: set INSTEAD OF `voiceDoneConfirm` when a done/clear phrasing was detected but ZERO
+    /// candidates matched (constitution II: state it, never guess) — holds the original transcript
+    /// so `captureVoiceDoneAsNewTask()` can resume it into the normal capture flow. `nil` = not
+    /// showing the "no matching task" row.
+    var voiceDoneNoMatchTranscript: String?
     private(set) var captureErrorDetail: String?
     /// User consented to Apple server-based recognition (audio leaves the Mac). Persisted.
     private(set) var allowServerRecognition: Bool
@@ -233,6 +265,10 @@ final class AppState {
     let whisper = WhisperKitEngine()
     /// Paid cloud tier.
     let groq = GroqEngine()
+    /// T036 (phase5-contract.md §C, contract A `VoiceDone`, `Sources/Speech/VoiceDone.swift`,
+    /// sibling-owned — landed). Pure/stateless matcher; constructed once here like every other
+    /// collaborator on this line.
+    private let voiceDone = VoiceDone()
     /// The `SpeechEngine` actually driving the in-flight (or most recent) capture, so
     /// `stopCapture`/`cancelCapture`/`confirmSave` can address whichever engine `startCapture`
     /// routed to instead of hardcoding `speech`.
@@ -396,6 +432,23 @@ final class AppState {
     /// the store instead of hand-patched, keeping the store as the single source of truth for the
     /// UI. No-store fallback (previews/tests without a `TaskStore`) keeps the old in-memory-only
     /// behavior.
+    ///
+    /// T037 (phase5-contract.md §C, FR-020): THIS is the one consolidated completion+advance
+    /// funnel every reachable completion source routes through — the plain UI toggle (its own
+    /// original caller), `confirmVoiceDone`'s `.complete` case (T036), and `sweepComplete` (T038)
+    /// all call this method directly rather than each re-implementing store.toggle + refresh +
+    /// reminder-cancel + eligibility-diff. The single atomic `tasks = store.fetchAll()` assignment
+    /// below is what gives `MenuBarLabel.activeTask` (a computed property re-deriving
+    /// `VolarCore.nextTask` from `tasks` on every read) its "no intermediate empty/list state"
+    /// property for free — there is no separate cached "active task" to go stale in between.
+    /// KNOWN GAP (self-review "conflict", flagged rather than fixed — `Sources/Reminders/**` is
+    /// out of this task's 5 owned files): `ReminderScheduler.handleAction` (the notification
+    /// "Done" action) calls `store.toggle(...)` DIRECTLY, bypassing this method entirely, by
+    /// design (FR-014/015/016: notification actions must never open/touch the app window). While
+    /// the main window is open, that leaves `AppState.tasks` briefly stale until some other
+    /// mutation refreshes it — `MenuBarLabel` isn't wrong forever, just not instantly live for
+    /// that one background source. Fixing it needs a hook in `VolarApp.swift` (e.g. refresh
+    /// `tasks` on window-foreground/menu-open), which is also outside this task's 3 owned files.
     func toggleDone(_ id: UUID) {
         guard let store else {
             guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
@@ -486,6 +539,8 @@ final class AppState {
         captureState = .recording
         liveTranscript = ""
         confirmDrafts = []
+        voiceDoneConfirm = nil
+        voiceDoneNoMatchTranscript = nil
         captureErrorDetail = nil
         pendingServerConsent = false
         pendingCloudConsent = false
@@ -554,6 +609,8 @@ final class AppState {
         captureState = .idle
         liveTranscript = ""
         confirmDrafts = []
+        voiceDoneConfirm = nil
+        voiceDoneNoMatchTranscript = nil
         pendingCloudConsent = false
         pendingParseTranscript = nil
         runningEngine?.stop()
@@ -636,6 +693,27 @@ final class AppState {
     /// FIRST time this ever runs, per contract R5 ("Cloud ... IF: user opted in").
     func finishRecording(transcript: String) {
         liveTranscript = transcript
+        // T036 (phase5-contract.md §C): classify BEFORE treating this as new-task capture.
+        // `voiceDoneOpenTasks` is rebuilt fresh from the live `tasks` snapshot on every call (never
+        // cached) so a completion classified here always reflects the CURRENT open-task list, and
+        // is always exactly the user's own tasks (self-review "security" — no cross-user/global
+        // data reaches `VoiceDone`).
+        switch voiceDone.classify(transcript, openTasks: voiceDoneOpenTasks) {
+        case .complete(let candidates):
+            presentVoiceDoneConfirm(action: .complete, candidates: candidates)
+        case .clearExternal(let candidates):
+            presentVoiceDoneConfirm(action: .clearExternal, candidates: candidates)
+        case .notACompletion:
+            // Existing Phase-3 new-task confirm flow, unchanged.
+            proceedToCapture(transcript: transcript)
+        }
+    }
+
+    /// The pre-existing Phase-3 new-task confirm flow (one-time cloud-parse consent gate ->
+    /// `runParse`), split out of `finishRecording` so `captureVoiceDoneAsNewTask()` (the "no
+    /// matching task, capture instead" escape hatch, T036) can resume the SAME transcript through
+    /// the exact same gate rather than duplicating it.
+    private func proceedToCapture(transcript: String) {
         guard cloudParseConsent != nil else {
             // Never asked: pause for the consent sheet instead of parsing yet. Reuses the same
             // `.error`-state-as-consent-prompt pattern as `pendingServerConsent` above (see
@@ -648,6 +726,135 @@ final class AppState {
             return
         }
         runParse(transcript: transcript)
+    }
+
+    // MARK: - T036: voice-done confirm (contract A/C)
+
+    /// T036 (contract A `VoiceDoneTask`): id/title + each task's UNSATISFIED `.external`
+    /// descriptions only (a satisfied one is nothing left for a "client đã ký"-style utterance to
+    /// clear). Rebuilt fresh from `openTasks` every `finishRecording` call.
+    private var voiceDoneOpenTasks: [VoiceDoneTask] {
+        openTasks.map { task in
+            VoiceDoneTask(
+                id: task.id,
+                title: task.title,
+                externalDescriptions: task.conditions.compactMap { condition in
+                    if case .external(let description, let satisfied) = condition, !satisfied { return description }
+                    return nil
+                }
+            )
+        }
+    }
+
+    /// Routes a `.complete`/`.clearExternal` classification into the glance-and-dismiss confirm
+    /// surface — one confident candidate -> one-tap/one-word confirm; several -> a bounded
+    /// disambiguation list (constitution II: multiple matches ALWAYS disambiguate, never guess);
+    /// ZERO -> STATE "no matching task" and offer capture instead (never silently fall through to
+    /// a guess, and never silently fall through to new-task capture either — the user must
+    /// explicitly choose that). `captureState = .parsed` reuses the existing non-idle/non-error
+    /// state; `PopoverView` gates its OWN voice-done card on `voiceDoneConfirm`/
+    /// `voiceDoneNoMatchTranscript` being non-nil rather than on this state value, so this is just
+    /// "not idle, not error, not recording" bookkeeping consistent with the rest of the enum.
+    private func presentVoiceDoneConfirm(action: VoiceDoneAction, candidates: [VoiceMatch]) {
+        guard !candidates.isEmpty else {
+            voiceDoneNoMatchTranscript = liveTranscript
+            captureState = .parsed
+            return
+        }
+        // Defensive cap (self-review "client-exploit"): disambiguation stays bounded even against
+        // a hostile/corrupted matcher result — mirrors `runParse`'s own defense-in-depth cap.
+        voiceDoneConfirm = VoiceDoneConfirm(action: action, candidates: Array(candidates.prefix(10)))
+        captureState = .parsed
+    }
+
+    /// User tapped the one-tap confirm, or picked one candidate from the disambiguation list.
+    /// `.complete` routes through `toggleDone` — the SAME funnel every other completion source
+    /// uses (T037/FR-020: one consolidated completion+advance path, no divergent refresh logic) —
+    /// which already appends the `CompletionEvent`, cancels reminders, and refreshes `tasks`
+    /// atomically so `MenuBarLabel`'s `activeTask` advances with no intermediate empty/list state.
+    /// `.clearExternal` clears the condition instead (never a completion — no `CompletionEvent`),
+    /// per the contract's explicit "or clear the `.external` condition" wording.
+    func confirmVoiceDone(taskId: UUID) {
+        guard let confirm = voiceDoneConfirm else { return }
+        let action = confirm.action
+        // Cleared FIRST — mirrors `finishSaveUI`'s "empty the source of truth before the async
+        // tail" convention, so a stray double-tap on the (about-to-vanish) confirm button can't
+        // re-fire this (self-review "client-exploit": completion is idempotent — once cleared,
+        // there is no pending confirm left for a second tap to act on).
+        voiceDoneConfirm = nil
+        switch action {
+        case .complete:
+            toggleDone(taskId)
+        case .clearExternal:
+            clearExternalCondition(taskId: taskId, now: clock())
+        }
+        finishVoiceDoneUI(action: action)
+    }
+
+    /// Glance-and-dismiss "not this" / cancel — leaves every task untouched (constitution II: a
+    /// declined confirm must never partially act). Also used as the no-match row's "Dismiss".
+    func dismissVoiceDoneConfirm() {
+        captureSession += 1
+        voiceDoneConfirm = nil
+        voiceDoneNoMatchTranscript = nil
+        captureState = .idle
+        liveTranscript = ""
+        runningEngine?.stop()
+        runningEngine = nil
+    }
+
+    /// The "no matching task" escape hatch (constitution II: zero matches states it, then offers
+    /// capture — never guesses). Resumes the original transcript through the exact same
+    /// consent-gated path a normal `.notACompletion` capture would take.
+    func captureVoiceDoneAsNewTask() {
+        guard let transcript = voiceDoneNoMatchTranscript else { return }
+        voiceDoneNoMatchTranscript = nil
+        proceedToCapture(transcript: transcript)
+    }
+
+    /// T036 `.clearExternal`: clears the FIRST unsatisfied `.external` condition on `taskId` — see
+    /// `TaskStore.clearFirstExternalCondition`'s doc comment for why "first" (contract A's
+    /// `VoiceMatch` only resolves to a task id, not which specific external description matched).
+    /// Mirrors `deleteTask`'s pattern of reusing the store's own already-computed eligibility diff
+    /// instead of a second `notifyEligibilityAndScheduleResurface` pass (self-review "performance").
+    private func clearExternalCondition(taskId: UUID, now: Date) {
+        guard let store else {
+            // No-store fallback (previews/tests without a TaskStore) — mirrors `triageDefer`'s own
+            // no-store branch: in-memory only, no eligibility/reminder side effects to drive.
+            guard let index = tasks.firstIndex(where: { $0.id == taskId }) else { return }
+            guard let conditionIndex = tasks[index].conditions.firstIndex(where: {
+                if case .external(_, let satisfied) = $0 { return !satisfied }
+                return false
+            }), case .external(let description, _) = tasks[index].conditions[conditionIndex] else { return }
+            tasks[index].conditions[conditionIndex] = .external(description: description, satisfied: true)
+            return
+        }
+        let newlyEligible = store.clearFirstExternalCondition(on: taskId, now: now)
+        tasks = store.fetchAll()
+        // WG-1: this task's own condition state just changed — re-derive its reminders, same as
+        // `triageDefer` does after adding a condition.
+        scheduler?.scheduleReminders(taskId: taskId)
+        if !newlyEligible.isEmpty {
+            scheduler?.notifyUnblocked(taskIds: newlyEligible)
+        }
+        scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: now)
+    }
+
+    /// Shared "flash a result + auto-dismiss" tail for `confirmVoiceDone` — mirrors
+    /// `finishSaveUI`'s timing/guard convention exactly (900ms flash, `captureSession`-guarded so a
+    /// superseded flash never clobbers a fresh capture already in flight).
+    private func finishVoiceDoneUI(action: VoiceDoneAction) {
+        captureState = .done
+        runningEngine?.stop()
+        voice.speak(action == .complete ? "Done." : "Cleared.")
+        captureSession += 1
+        let session = captureSession
+        _Concurrency.Task { @MainActor [weak self] in
+            try? await _Concurrency.Task.sleep(nanoseconds: 900_000_000)
+            guard let self, self.captureSession == session, self.captureState == .done else { return }
+            self.captureState = .idle
+            self.liveTranscript = ""
+        }
     }
 
     /// User answered the one-time cloud-parse consent sheet (`PopoverView`'s consent row).
@@ -1381,6 +1588,98 @@ final class AppState {
         let raw = Dictionary(uniqueKeysWithValues: triageKeptAt.map { ($0.key.uuidString, $0.value.timeIntervalSince1970) })
         UserDefaults.standard.set(raw, forKey: Self.triageKeptAtKey)
     }
+
+    // MARK: - Phase 5 (T038): evening sweep (contract B `SweepView`, sibling-owned, landed)
+
+    /// Drives `SweepView`'s presentation — mirrors `VolarApp.swift`'s `showTriage` pattern
+    /// (day-gated flag owned here, actual `.sheet` mount point lives in `VolarApp.swift`, which is
+    /// OUTSIDE this task's 3 owned files — see `maybeShowEveningSweep`'s doc comment for the exact
+    /// one-time wiring the next touch of `VolarApp.swift` needs to actually surface this).
+    var showSweep = false
+
+    private static let sweepLastShownDayKey = "volar.sweepLastShownDay"
+
+    /// `SweepView.items`: "today's open/in-progress tasks" (contract B) — this app's existing
+    /// "today" bucket is exactly `nowTasks` (`when == .now`).
+    var sweepItems: [TaskItem] { nowTasks }
+
+    /// T038: once-daily schedule (ISO-day gate, mirroring `VolarApp.swift`'s `frogLastShown`/
+    /// `triageLastShownWeek` `@AppStorage` pattern — kept here as plain `UserDefaults` instead
+    /// since `AppState` isn't a `View` and every other persisted setting in this file already uses
+    /// `UserDefaults` directly, e.g. `triageKeptAt`/`voiceDeliveryMode`), skip-if-empty
+    /// (`sweepItems.isEmpty` — `SweepView` itself also self-guards on an empty `items` as a second
+    /// line of defense per its own doc comment).
+    ///
+    /// *** WIRING STILL NEEDED IN `VolarApp.swift` (outside this task's 3 owned files; flagged in
+    /// the final report rather than fixed here, same as the pre-existing FR-016 wake-observer gap
+    /// noted in `offerRescheduleForOverdueTasks` above) ***. Call this once from the main window's
+    /// `.task`, alongside the existing morning-frog/triage checks:
+    /// ```swift
+    /// appState.maybeShowEveningSweep()
+    /// ```
+    /// and add a `.sheet` mirroring `showTriage`'s exactly:
+    /// ```swift
+    /// .sheet(isPresented: Binding(
+    ///     get: { appState.showSweep },
+    ///     set: { presented in if !presented { appState.dismissSweep() } }
+    /// )) {
+    ///     SweepView(
+    ///         items: appState.sweepItems,
+    ///         onComplete: { appState.sweepComplete($0) },
+    ///         onSkip: { appState.sweepSkip($0) },
+    ///         onDismiss: { appState.dismissSweep() }
+    ///     )
+    ///     .environment(appState)
+    ///     .frame(minWidth: 560, minHeight: 480)
+    /// }
+    /// ```
+    func maybeShowEveningSweep() {
+        let day = Self.isoDayKey(from: clock())
+        guard UserDefaults.standard.string(forKey: Self.sweepLastShownDayKey) != day, !sweepItems.isEmpty else { return }
+        showSweep = true
+        UserDefaults.standard.set(day, forKey: Self.sweepLastShownDayKey)
+    }
+
+    /// POSIX/Gregorian day key, identical formula to `VolarApp.swift`'s own `day` computation (so
+    /// the two stay in lockstep) — duplicated locally rather than shared across files since this
+    /// task can't touch `VolarApp.swift` to extract a common helper.
+    private static func isoDayKey(from date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: date)
+    }
+
+    /// `SweepView.onComplete`: one-tap complete, routed through the SAME funnel as every other
+    /// completion (T037) — `toggleDone` (store.toggle + `CompletionEvent` + refresh + auto-advance,
+    /// so `MenuBarLabel` advances immediately even while the sweep card stays open for the rest of
+    /// the batch).
+    func sweepComplete(_ item: TaskItem) {
+        toggleDone(item.id)
+    }
+
+    /// `SweepView.onSkip`: no-op — "Skip" means "didn't get to it today," carried over silently
+    /// (FR-036/constitution V: never destructive, never a silent completion, no shame styling).
+    /// Named explicitly (rather than leaving `VolarApp.swift`'s future sheet wiring pass an inline
+    /// `{ _ in }`) so this seam is documented and independently testable.
+    func sweepSkip(_ item: TaskItem) {
+        // Intentionally empty — see doc comment above.
+    }
+
+    /// `SweepView.onDismiss`: closes the sweep card ("Done for today").
+    func dismissSweep() {
+        showSweep = false
+    }
+
+    /// Voice answering during the sweep (contract C: "nice-to-have; the one-tap path is the
+    /// requirement"). Deliberately NOT a separate sweep-specific mic/parallel `VoiceDone` path:
+    /// the ⌃⌥M hotkey / popover mic keep working exactly as they always do while `showSweep` is
+    /// true, so "xong cái A" during a sweep flows through the SAME T036
+    /// `finishRecording` -> `presentVoiceDoneConfirm` -> `confirmVoiceDone` -> `toggleDone` pipeline
+    /// as any other voice-done completion — which already refreshes `tasks` atomically, so
+    /// `sweepItems` (read live by whatever mounts `SweepView`) drops the just-completed item on its
+    /// own. No extra wiring needed here beyond what T036 already provides.
 
     // MARK: - Phase 4: settings (T033 VoiceDeliveryMode + global ReminderPolicy)
 

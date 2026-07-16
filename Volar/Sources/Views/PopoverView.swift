@@ -47,6 +47,11 @@ struct PopoverView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
+                if showVoiceDoneCard {
+                    voiceDoneCard(accent: accent)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+
                 if showActions {
                     actionsRow(accent: accent)
                         .transition(.opacity)
@@ -88,12 +93,20 @@ struct PopoverView: View {
     }
 
     private var showParsedCard: Bool {
-        (appState.captureState == .parsed || appState.captureState == .saving || appState.captureState == .done)
+        !showVoiceDoneCard
+            && (appState.captureState == .parsed || appState.captureState == .saving || appState.captureState == .done)
             && !appState.confirmDrafts.isEmpty
     }
 
     private var showActions: Bool {
-        appState.captureState == .parsed || appState.captureState == .saving
+        !showVoiceDoneCard && (appState.captureState == .parsed || appState.captureState == .saving)
+    }
+
+    /// T036: a voice-done confirm (one-tap/disambiguation) or "no matching task" row is pending —
+    /// mutually exclusive with the normal parsed-task confirm card / its Cancel+Save actions row,
+    /// which render their own controls instead (`voiceDoneCard(accent:)`).
+    private var showVoiceDoneCard: Bool {
+        appState.voiceDoneConfirm != nil || appState.voiceDoneNoMatchTranscript != nil
     }
 
     // MARK: - Hint row
@@ -113,6 +126,21 @@ struct PopoverView: View {
 
     @ViewBuilder
     private func leftHint(accent: Accent) -> some View {
+        if let confirm = appState.voiceDoneConfirm {
+            Text(confirm.candidates.count == 1 ? "Got it — confirm?" : "A few matches — pick one.")
+                .foregroundStyle(VolarColor.textMut)
+                .transition(.opacity)
+        } else if appState.voiceDoneNoMatchTranscript != nil {
+            Text("Didn't find a matching task.")
+                .foregroundStyle(VolarColor.reschedule)
+                .transition(.opacity)
+        } else {
+            leftHintByCaptureState(accent: accent)
+        }
+    }
+
+    @ViewBuilder
+    private func leftHintByCaptureState(accent: Accent) -> some View {
         switch appState.captureState {
         case .idle:
             EmptyView()
@@ -512,6 +540,146 @@ struct PopoverView: View {
             }
             .buttonStyle(.plain)
         }
+    }
+
+    // MARK: - Voice-done confirm card (T036, contract A `VoiceDoneIntent`/`VoiceMatch`)
+
+    /// Same card shell as `parsedCard()` (Studio Dark card background + the reserved NOW ring —
+    /// this is, like the parsed-task card, the one thing about to be acted on) but a completely
+    /// different body: a one-tap/one-word confirm for a single confident candidate, a bounded
+    /// disambiguation list for several, or the "no matching task" state (constitution II: state
+    /// zero-match, never guess — and never silently fall back to new-task capture without asking).
+    @ViewBuilder
+    private func voiceDoneCard(accent: Accent) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            if let confirm = appState.voiceDoneConfirm {
+                voiceDoneConfirmContent(confirm, accent: accent)
+            } else if appState.voiceDoneNoMatchTranscript != nil {
+                voiceDoneNoMatchContent(accent: accent)
+            }
+        }
+        .padding(12)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(VolarColor.nowRing, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .padding(.top, 6)
+    }
+
+    /// One confident candidate -> a single "Yes — <title>" one-tap/one-word button (glance-and-
+    /// dismiss). Several -> a bounded (`prefix(10)`, matching the defensive cap already applied
+    /// when `AppState.presentVoiceDoneConfirm` constructs this) tappable list — constitution II's
+    /// disambiguation requirement, never an auto-pick.
+    @ViewBuilder
+    private func voiceDoneConfirmContent(_ confirm: VoiceDoneConfirm, accent: Accent) -> some View {
+        Text(voiceDoneQuestion(confirm))
+            .font(.system(size: 13.5, weight: .medium))
+            .foregroundStyle(VolarColor.nowAccentSoft)
+            .lineLimit(2)
+
+        if confirm.candidates.count == 1, let only = confirm.candidates.first {
+            HStack(spacing: 8) {
+                voiceDoneDismissButton
+                voiceDoneConfirmButton(title: "Yes — \(only.title)", accent: accent) {
+                    appState.confirmVoiceDone(taskId: only.taskId)
+                }
+            }
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(confirm.candidates.prefix(10), id: \.taskId) { match in
+                    Button {
+                        appState.confirmVoiceDone(taskId: match.taskId)
+                    } label: {
+                        Text(match.title)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(VolarColor.textPri)
+                            .lineLimit(1)
+                            .truncationMode(.tail)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 9)
+                            .frame(height: 26)
+                    }
+                    .buttonStyle(.plain)
+                    .background(VolarColor.card)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .stroke(VolarColor.border, lineWidth: 0.5)
+                    )
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                }
+            }
+            .padding(.top, 2)
+            voiceDoneDismissButton
+        }
+    }
+
+    private func voiceDoneQuestion(_ confirm: VoiceDoneConfirm) -> String {
+        let verb = confirm.action == .complete ? "Mark done" : "Clear"
+        if confirm.candidates.count == 1 {
+            return "\(verb): \u{201C}\(confirm.candidates[0].title)\u{201D}?"
+        }
+        return confirm.action == .complete ? "Which task is done?" : "Which one cleared?"
+    }
+
+    /// Zero candidates but a done/clear phrase was clearly detected — states it plainly (no red/
+    /// shame styling, FR-036) and offers the explicit capture-instead escape hatch, never a guess.
+    @ViewBuilder
+    private func voiceDoneNoMatchContent(accent: Accent) -> some View {
+        Text("Didn't find a matching task for that.")
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(VolarColor.textSec)
+            .lineLimit(2)
+        HStack(spacing: 8) {
+            voiceDoneDismissButton
+            voiceDoneConfirmButton(title: "Capture as new task instead", accent: accent) {
+                appState.captureVoiceDoneAsNewTask()
+            }
+        }
+    }
+
+    /// Accent-solid one-word/one-tap affirmative — matches `actionsRow`'s Save button styling
+    /// (Studio Dark) so this card reads as the same family as the normal confirm card.
+    private func voiceDoneConfirmButton(title: String, accent: Accent, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+        }
+        .buttonStyle(.plain)
+        .background(accent.solid)
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .shadow(color: accent.glow, radius: 10, x: 0, y: 4)
+        .keyboardShortcut(.defaultAction)
+    }
+
+    /// Neutral "not this" / cancel — matches `actionsRow`'s Cancel button styling exactly.
+    private var voiceDoneDismissButton: some View {
+        Button {
+            appState.dismissVoiceDoneConfirm()
+        } label: {
+            Text("Not this")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+                .padding(.horizontal, 14)
+                .frame(height: 34)
+        }
+        .buttonStyle(.plain)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(VolarColor.border, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .keyboardShortcut(.cancelAction)
     }
 
     // MARK: - Chip label formatting

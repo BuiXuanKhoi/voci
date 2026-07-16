@@ -240,6 +240,29 @@ final class TaskStore {
         return VolarCore.eligibilityDiff(before: beforeSnapshot, after: afterSnapshot, now: now)
     }
 
+    /// T036 (phase5-contract.md §C): voice-done's `.clearExternal` intent resolves to a task id
+    /// only (contract A's `VoiceMatch` carries `taskId`/`title`/`score`, not which specific
+    /// `.external` description matched) — this clears the FIRST still-unsatisfied `.external`
+    /// condition on `id`, which covers the common case of exactly one outstanding external wait
+    /// per task. A no-op (returns `[]`) for an unknown id or a task with nothing unsatisfied to
+    /// clear. Mirrors `delete`'s pattern: returns newly-eligible task ids (via
+    /// `VolarCore.eligibilityDiff`) so the caller notifies the scheduler once instead of
+    /// recomputing the diff a second time (self-review "performance").
+    @discardableResult
+    func clearFirstExternalCondition(on id: UUID, now: Date = Date()) -> [UUID] {
+        guard let model = fetchModel(id) else { return [] }
+        guard let index = model.conditions.firstIndex(where: {
+            if case .external(_, let satisfied) = $0 { return !satisfied }
+            return false
+        }) else { return [] }
+        let beforeSnapshot = fetchAllModels().map { $0.asTaskItem.snapshot() }
+        guard case .external(let description, _) = model.conditions[index] else { return [] }
+        model.conditions[index] = .external(description: description, satisfied: true)
+        save()
+        let afterSnapshot = fetchAllModels().map { $0.asTaskItem.snapshot() }
+        return VolarCore.eligibilityDiff(before: beforeSnapshot, after: afterSnapshot, now: now)
+    }
+
     /// Constitution V / FR-044: appends one `ParseCorrection` row for a confirm-card chip edit
     /// (`AppState`'s chip-interaction methods, T024) — the only call site able to reach
     /// `ParseCorrectionLog.record` since it needs this store's private `ModelContext`
