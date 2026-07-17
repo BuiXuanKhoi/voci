@@ -136,12 +136,12 @@ Convention reminder: code is authored on Windows; every build/test checkpoint ru
 
 **Independent Test**: quickstart §6 — full delegate → signal/timer → needs-review → done cycle including hook install/uninstall and idempotent signals.
 
-- [ ] T039 [P] [US4] Create `Volar/Sources/Orchestrator/DelegationTracker.swift`: `DelegationMeta` lifecycle, delegate action (external condition + meta + advance), minute-scale check-back scheduling, backoff 10′→30′→batch, batch-reconcile card assembly, WIP count (R9)
-- [ ] T040 [P] [US4] Create `Volar/Sources/Orchestrator/AppLinkHandler.swift`: `onOpenURL` routing per contracts/app-links.md — `ai-done` matching ladder (single-waiting → cwd hint → disambiguation card; idempotent; never completes) + `capture` path into the parser pipeline
-- [ ] T041 [US4] Create `Volar/Sources/Orchestrator/ClaudeCodeConnector.swift`: detect `~/.claude`, security-scoped bookmark grant, preview sheet, timestamped backup, additive JSON merge into `hooks.Stop` (marker `volar://`), test-signal round-trip, disconnect removing only marker entries (contract in app-links.md)
-- [ ] T042 [US4] Delegation voice intents ("giao cho Claude rồi", "check sau 10 phút") in the capture pipeline + delegate button on current task in `Volar/Sources/Views/TodayView.swift`
-- [ ] T043 [US4] WIP counter on `MenuBarLabel.swift` ("⏳ N") + soft-limit dismissible hint (>4) + needs-review ambient section and [Done][Still waiting][Check later] card in `PopoverView.swift`/`TodayView.swift`
-- [ ] T044 [US4] "Connect Claude Code" section in `SettingsView.swift` (detect/connect/test/disconnect states) + copy-config fallback
+- [x] T039 [P] [US4] Create `Volar/Sources/Orchestrator/DelegationTracker.swift`: `DelegationMeta` lifecycle, delegate action (external condition + meta + advance), minute-scale check-back scheduling, backoff 10′→30′→batch, batch-reconcile card assembly, WIP count (R9)
+- [x] T040 [P] [US4] Create `Volar/Sources/Orchestrator/AppLinkHandler.swift`: `onOpenURL` routing per contracts/app-links.md — `ai-done` matching ladder (single-waiting → cwd hint → disambiguation card; idempotent; never completes) + `capture` path into the parser pipeline
+- [x] T041 [US4] Create `Volar/Sources/Orchestrator/ClaudeCodeConnector.swift`: detect `~/.claude`, security-scoped bookmark grant, preview sheet, timestamped backup, additive JSON merge into `hooks.Stop` (marker `volar://`), test-signal round-trip, disconnect removing only marker entries (contract in app-links.md)
+- [x] T042 [US4] Delegation voice intents ("giao cho Claude rồi", "check sau 10 phút") in the capture pipeline + delegate button on current task in `Volar/Sources/Views/TodayView.swift`
+- [x] T043 [US4] WIP counter on `MenuBarLabel.swift` ("⏳ N") + soft-limit dismissible hint (>4) + needs-review ambient section and [Done][Still waiting][Check later] card in `PopoverView.swift`/`TodayView.swift`
+- [x] T044 [US4] "Connect Claude Code" section in `SettingsView.swift` (detect/connect/test/disconnect states) + copy-config fallback
 
 **Checkpoint**: orchestrator loop closes minus typing-back (deferred US5)
 
