@@ -1,7 +1,6 @@
 // Sources/App/VolarApp.swift — @main entry point: scenes, environment injection, delegate hookup
 import SwiftUI
 import AppKit
-import Combine
 import UserNotifications
 
 @main
@@ -19,7 +18,18 @@ struct VolarApp: App {
         // Degrade gracefully: if the SwiftData container fails to initialize for any reason,
         // fall back to AppState's empty in-memory task list rather than crashing at launch.
         let store = try? TaskStore()
-        _appState = State(initialValue: AppState(store: store))
+        let state = AppState(store: store)
+        _appState = State(initialValue: state)
+
+        // F1/F2 integration fix: hand the SAME AppState instance to the AppDelegate so its
+        // window-independent observers (registered in `applicationDidFinishLaunching`, see
+        // AppDelegate below) operate on this one instance rather than a second one. There is
+        // exactly one AppState in the app — this line and `_appState` above are the only two
+        // places `AppState(...)` is constructed/held. `@NSApplicationDelegateAdaptor`'s default
+        // initializer expression (declared above `appState`) runs before this custom `init()`
+        // body executes, so `appDelegate` already exists here and this assignment lands before
+        // `applicationDidFinishLaunching` fires later on the run loop.
+        appDelegate.appState = state
     }
 
     var body: some Scene {
@@ -82,40 +92,15 @@ struct VolarApp: App {
                         appState.maybeShowEveningSweep()
                     }
                 }
-                .onReceive(NotificationCenter.default.publisher(for: .volarTasksDidChange)) { _ in
-                    // WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done"
-                    // action mutates `TaskStore` directly (bypassing `AppState.toggleDone` by
-                    // design — FR-014/015/016 forbid that path from touching the app/window), which
-                    // otherwise left `appState.tasks` — and `MenuBarLabel.activeTask`, derived from
-                    // it — stale until some unrelated mutation refreshed it. `.onReceive` on a
-                    // SwiftUI view body already runs on the main actor, so this hop to
-                    // `refreshFromStore()` (itself `@MainActor`) is safe without an extra dispatch.
-                    appState.refreshFromStore()
-                }
-                .onOpenURL { url in
-                    // Phase 6 (US4, phase6-contract.md §C): inbound `volar://` app links
-                    // (`ai-done`/`capture`) — routed through `AppLinkHandler.handle(_:)`
-                    // (Orchestrator/AppLinkHandler.swift, sibling-owned/landed), which is
-                    // inbound-only/idempotent/non-destructive per contracts/app-links.md.
-                    // `AppState.onAppLinkHandled()` mirrors the handler's resulting state
-                    // (pending disambiguation, ambient recheck queue, test-signal receipt) into
-                    // `AppState`'s own `@Observable` surface so the UI actually reacts to it.
-                    // `?.` degrades gracefully in the no-store fallback (`appLinkHandler` is `nil`
-                    // there, same as `scheduler`). // UNVERIFIED
-                    appState.appLinkHandler?.handle(url)
-                    appState.onAppLinkHandled()
-                }
-                .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
-                    // Constitution IV: sleep/wake recovery re-evaluates overdue `.scheduled`
-                    // reminders and fires immediately if still due. `ReminderScheduler.init`
-                    // (sibling-owned) ALSO registers its own wake observer, but on
-                    // `NotificationCenter.default` — `NSWorkspace.didWakeNotification` actually
-                    // posts on `NSWorkspace.shared.notificationCenter` (used here), so that
-                    // internal observer may never fire (self-review "conflict", flagged in this
-                    // task's final report). This `.onReceive` is the one guaranteed-correct path;
-                    // `rebuildFromStorage()` is documented idempotent, so redundancy here is safe.
-                    appState.scheduler?.rebuildFromStorage()
-                }
+                // F1/F2 integration fix: the three window-independent observers that used to live
+                // here (`.volarTasksDidChange` refresh, `.onOpenURL`, and sleep/wake recovery) were
+                // moved to `AppDelegate` below — this `Window` scene is normally CLOSED (Volar is
+                // an `LSUIElement` menu-bar app), so `.onReceive`/`.onOpenURL` attached to it were
+                // torn down along with the window and silently stopped firing. `AppDelegate` is
+                // app-lifetime (registered via `@NSApplicationDelegateAdaptor` above) and shares
+                // this exact `appState` instance (wired in `init()` above), so those three concerns
+                // now fire whether or not this window is open. What's left on this scene — sheets,
+                // the onboarding/frog/triage/sweep gates below — genuinely needs a visible window.
                 .sheet(isPresented: Binding(
                     get: { !hasOnboarded },
                     set: { presented in if !presented { hasOnboarded = true } }
@@ -226,8 +211,22 @@ private struct MenuBarMenuContent: View {
 /// hotkey is started from `AppState.activateServices()` (called from the main window's `.task`
 /// above) rather than here, since `AppState` — and its `HotkeyManager` — don't exist yet at
 /// `NSApplicationDelegate` construction time.
+///
+/// F1/F2 integration fix: this is also now the home for the three concerns that must survive the
+/// main `Window("Volar")` scene being closed — Volar is normally a menu-bar-only app, so anything
+/// attached to that scene (`.onReceive`/`.onOpenURL`) is torn down while it's closed. `AppDelegate`
+/// itself is app-lifetime (owned by `@NSApplicationDelegateAdaptor` for the whole run), so
+/// observers registered here keep firing regardless of window state.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// Set once, in `VolarApp.init()`, right after the single `AppState` instance is constructed
+    /// — see that init's doc comment. Not a `let` because `NSApplicationDelegateAdaptor` builds
+    /// this object before `AppState` exists; by the time `applicationDidFinishLaunching` (or
+    /// `application(_:open:)`) actually runs, `init()` has already returned and this is set.
+    /// `?.`-guarded everywhere it's used below so a hypothetical launch ordering slip degrades
+    /// gracefully (no crash) rather than force-unwrapping.
+    var appState: AppState?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Best-effort; ignore the result/error — notifications are a nice-to-have, not required
         // for the app to function (see backlog: real notification scheduling not yet wired).
@@ -247,5 +246,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // which exists yet at this point in app launch (see the note below); that's wired instead
         // in `AppState.activateServices()`, called once `AppState`/`TaskStore` exist.
         NotificationActions.registerCategories()
+
+        // F1/F2 integration fix: window-independent observers, moved here from the `Window`
+        // scene's `.onReceive` modifiers so they fire even while the window is closed (see this
+        // class's doc comment and VolarApp's final report).
+        registerWindowIndependentObservers()
+    }
+
+    /// Moved verbatim (behaviorally) from `Window("Volar")`'s `.onReceive` modifiers in
+    /// `VolarApp.body` — only the delivery mechanism changed (app-lifetime `NotificationCenter`
+    /// observer tokens instead of a SwiftUI view's `.onReceive`), not what each handler does.
+    private func registerWindowIndependentObservers() {
+        // WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done" action
+        // mutates `TaskStore` directly (bypassing `AppState.toggleDone` by design — FR-014/015/016
+        // forbid that path from touching the app/window), which otherwise leaves `appState.tasks`
+        // — and `MenuBarLabel.activeTask`, derived from it — stale until some unrelated mutation
+        // refreshes it. `addObserver(forName:object:queue:.main)`'s `using` block is typed
+        // `@Sendable` and is NOT inferred `@MainActor` despite this class being `@MainActor` (same
+        // gotcha as `requestAuthorization` above), even though `queue: .main` guarantees it runs on
+        // the main thread — so hop explicitly rather than touching `appState` directly in the
+        // closure body.
+        NotificationCenter.default.addObserver(
+            forName: .volarTasksDidChange, object: nil, queue: .main
+        ) { @Sendable [weak self] _ in
+            Task { @MainActor in
+                self?.appState?.refreshFromStore()
+            }
+        }
+
+        // Constitution IV: sleep/wake recovery re-evaluates overdue `.scheduled` reminders and
+        // fires immediately if still due. `ReminderScheduler.init` (sibling-owned) ALSO registers
+        // its own wake observer, but on `NotificationCenter.default` — `NSWorkspace
+        // .didWakeNotification` actually posts on `NSWorkspace.shared.notificationCenter` (used
+        // here), so that internal observer may never fire (self-review "conflict", flagged in this
+        // task's final report). This is the one guaranteed-correct path; `rebuildFromStorage()` is
+        // documented idempotent, so redundancy here (vs. the sibling-owned observer, if it ever
+        // does fire) is safe. Registered once, here, for the app's lifetime — not duplicated on the
+        // `Window` scene anymore, so there's no risk of double wake-recovery scheduling.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { @Sendable [weak self] _ in
+            Task { @MainActor in
+                self?.appState?.scheduler?.rebuildFromStorage()
+            }
+        }
+    }
+
+    /// Phase 6 (US4, phase6-contract.md §C): inbound `volar://` app links (`ai-done`/`capture`).
+    /// Moved here from the `Window` scene's `.onOpenURL` — `.onOpenURL` only delivers while a
+    /// scene is actually open, which defeats it for an `LSUIElement` menu-bar app whose window is
+    /// normally closed; this AppKit-level delegate method is the app-lifetime equivalent and
+    /// receives the same `GURL` Apple events regardless of window state. Routes through
+    /// `AppLinkHandler.handle(_:)` (Orchestrator/AppLinkHandler.swift, sibling-owned/landed), which
+    /// is inbound-only/idempotent/non-destructive per contracts/app-links.md — never completes a
+    /// task itself; an ambiguous match becomes a disambiguation candidate list, same as before.
+    /// `appState.onAppLinkHandled()` mirrors the handler's resulting state (pending
+    /// disambiguation, ambient recheck queue, test-signal receipt) into `AppState`'s own
+    /// `@Observable` surface, exactly as the old `.onOpenURL` did right after `handle(_:)`.
+    /// `?.` degrades gracefully in the no-store fallback (`appLinkHandler` is `nil` there, same as
+    /// `scheduler`). // UNVERIFIED
+    func application(_ application: NSApplication, open urls: [URL]) {
+        for url in urls {
+            appState?.appLinkHandler?.handle(url)
+            appState?.onAppLinkHandled()
+        }
     }
 }
