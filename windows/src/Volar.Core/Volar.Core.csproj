@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Zero-NuGet-dependency, zero-I/O engine core (Constitution Principle III of the macOS project,
+    carried over unchanged for the Windows port). Do not add <PackageReference> or a reference to
+    any UI/EF Core/HTTP assembly here — everything in this project must remain pure, deterministic,
+    and testable without any external runtime. Only BCL (System.*) usings are allowed.
+  -->
+  <PropertyGroup>
+    <RootNamespace>Volar.Core</RootNamespace>
+  </PropertyGroup>
+
+</Project>

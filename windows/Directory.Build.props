@@ -1,0 +1,17 @@
+<Project>
+
+  <!--
+    Shared MSBuild settings for every project under windows/. Individual .csproj files should not
+    repeat these — override only when a specific project has a documented reason to diverge (e.g.
+    a WinUI 3 app project needing net10.0-windows10.0.xxxxx.0 instead of plain net10.0).
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+</Project>

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Voice pipeline: speech-to-text engines (Whisper.net on-device + Groq cloud), NAudio-based
+    microphone capture, a RegisterHotKey-based global toggle-to-talk hotkey, System.Speech TTS
+    playback, and a synthesized ambient-sound loop. Ported from Sources/Speech/** and
+    Sources/Audio/** (macOS/Swift) — see class-level doc comments for the file-by-file mapping.
+
+    TARGET FRAMEWORK OVERRIDE (documented per W1-D brief): Directory.Build.props pins the whole
+    solution to plain "net10.0" so Volar.Core/Volar.Domain stay platform-agnostic and testable
+    everywhere. This project needs Windows-only APIs (RegisterHotKey via user32.dll P/Invoke,
+    System.Speech.Synthesis, WASAPI through NAudio) so it overrides to "net10.0-windows" here,
+    which unlocks the Windows Desktop SDK surface (System.Speech, Windows-only P/Invoke targeting
+    checks) while keeping every OTHER project in the solution on the portable net10.0 TFM.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <RootNamespace>Volar.Speech</RootNamespace>
+    <!-- Needed for System.Speech.Synthesis (SAPI5 TTS) — see Playback/VoicePlayback.cs for why
+         System.Speech was chosen over Windows.Media.SpeechSynthesis (WinRT). -->
+    <UseWindowsForms>false</UseWindowsForms>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- On-device STT (free, unlimited tier) — whisper.cpp bindings. Model files are NOT bundled
+         here; WhisperModelManager downloads GGML weights on demand (see Whisper/WhisperModelManager.cs). -->
+    <PackageReference Include="Whisper.net" Version="1.9.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.9.1" />
+    <!-- Microphone capture (WASAPI) + resampling/format-conversion helpers + WAV writing. -->
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <!-- System.Speech.Synthesis (SAPI5) TTS — see Playback/VoicePlayback.cs doc comment. -->
+    <PackageReference Include="System.Speech" Version="10.0.10" />
+  </ItemGroup>
+
+</Project>

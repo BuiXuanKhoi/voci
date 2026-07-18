@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Persistence layer (EF Core + SQLite), port of Sources/Model/{VolarTask,ReminderRecord,
+    CompletionLog,ParseCorrection,TaskStore}.swift. References Volar.Core only (stable, already
+    green) so this project's build never depends on Volar.Domain's in-progress state — Volar.Domain
+    (TaskItem/Recurrence/NLParser) is being built in parallel by a sibling agent and had zero .cs
+    files at the time this project was written. See TaskRepository.cs / TaskEntity.cs doc comments
+    for the seam left for Opus to wire once Volar.Domain lands (TaskEntity currently plays the
+    "TaskItem" role itself rather than depending on a type that didn't exist yet).
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.10" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.10">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+    </PackageReference>
+    <!--
+      Pin explicitly over the vulnerable transitive version (SQLitePCLRaw.lib.e_sqlite3 2.1.11,
+      GHSA-2m69-gcr7-jv3q) pulled in by Microsoft.EntityFrameworkCore.Sqlite 10.0.10.
+    -->
+    <PackageReference Include="SQLitePCLRaw.bundle_e_sqlite3" Version="3.0.4" />
+  </ItemGroup>
+
+</Project>
