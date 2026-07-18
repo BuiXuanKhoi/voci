@@ -64,7 +64,12 @@ final class AppAttestDeviceCheckProvider: DeviceAttestationProvider {
     private static let keyIdDefaultsKey = "volar.appAttest.keyId"
     private static let attestedDefaultsKey = "volar.appAttest.attested"
 
-    private let defaults: UserDefaults
+    /// `nonisolated(unsafe)` because `UserDefaults` is documented thread-safe but is not annotated
+    /// `Sendable` by Apple, and this provider must be `Sendable` (`DeviceAttestationProvider`
+    /// requires it — `deviceToken()` is awaited from `CloudParser` off the main actor). The unsafe
+    /// opt-out is scoped to this one property rather than marking the whole class
+    /// `@unchecked Sendable`, so any *future* stored property is still checked normally.
+    private nonisolated(unsafe) let defaults: UserDefaults
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
