@@ -1,5 +1,58 @@
 # Backlog — voci
 
+- [ ] **★★ TEST GAP 2026-07-19 (Volar.Data — fixed by bugfix agent, tests.TaskRepositoryCompletionTests):**
+  Sửa xong 4 test đỏ ở `Volar.Data.Tests` (root cause: `TaskRepository.AddConditionAsync` và
+  `CompleteOne`'s recurrence-reset loop dùng `task.Conditions.Add(entity.ToEntity(...))` — thêm entity
+  con có Guid key đã gán sẵn vào collection navigation của 1 entity CHA đã tracked, qua List.Add()
+  thường thay vì `context.Add()`. EF Core không phân biệt được "object mới toanh" với "object cũ đang
+  gắn lại" khi key đã có giá trị non-default → đánh dấu `Modified` thay vì `Added` → sinh câu UPDATE
+  nhắm vào row chưa từng tồn tại → `DbUpdateConcurrencyException` "affected 0 row(s)". Đã sửa cả 2 chỗ
+  sang `context.Add(...)`, đã verify bằng SQL log + ChangeTracker dump thực tế trước/sau fix.
+  **Còn thiếu (chưa làm, ghi lại vì phát hiện khi sửa bug trên):** `CompleteOne`'s recurrence-reset
+  path (dòng ghi lại `reset.Conditions` sau khi tick 1 task lặp lại) hiện KHÔNG có test nào cover
+  trường hợp `RecurrenceResetResult.Conditions` khác rỗng — `FixedOffsetRecurrenceResetter` trong
+  `Fixtures.cs` (test helper) luôn trả `Conditions: []`. Bug y hệt (Modified thay vì Added) đang ẩn ở
+  đây, đã fix cùng lúc theo cùng nguyên nhân gốc, nhưng KHÔNG có test regression riêng chứng minh —
+  nên thêm 1 test ở `TaskRepositoryCompletionTests.cs` dùng 1 resetter trả về conditions non-empty
+  rồi assert conditions đó thực sự persist sau `ToggleAsync` trên task lặp lại, để khoá path này lại.
+
+- [ ] **★★★★ W1-A DONE 2026-07-18 (Volar.Core port, agent W1-A):** `windows/Volar.Windows.sln` +
+  `windows/Directory.Build.props` (net9.0, Nullable enable, TreatWarningsAsErrors true,
+  EnforceCodeStyleInBuild true) + stub `.csproj` cho 6 project (`Volar.Domain/Data/Speech/
+  Parsing/Reminders/Orchestrator`) + 2 test stub (`Volar.Domain.Tests`, `Volar.Reminders.Tests`).
+  `src/Volar.Core/` port 1:1 từ `VolarCore/Sources/VolarCore/` (6 file, ~700 dòng C#, ZERO NuGet
+  dependency, chỉ BCL). `tests/Volar.Core.Tests/` port toàn bộ 57 test case từ VolarCore/Tests
+  (swift-testing → xUnit `[Fact]`, giữ nguyên n=500 shuffle-determinism test).
+  **CHƯA BUILD ĐƯỢC — .NET SDK chưa cài xong trên máy** (`dotnet --list-sdks` rỗng dù `dotnet.exe`
+  đã có ở `C:\Program Files\dotnet`; không thấy `sdk\` subfolder). Code đã tự-review kỹ (đối chiếu
+  từng hàm Swift↔C#, trace tay các test case số học qua) nhưng **CẦN `dotnet build` + `dotnet test`
+  thật trước khi tin tưởng** — chạy lại khi SDK cài xong.
+  ⚠️ **TRAP cho các agent Wave sau (W1-B trở đi) — ĐỌC TRƯỚC KHI VIẾT CODE Ở PROJECT KHÁC
+  `Volar.Domain`/`Volar.Data`/v.v.:** `Volar.Core.TaskStatus` (enum) trùng tên với BCL
+  `System.Threading.Tasks.TaskStatus` (System.Threading.Tasks nằm trong 5 implicit global using
+  mặc định của SDK). Trong chính `Volar.Core` và trong `Volar.Core.Tests` (namespace con của
+  `Volar.Core`) thì KHÔNG ambiguous — namespace-cha có priority cao hơn using-directive nên
+  `TaskStatus` trần tự resolve đúng về `Volar.Core.TaskStatus`. NHƯNG các project SIBLING của
+  `Volar.Core` (`Volar.Domain`, `Volar.Speech`, `Volar.Parsing`, v.v. — namespace không lồng bên
+  trong `Volar.Core`) SẼ bị lỗi `CS0104 ambiguous reference` nếu dùng `TaskStatus` trần dù đã có
+  `using Volar.Core;`. Cách xử lý khi gặp: luôn viết đủ `Volar.Core.TaskStatus`, hoặc thêm
+  `using TaskStatus = Volar.Core.TaskStatus;` ở đầu file, hoặc (khuyên dùng nếu lặp lại nhiều)
+  `<Using Remove="System.Threading.Tasks" />` trong .csproj của project đó nếu không cần Task/
+  TaskStatus của threading. (2026-07-18)
+
+- [ ] **★★★★ WINDOWS PORT 2026-07-18 (branch `window`, worktree `C:\projects\voci-windows`):** Plan đầy đủ ở `specs/003-windows-port/plan.md`. Stack chốt: .NET 9 + WinUI 3 + EF Core/SQLite + Whisper.net(+Groq) + NLParser rule-based tier-1 + Supabase parse. Trạng thái: plan xong, **chưa viết dòng code nào**. Quyết định còn treo:
+  - ✅ **Hotkey — ĐÃ ĐẢO QUYẾT ĐỊNH 2026-07-19: dùng `RegisterHotKey`, TOGGLE-ONLY.** Bỏ hoàn toàn `WH_KEYBOARD_LL`.
+    **Lý do đảo:** quyết định ngày 18/07 (dùng hook để giữ "push-to-talk như mac") dựa trên **tiền đề SAI do Opus suy diễn mà không đọc file**. Sự thật: `Volar/Sources/Speech/HotkeyManager.swift` dòng 1 ghi rõ "**toggle-to-talk**" — ⌃⌥M nhấn để bắt đầu, nhấn lại để dừng; `onKeyUp` có trong chữ ký nhưng **không bao giờ được gọi**. Hold-to-talk CHƯA TỪNG tồn tại trong bản mac. Toggle chỉ cần key-down → `RegisterHotKey` là đủ.
+    **Được gì:** hết rủi ro antivirus gắn cờ, hết rủi ro thẩm định Microsoft Store, hết nguy cơ hook chậm làm treo bàn phím toàn hệ thống, hết nguy cơ kẹt micro khi mất sự kiện key-up. Code đơn giản hơn nhiều.
+    **Mất gì:** nếu sau này muốn push-to-talk thật thì phải làm lại (ghi nhận tech debt, không phải regression vì mac cũng không có).
+    **Bài học:** không được suy diễn hành vi bản mac từ tên gọi/tài liệu — phải mở file đọc trước khi trình bày cho anh Khôi như dữ kiện.
+  - **Hoãn có chủ ý (parity với mac hiện tại):** StoreKit/monetization → Microsoft Store IAP hoặc Stripe, chưa làm. DeviceCheck/App Attest → không có tương đương Windows, stub, chưa thiết kế lại chống lạm dụng free-tier.
+  - **Tuỳ chọn chưa làm:** local SLM parse (Phi-4-mini qua ONNX Runtime GenAI) — mặc định TẮT, bật trong Settings thì tải model on-demand (Wave 2-A).
+  - **Khác biệt hành vi đã chấp nhận:** tray icon không hiện text động như MenuBarExtra (chỉ tooltip); toast bị Focus Assist chặn được, tối đa 5 nút; không có App Sandbox → không có security-scoped bookmark.
+  - ⏳ **W1-B DONE (163 test xanh) — CẦN REVIEW NLParser.cs (807 dòng):** `NSDataDetector` không có tương đương .NET → agent **thiết kế lại** bộ detect ngày/giờ (`TryDetectExplicitTime`), KHÔNG phải port 1:1. Phải rà toàn bộ bảng từ chỉ thời gian tiếng Việt. **ĐÃ CHỐT: "khuya" giữ nguyên giờ, KHÔNG +12** ("2h khuya" = 02:00), và nếu giờ đó đã trôi qua trong ngày thì hiểu là rạng sáng hôm sau — hiện agent đang map "khuya" như "tối" (+12) = SAI, chưa sửa. Nghi vấn khác agent tự nêu: `title.dropFirst` (grapheme) vs `title[len..]` (UTF-16) lệch nếu input tiếng Việt dạng NFD; `TimeBadge`/`DurationLabel` dùng InvariantCulture thay vì locale máy.
+  - ✅ **Bug DST bắt được ở W1-B:** `TimeZoneInfo.ConvertTimeToUtc` ném exception khi giờ local rơi vào spring-forward gap → mọi recurrence/reminder trúng ngày đổi giờ sẽ crash. Đã sửa sang `GetUtcOffset` + test. Chỗ này bên Swift có comment tự nhận "UNVERIFIED".
+  - **Rủi ro nền:** bản macOS **chưa build xanh bao giờ** → port dựa trên code chứ không dựa trên app đang chạy; sai sót bản mac sẽ nhân đôi sang Windows. (2026-07-18)
+
 - [ ] **★★★ PROGRESS 2026-07-17 (TIẾP TỪ ĐÂY — supersedes các mục ★★/★ cũ bên dưới):** Feature 002 gần xong ship-gate P1+P2. Đã push remote. **RENAME: Voci→Volar** (paths `Volar/`, `VolarCore`, tokens `Volar*`, scheme `volar://`; repo path vẫn `C:\projects\voci`). Trạng thái:
   - ✅ **Phase 1–5** code-complete + Opus review + fix + committed + pushed (P1/2 engine+persistence, P3 capture, P3b conflict, P4 reminders+spoken-delivery, P5 voice-done+auto-advance+sweep). TẤT CẢ CHƯA build Mac.
   - ⏳ **Phase 6** (orchestrator US4): subsystem xong commit `a2a066f` (DelegationTracker/AppLinkHandler/ClaudeCodeConnector); **app-wiring agent ĐANG CHẠY** (AppState/VolarApp/MenuBarLabel/TodayView/PopoverView/SettingsView). Xong → Opus review → fix → đóng.
