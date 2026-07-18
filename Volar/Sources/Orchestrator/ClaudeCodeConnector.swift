@@ -41,6 +41,12 @@ final class ClaudeCodeConnector {
 
     /// Human-readable failure for every throwing path here. Never a crash — malformed input,
     /// missing files, and sandbox-access failures all resolve to one of these.
+    ///
+    /// FIX C (reviewer): still a single-shape struct, not an enum with multiple cases — grepped
+    /// the whole app (`SettingsView.swift`, `AppState.swift`, `AppLinkHandler.swift`) and nothing
+    /// switches over this type, so there's no exhaustive-switch compile risk either way. Kept it
+    /// a struct and reused this one shape for the new "Stop is present but not an array" guard
+    /// below rather than inventing an enum case, to keep the change minimal.
     struct ConnectorError: LocalizedError {
         let message: String
         var errorDescription: String? { message }
@@ -53,7 +59,12 @@ final class ClaudeCodeConnector {
     /// our hook* on disconnect. Any command containing this substring is considered ours;
     /// everything else — however it's shaped — is left completely untouched.
     private static let markerSubstring = "\(scheme)://"
-    private static let hookCommand = "open \"\(scheme)://ai-done?cwd=$PWD\""
+    /// FIX 4 (reviewer): `$PWD` is base64-encoded before being embedded in the `cwd=` query param
+    /// — an un-encoded path containing a space/`#`/`&`/non-ASCII byte would otherwise break the
+    /// URL Claude Code's shell hook constructs. `AppLinkHandler.decodedCwd` decodes it back on
+    /// receipt (falling back to the raw value for a hook installed by a previous build).
+    /// // UNVERIFIED: macOS base64(1) default output is unwrapped for short input — verify on Mac.
+    private static let hookCommand = "open \"\(scheme)://ai-done?cwd=$(printf %s \\\"$PWD\\\" | base64)\""
     private static let settingsFileName = "settings.json"
 
     /// UserDefaults key for a durably-persisted bookmark to the granted `~/.claude` directory,
@@ -104,19 +115,33 @@ final class ClaudeCodeConnector {
         }
 
         // No bookmark yet — best-effort, sandbox-limited fallback (see doc comment above).
+        //
+        // FIX D (reviewer): `FileManager.default.homeDirectoryForCurrentUser` under App Sandbox
+        // resolves to the SANDBOX CONTAINER's home, not the user's real home — a guaranteed false
+        // negative. `NSHomeDirectoryForUser(NSUserName())` looks the real home up via directory
+        // services directly, bypassing the sandbox's redirected `$HOME` (same precedent as
+        // SettingsView.swift's NSOpenPanel pre-targeting, ~line 619-630). Fail closed (report
+        // not-detected) if that lookup itself returns nil, rather than guessing.
+        guard let realHome = NSHomeDirectoryForUser(NSUserName()) else { return false }
         var isDir: ObjCBool = false
-        let path = FileManager.default.homeDirectoryForCurrentUser
+        let path = URL(fileURLWithPath: realHome, isDirectory: true)
             .appendingPathComponent(".claude", isDirectory: true).path
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDir) && isDir.boolValue
     }
 
     // MARK: - previewHookEntry()
 
-    /// The exact JSON hook entry that `connect` will append into `hooks.Stop`, for the preview
-    /// UI. Matches app-links.md's example byte-for-byte:
-    /// `{"type":"command","command":"open \"volar://ai-done?cwd=$PWD\""}`
+    /// The exact JSON hook-group entry that `connect` will append into `hooks.Stop`, for the
+    /// preview UI. Matches app-links.md's example byte-for-byte:
+    /// `{"hooks":[{"type":"command","command":"open \"volar://ai-done?cwd=$(printf %s \"$PWD\" | base64)\""}]}`
+    ///
+    /// FIX A (reviewer): Claude Code's real settings schema requires Stop-hook entries to be
+    /// matcher-group objects — `{"hooks":[{"type":"command","command":"..."}]}` — not a bare
+    /// `{"type":"command","command":"..."}` dict placed directly in the `Stop` array. Stop hooks
+    /// take no `matcher` key (unlike PreToolUse/PostToolUse), so the group is just `{"hooks":[…]}`.
+    /// The previous flat shape silently never fired.
     func previewHookEntry() -> String {
-        "{\"type\":\"command\",\"command\":\"\(Self.jsonEscape(Self.hookCommand))\"}"
+        "{\"hooks\":[{\"type\":\"command\",\"command\":\"\(Self.jsonEscape(Self.hookCommand))\"}]}"
     }
 
     // MARK: - connect()
@@ -127,24 +152,28 @@ final class ClaudeCodeConnector {
     ///
     ///   1. `startAccessingSecurityScopedResource()` / `stopAccessingSecurityScopedResource()`,
     ///      paired via `defer` so a thrown error still releases the scope.
-    ///   2. If `settings.json` exists, copy it byte-for-byte to
-    ///      `settings.json.volar-backup-<timestamp>` **before any other step that could touch
-    ///      it** — the backup always precedes any write, even a failed one.
-    ///   3. Parse tolerantly: missing file, empty file, or JSON that fails to parse, or whose
-    ///      root isn't an object, all resolve to an empty `{}` root — this can never throw or
-    ///      execute anything, it only ever falls back to the safe empty case.
-    ///   4. Additive-merge: read `hooks.Stop` as an array (creating `hooks`/`Stop` if absent),
+    ///   2. Parse tolerantly (read-only, no side effects yet): missing file, empty file, or JSON
+    ///      that fails to parse, or whose root isn't an object, all resolve to an empty `{}` root
+    ///      — this can never throw or execute anything, it only ever falls back to the safe empty
+    ///      case.
+    ///   3. FIX B (reviewer): if a marker entry is already present, skip straight to step 6 —
+    ///      refresh the bookmark and return — without creating a backup or rewriting the file at
+    ///      all, since nothing would change. (Previously this happened on every call, including
+    ///      already-connected no-ops.)
+    ///   4. Otherwise, if `settings.json` exists, copy it byte-for-byte to
+    ///      `settings.json.volar-backup-<timestamp>` **before the write that's about to happen**.
+    ///   5. Additive-merge: read `hooks.Stop` as an array (creating `hooks`/`Stop` if absent),
     ///      keep every existing element exactly as-is (whatever shape it is — dict or not), and
-    ///      only *append* our entry if no element already contains the `volar://` marker. Every
-    ///      other key under `hooks` (e.g. `PreToolUse`) and every other entry in `Stop` is
-    ///      passed through untouched — this is what makes the merge additive rather than a
-    ///      replace.
-    ///   5. Serialize and write atomically (`Data.write(options: .atomic)` — write-to-temp +
-    ///      rename, so a crash/interrupt mid-write can't leave a truncated `settings.json`).
+    ///      append our entry (FIX C: if `hooks.Stop` exists but isn't an array, throw instead of
+    ///      silently replacing whatever's there). Every other key under `hooks` (e.g.
+    ///      `PreToolUse`) and every other entry in `Stop` is passed through untouched — this is
+    ///      what makes the merge additive rather than a replace. Then serialize and write
+    ///      atomically (`Data.write(options: .atomic)` — write-to-temp + rename, so a
+    ///      crash/interrupt mid-write can't leave a truncated `settings.json`).
     ///   6. Persist a durable bookmark for this connector's own `detect()` bookkeeping.
     ///
-    /// Idempotent: calling `connect` again when already connected re-validates/re-writes the
-    /// same content rather than appending a second marker entry.
+    /// Idempotent: calling `connect` again when already connected is now a read-only no-op (see
+    /// FIX B above) rather than appending a second marker entry.
     func connect(bookmarkedClaudeDir: URL) throws {
         guard bookmarkedClaudeDir.startAccessingSecurityScopedResource() else {
             throw ConnectorError(message: "Volar couldn't access the ~/.claude folder you granted. Please reconnect via Settings and try again.")
@@ -154,8 +183,32 @@ final class ClaudeCodeConnector {
         let settingsURL = bookmarkedClaudeDir.appendingPathComponent(Self.settingsFileName)
         let fm = FileManager.default
 
-        // Backup first, always, before any parse/merge/write — even if what's on disk turns out
-        // to be malformed. If there's no existing file there's nothing to protect.
+        // Read + parse first (read-only) so we can tell whether we're already connected before
+        // deciding whether a backup/write is even needed (FIX B) — this doesn't touch the file.
+        let existingData = (try? Data(contentsOf: settingsURL)) ?? Data()
+        var root = Self.parseTolerant(existingData)
+
+        var hooks = (root["hooks"] as? [String: Any]) ?? [:]
+
+        // FIX C (reviewer): `hooks.Stop` present but not an array (some other, unexpected shape)
+        // must not be silently clobbered with `[ourEntry]` — that would destroy user data. Fail
+        // loudly instead, matching how disconnect() guards a missing/malformed `hooks` object.
+        if let existingStopValue = hooks["Stop"], !(existingStopValue is [Any]) {
+            throw ConnectorError(message: "Volar found hooks.Stop in your settings.json but it isn't an array (unexpected shape), so nothing was changed. Please check settings.json manually.")
+        }
+
+        var stop = Self.stopArray(from: hooks)
+
+        let alreadyConnected = stop.contains { Self.isMarkerEntry($0) }
+        if alreadyConnected {
+            // FIX B (reviewer): nothing to change — skip the backup/write entirely, but still
+            // keep this connector's own bookkeeping fresh so later detect() calls keep resolving.
+            Self.persistBookmark(for: bookmarkedClaudeDir)
+            return
+        }
+
+        // Backup first, always, before the write about to happen — even if what's on disk turns
+        // out to be malformed. If there's no existing file there's nothing to protect.
         if fm.fileExists(atPath: settingsURL.path) {
             let backupURL = bookmarkedClaudeDir.appendingPathComponent(
                 "\(Self.settingsFileName).volar-backup-\(Self.timestampToken())"
@@ -167,16 +220,7 @@ final class ClaudeCodeConnector {
             }
         }
 
-        let existingData = (try? Data(contentsOf: settingsURL)) ?? Data()
-        var root = Self.parseTolerant(existingData)
-
-        var hooks = (root["hooks"] as? [String: Any]) ?? [:]
-        var stop = Self.stopArray(from: hooks)
-
-        let alreadyConnected = stop.contains { Self.isMarkerEntry($0) }
-        if !alreadyConnected {
-            stop.append(Self.hookEntryObject())
-        }
+        stop.append(Self.hookEntryObject())
         hooks["Stop"] = stop
         root["hooks"] = hooks
 
@@ -290,18 +334,40 @@ final class ClaudeCodeConnector {
         hooks["Stop"] as? [Any] ?? []
     }
 
-    /// True only for entries that are objects with a `command` string containing our scheme
-    /// marker. Anything else (not an object, no `command` key, `command` isn't a string, or a
-    /// `command` that doesn't mention `volar://`) is never considered "ours".
+    /// True for entries that contain a `command` string mentioning our scheme marker, in EITHER
+    /// of two shapes so disconnect() cleans up entries written by either build:
+    ///   - the current matcher-group shape: `{"hooks":[{"type":"command","command":"volar://…"}]}`
+    ///     — a dict whose `hooks` value is an array of dicts, any of which has a matching command.
+    ///   - the old (pre-FIX-A) flat shape: `{"type":"command","command":"volar://…"}` — a bare
+    ///     dict with a top-level `command` key, for backward-compat cleanup of entries written by
+    ///     a previous build.
+    /// Anything else is never considered "ours".
     private static func isMarkerEntry(_ element: Any) -> Bool {
-        guard let dict = element as? [String: Any], let command = dict["command"] as? String else {
-            return false
+        guard let dict = element as? [String: Any] else { return false }
+
+        // New shape: {"hooks": [{"type": "command", "command": "..."}]}
+        if let innerHooks = dict["hooks"] as? [Any] {
+            for inner in innerHooks {
+                if let innerDict = inner as? [String: Any],
+                   let command = innerDict["command"] as? String,
+                   command.contains(Self.markerSubstring) {
+                    return true
+                }
+            }
         }
-        return command.contains(Self.markerSubstring)
+
+        // Old (pre-FIX-A) flat shape: {"type": "command", "command": "..."}
+        if let command = dict["command"] as? String, command.contains(Self.markerSubstring) {
+            return true
+        }
+
+        return false
     }
 
+    /// FIX A (reviewer): matcher-group shape — `{"hooks":[{"type":"command","command":...}]}` —
+    /// not the old bare `{"type":"command","command":...}`. See `previewHookEntry()` doc comment.
     private static func hookEntryObject() -> [String: Any] {
-        ["type": "command", "command": hookCommand]
+        ["hooks": [["type": "command", "command": hookCommand]]]
     }
 
     private static func timestampToken() -> String {

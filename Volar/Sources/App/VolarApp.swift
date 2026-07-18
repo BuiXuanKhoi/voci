@@ -49,6 +49,13 @@ struct VolarApp: App {
                 .task {
                     // Starts the global ⌃⌥M toggle-capture hotkey (degrades gracefully without
                     // Accessibility permission — see AppState.activateServices).
+                    // F1/F2 fix: ALSO called from `AppDelegate.applicationDidFinishLaunching` below
+                    // — this is an LSUIElement menu-bar app that normally launches with this window
+                    // closed, so relying solely on this `.task` would leave the hotkey/rebuild/
+                    // overdue-scan/delegation-timer never started until the user happens to open the
+                    // window. The double call is intentional and safe: `hotkey.start` tears down any
+                    // existing registration first, `startDelegationTimer` invalidates any existing
+                    // timer first, and `rebuildFromStorage`/the overdue scan are both idempotent.
                     appState.activateServices()
 
                     // Daily morning-frog prompt: once per calendar day, once onboarding is done,
@@ -228,6 +235,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var appState: AppState?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // F1/F2 fix (MAJOR, liveness): this is an LSUIElement menu-bar app — `activateServices()`
+        // used to be reachable ONLY from the main `Window`'s `.task` above, which never runs while
+        // the app launches with that window closed (the normal case for a menu-bar-only app). That
+        // left the global ⌃⌥M hotkey, `rebuildFromStorage()`, the FR-016 overdue scan, and the
+        // delegation timer all dead until the user happened to open the window. Calling it here too
+        // — right after `appState` is guaranteed assigned (`VolarApp.init()` sets it before this
+        // delegate method can fire) — closes that gap. The double call (here + the `Window`'s
+        // `.task`) is intentional and safe; see that call site's own comment for why each half of
+        // `activateServices()` tolerates being invoked twice.
+        appState?.activateServices()
+
         // Best-effort; ignore the result/error — notifications are a nice-to-have, not required
         // for the app to function (see backlog: real notification scheduling not yet wired).
         // `@Sendable` is load-bearing: without it, a closure literal formed in this @MainActor

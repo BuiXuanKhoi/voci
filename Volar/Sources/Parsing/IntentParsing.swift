@@ -141,7 +141,12 @@ final class IntentRouter: IntentParser {
         }
 
         lastRoute = .heuristic
-        let heuristicResult = await heuristic.parse(transcript, now: now, openTaskTitles: [])
+        // R5: every tier sees the SAME (possibly-empty) `titles` list computed once above — this
+        // was previously hardcoded to `[]` here, silently starving the heuristic tier (the ONLY
+        // tier available on macOS 14/15) of dependency-matching context and capping its
+        // taskDone-condition confidence below the 0.7 auto-resolve bar (see
+        // `dependencyConfidence` in `NLParser.swift`).
+        let heuristicResult = await heuristic.parse(transcript, now: now, openTaskTitles: titles)
         if !heuristicResult.isEmpty {
             return Self.cap(heuristicResult)
         }
@@ -367,8 +372,17 @@ enum ParsedTaskValidation {
         }
 
         let estimateMinutes: ParsedValue<Int>? = raw.estimateMinutes.flatMap { c in
-            guard validConfidence(c.confidence), c.value.isFinite, c.value > 0 else { return nil }
-            return ParsedValue(value: Int(c.value.rounded()), confidence: c.confidence)
+            // `Int(_:)` on a `Double` TRAPS when the value is out of `Int`'s representable range
+            // (e.g. a well-formed 200 response with `estimateMinutes: 1e300` — the server only
+            // validates `isFinite && > 0`, not any upper bound). `Int(exactly:)` returns `nil`
+            // instead of trapping, and the `1...1440` bound (mirrors this file's own reminder/
+            // heuristic estimate caps — 24h) rejects any in-range-for-Int but nonsensical duration
+            // the same way a schema violation is rejected everywhere else in this function: drop
+            // only this field, keep the rest of the task (constitution II).
+            guard validConfidence(c.confidence), c.value.isFinite, c.value > 0,
+                  let est = Int(exactly: c.value.rounded()), (1...1440).contains(est)
+            else { return nil }
+            return ParsedValue(value: est, confidence: c.confidence)
         }
 
         let priority: ParsedValue<Int>? = raw.priority.flatMap { c in

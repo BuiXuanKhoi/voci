@@ -84,12 +84,44 @@ final class ReminderScheduler: NSObject {
         }
 
         let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
-        let dueButMissed = fetchAllRecords().filter { $0.state == "scheduled" && $0.fireAt <= now }
-        for record in dueButMissed {
-            fire(record, using: byId)
-        }
+        // FIX B: a notification the OS already delivered while the app was backgrounded/not
+        // running never routed through `willPresent`/`presentationDecision` (those only fire
+        // when the app is alive to receive the delegate callback), so its record is stuck at
+        // `.scheduled` forever — the due-but-missed pass below would then treat it as missed and
+        // re-fire it as a SECOND notification on every future launch/wake. Reconcile against
+        // `UNUserNotificationCenter.deliveredNotifications()` first so an already-delivered record
+        // is marked `.delivered` (not re-fired) before the due-but-missed pass runs.
+        // `deliveredNotifications()` is async-only, so this whole rebuild (reconciliation +
+        // due-but-missed pass + refill, in that order) moves inside a single `_Concurrency.Task`
+        // hop — same fire-and-forget pattern `refillSystemRequests()` already uses elsewhere in
+        // this file — so callers keep calling this as a plain synchronous method.
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            await self.reconcileDeliveredNotifications()
 
-        refillSystemRequests()
+            let dueButMissed = self.fetchAllRecords().filter { $0.state == "scheduled" && $0.fireAt <= now }
+            for record in dueButMissed {
+                self.fire(record, using: byId)
+            }
+
+            self.refillSystemRequests()
+        }
+    }
+
+    /// FIX B helper: marks every `.scheduled` record whose id matches an already-OS-delivered
+    /// notification's identifier as `.delivered`, in a single batched save (one `fetchAllRecords()`
+    /// — no fetch-in-loop). No-op if nothing was delivered or nothing needs updating.
+    private func reconcileDeliveredNotifications() async {
+        let delivered = await center.deliveredNotifications()
+        guard !delivered.isEmpty else { return }
+        let deliveredIds = Set(delivered.compactMap { UUID(uuidString: $0.request.identifier) })
+        guard !deliveredIds.isEmpty else { return }
+        var didChange = false
+        for record in fetchAllRecords() where record.state == "scheduled" && deliveredIds.contains(record.id) {
+            record.state = "delivered"
+            didChange = true
+        }
+        if didChange { save() }
     }
 
     /// Derives + persists this task's reminder set from its deadline × (`reminderOverride` ??
@@ -159,7 +191,25 @@ final class ReminderScheduler: NSObject {
     /// FR-017: resurface `taskId` at `date` (e.g. an `.afterDate` condition's target, per
     /// `VolarCore.nextResurfaceDate`). Scheduled ahead like a normal reminder — not fired
     /// immediately.
+    ///
+    /// FIX A: `AppState` calls this after EVERY mutation on a task with an `.afterDate`
+    /// condition, so a naive unconditional insert would pile up a new `.scheduled` "resurface"
+    /// row (and a duplicate system banner) on every single edit. Dedupe against any existing
+    /// not-yet-delivered resurface record for this task first: same `fireAt` -> no-op; different
+    /// `fireAt` -> update that one row in place instead of inserting a second.
     func scheduleResurface(at date: Date, taskId: UUID) {
+        if let existing = recordsForTask(taskId).first(where: { $0.offsetKind == "resurface" && $0.state == "scheduled" }) {
+            guard existing.fireAt != date else { return }
+            // The old `fireAt` may already be registered as a pending `UNNotificationRequest`
+            // under this record's identifier — drop it so `refillSystemRequests()` (below) treats
+            // the record as unregistered and re-posts it with the new trigger time, instead of
+            // leaving the stale-time request in place forever.
+            center.removePendingNotificationRequests(withIdentifiers: [existing.id.uuidString])
+            existing.fireAt = date
+            save()
+            refillSystemRequests()
+            return
+        }
         let record = ReminderRecord(taskId: taskId, fireAt: date, offsetKind: "resurface")
         context.insert(record)
         save()
@@ -199,7 +249,27 @@ final class ReminderScheduler: NSObject {
     /// decision instead of posting a new request (posting again here would duplicate the banner
     /// the system is already displaying).
     func presentationDecision(for recordId: UUID) -> Bool {
-        guard let record = fetchRecord(recordId), record.state == "scheduled" else { return false }
+        guard let record = fetchRecord(recordId) else { return false }
+        // FIX C (`VoiceDeliveryMode.voiceOnly`): this method's return value controls whether the
+        // OS shows the visual banner (`willPresent`'s completion handler passes `[.banner, .sound]`
+        // vs `[]`), so `.voiceOnly` is honored here by folding `mode != .voiceOnly` into both
+        // return paths below — the record is still marked delivered and voice still speaks per the
+        // existing gates in `evaluate(_:)` either way, only the visual presentation is suppressed.
+        // LIMITATION: `willPresent` only fires when the app process is alive to receive the
+        // delegate callback — a notification delivered while the app is fully unlaunched is shown
+        // by the OS with its own default presentation and never reaches this method, so
+        // `.voiceOnly` cannot suppress that banner.
+        let mode = Self.currentVoiceDeliveryMode()
+        // `fire(_:using:)` sets `record.state = "delivered"` BEFORE it posts the immediate
+        // `UNNotificationRequest` it fires for (notifyUnblocked/offerReschedule/due-but-missed
+        // recovery), so by the time the OS calls `willPresent` for that request, this record is
+        // already "delivered", not "scheduled" — `fire()` already ran `evaluate(_:)` (and the
+        // voice/gate decision) for it moments earlier. The old `state == "scheduled"` guard below
+        // therefore returned `false` here for EVERY immediate notification, silently suppressing
+        // all of them whenever the app was frontmost. Trust the decision `fire()` already made and
+        // show it, instead of re-evaluating gates a second time.
+        if record.state == "delivered" { return mode != .voiceOnly }
+        guard record.state == "scheduled" else { return false }
         guard let evaluation = evaluate(record, snapshot: nil) else {
             context.delete(record)
             save()
@@ -215,7 +285,7 @@ final class ReminderScheduler: NSObject {
         }
         save()
         refillSystemRequests()
-        return evaluation.shouldShow
+        return evaluation.shouldShow && mode != .voiceOnly
     }
 
     /// For this class's own `didReceive` conformance: routes a tapped action to a `TaskStore`
@@ -226,7 +296,8 @@ final class ReminderScheduler: NSObject {
         let now = Date()
         switch actionId {
         case ReminderAction.done:
-            store.toggle(record.taskId, now: now)
+            let taskId = record.taskId
+            store.toggle(taskId, now: now)
             record.state = "satisfied"
             // WG-C (FR-020 gap fix): this path deliberately bypasses `AppState.toggleDone` (its own
             // doc comment explains why — FR-014/015/016 forbid a notification action from touching
@@ -235,6 +306,20 @@ final class ReminderScheduler: NSObject {
             // `.volarTasksDidChange` and calls `AppState.refreshFromStore()` on the main actor, so
             // `MenuBarLabel.activeTask` catches up without needing the window foregrounded first.
             NotificationCenter.default.post(name: .volarTasksDidChange, object: nil)
+            // Mirrors `AppState.toggleDone` (`Sources/App/AppState.swift:542-548`, App-wiring-owned
+            // — read for reference only, not edited here): `store.toggle` can leave the task
+            // done/archived, OR reopen it in place (a recurring task resets to `.todo` with a fresh
+            // deadline). Either way this record alone isn't the whole story — cancel the REST of
+            // this task's reminders, and if it's still open, re-derive them from the new deadline.
+            // Without this, a recurring task's future reminders are silently lost forever:
+            // `ensureDerived` only derives for a task with zero records, so once this task has any
+            // records at all it's skipped on every later `rebuildFromStorage`.
+            if let fresh = store.fetchAll().first(where: { $0.id == taskId }) {
+                cancelReminders(taskId: taskId)
+                if fresh.status != .done, fresh.status != .archived {
+                    scheduleReminders(taskId: taskId)
+                }
+            }
         case ReminderAction.snooze10:
             reschedule(record, to: now.addingTimeInterval(10 * 60))
         case ReminderAction.tomorrow, ReminderAction.rescheduleTomorrow:
@@ -325,7 +410,7 @@ final class ReminderScheduler: NSObject {
         let recordId = record.id
         let offsetKind = record.offsetKind
         let task = evaluation.task
-        Task { @MainActor [weak self] in
+        _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
             await self.postImmediateRequest(recordId: recordId, offsetKind: offsetKind, task: task)
         }
@@ -386,7 +471,7 @@ final class ReminderScheduler: NSObject {
     /// the earliest-firing `.scheduled` records not already registered. Called after every
     /// mutation that could change what "nearest" means (schedule/cancel/deliver/action).
     private func refillSystemRequests() {
-        Task { @MainActor [weak self] in
+        _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
             let pending = await self.center.pendingNotificationRequests()
             let pendingIds = pending.compactMap { UUID(uuidString: $0.identifier) }
@@ -515,7 +600,11 @@ final class ReminderScheduler: NSObject {
     }
 
     private func save() {
-        try? context.save()
+        do {
+            try context.save()
+        } catch {
+            print("[Volar.ReminderScheduler] save failed: \(error)")
+        }
     }
 }
 
@@ -537,7 +626,7 @@ extension ReminderScheduler: UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let identifier = notification.request.identifier
-        Task { @MainActor [weak self] in
+        _Concurrency.Task { @MainActor [weak self] in
             guard let self, let recordId = UUID(uuidString: identifier) else {
                 // Not one of ours (foreign identifier) or the scheduler is gone — show it as the
                 // system would by default rather than silently eating a notification.
@@ -558,7 +647,7 @@ extension ReminderScheduler: UNUserNotificationCenterDelegate {
     ) {
         let identifier = response.notification.request.identifier
         let actionId = response.actionIdentifier
-        Task { @MainActor [weak self] in
+        _Concurrency.Task { @MainActor [weak self] in
             defer { completionHandler() }
             guard let self, let recordId = UUID(uuidString: identifier) else { return }
             self.handleAction(actionId, recordId: recordId)

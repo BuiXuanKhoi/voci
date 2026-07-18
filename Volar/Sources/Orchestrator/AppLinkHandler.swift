@@ -126,10 +126,13 @@ final class AppLinkHandler {
         // captured at delegate-time and is typically a project root; the signal's `cwd` is the
         // directory the agent actually ran in, which may be that root or a subdirectory of it —
         // so the match direction is "hint prefixes cwd", not the reverse.
-        if let cwd = params["cwd"], !cwd.isEmpty {
+        if let cwd = Self.decodedCwd(params["cwd"]), !cwd.isEmpty {
             let matches = waiting.filter { taskId in
                 guard let hint = delegation.cwdHint(for: taskId), !hint.isEmpty else { return false }
-                return cwd.hasPrefix(hint)
+                // FIX 5 (reviewer): plain `hasPrefix` is not path-boundary aware — "/Users/k/proj"
+                // would also match "/Users/k/project2". Require either an exact match or that the
+                // hint is followed by a path separator.
+                return cwd == hint || cwd.hasPrefix(hint.hasSuffix("/") ? hint : hint + "/")
             }
             if matches.count == 1, let only = matches.first {
                 resolve(only)
@@ -168,15 +171,48 @@ final class AppLinkHandler {
     // MARK: - capture
 
     private func handleCapture(params: [String: String]) {
-        guard let text = params["text"], !text.isEmpty else {
+        guard let rawText = params["text"] else {
             log("capture link missing required text= param — ignored")
+            return
+        }
+        // FIX 2 (abuse, reviewer): no length cap here previously — an arbitrarily large `text=`
+        // could be handed straight into the parse pipeline. Same 2000-char cap
+        // `CloudParser.maxTranscriptChars` enforces on typed/spoken transcripts
+        // (Sources/Parsing/CloudParser.swift) — an app-link is just another capture entry point
+        // and must not be able to smuggle a larger payload past it. `source` is cosmetic (stored
+        // in notes) and capped shorter.
+        let text = String(rawText.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
+        guard !text.isEmpty else {
+            log("capture link text was empty after trimming — ignored")
             return
         }
         guard let onCapture else {
             log("capture link received before the capture pipeline hook was wired — dropped")
             return
         }
-        onCapture(text, params["source"])
+        let source = params["source"].map { String($0.prefix(200)) }
+        onCapture(text, source)
+    }
+
+    /// FIX 4 (reviewer): `ClaudeCodeConnector`'s Stop-hook base64-encodes `$PWD` before embedding
+    /// it in the `cwd=` query param, since an un-encoded path containing a space/`#`/`&`/non-ASCII
+    /// byte would otherwise break the URL. Decode it back here. Falls back to the raw value for
+    /// backwards compatibility with a hook installed by a previous build that didn't encode it
+    /// (base64-decoding a plain path will almost always fail, since `/` isn't valid base64
+    /// alphabet in most real paths' first bytes — but if it happens to succeed and produce
+    /// garbage, the cwd match step below simply won't match anything, which is safe: at worst it
+    /// falls through to the disambiguation card, never a wrong resolve). Caps the result at 1000
+    /// chars either way — this value only ever feeds a prefix-match, never file I/O, but an
+    /// unbounded hostile/corrupted value shouldn't be carried around indefinitely.
+    private static func decodedCwd(_ raw: String?) -> String? {
+        guard let raw, !raw.isEmpty else { return nil }
+        let decoded: String
+        if let data = Data(base64Encoded: raw), let utf8 = String(data: data, encoding: .utf8) {
+            decoded = utf8
+        } else {
+            decoded = raw
+        }
+        return String(decoded.prefix(1000))
     }
 
     // MARK: - Parsing helpers

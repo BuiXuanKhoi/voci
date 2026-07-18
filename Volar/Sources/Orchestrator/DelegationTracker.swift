@@ -143,11 +143,23 @@ final class DelegationTracker {
     /// clearing the `.external` condition only flips it to `satisfied: true`, which makes the task
     /// ELIGIBLE for `nextTask()`/needs-review presentation; it does not touch `status`
     /// (Constitution II). Idempotent: a task with nothing unsatisfied to clear (already reviewed,
-    /// or never delegated) is a no-op, matching `TaskStore.clearFirstExternalCondition`'s own
+    /// or never delegated) is a no-op, matching `TaskStore.clearExternalCondition`'s own
     /// documented no-op behavior for that case.
+    ///
+    /// FIX 1 (security, reviewer): uses `TaskStore.clearExternalCondition(withPrefix:on:)` —
+    /// scoped to `Self.waitingPrefix` — instead of `clearFirstExternalCondition`, which cleared
+    /// whichever `.external` condition happened to be first regardless of whether it was actually
+    /// a waiting-on-AI gate. A hostile/errant `volar://ai-done` signal could otherwise flip a
+    /// HUMAN-tracked gate (e.g. "waiting on legal") that happened to sort first. Also: the
+    /// `DelegationMeta` entry is only removed when a matching waiting-on-AI condition genuinely
+    /// existed to clear — a signal that matches no real delegation (stale/no-op case) must not
+    /// blindly wipe scheduling state that was never touched.
     func markNeedsReview(taskId: UUID) {
-        _ = store.clearFirstExternalCondition(on: taskId)
-        metaStore.remove(taskId)
+        let hadWaitingCondition = currentCondition(taskId: taskId, matching: Self.isWaitingOnAI) != nil
+        _ = store.clearExternalCondition(withPrefix: Self.waitingPrefix, on: taskId)
+        if hadWaitingCondition {
+            metaStore.remove(taskId)
+        }
     }
 
     /// Batch reconcile card content at natural touchpoints (popover open / evening): the waiting
@@ -231,10 +243,17 @@ private final class DelegationMetaStore {
     /// which should never happen since only `set(_:for:)` ever writes one — is dropped rather than
     /// crashing; fails closed like every other JSON-blob read path in this codebase, e.g.
     /// `VolarTask.conditions`'s getter).
+    ///
+    /// FIX 6 (crash, reviewer): `UUID(uuidString:)` is case-insensitive, so a hand-edited or
+    /// cross-device-corrupted defaults blob containing both e.g. "abc…" and "ABC…" keys would
+    /// collide to the same `UUID` — `Dictionary(uniqueKeysWithValues:)` traps with `fatalError` on
+    /// a duplicate key. Uses `uniquingKeysWith:` instead so a corrupted store degrades to "keep
+    /// one of them" rather than crash-looping the app on every launch.
     func all() -> [UUID: DelegationMeta] {
-        Dictionary(uniqueKeysWithValues: load().compactMap { key, value in
-            UUID(uuidString: key).map { ($0, value) }
-        })
+        Dictionary(
+            load().compactMap { key, value in UUID(uuidString: key).map { ($0, value) } },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
     func pruneKeys(notIn liveIds: Set<UUID>) {

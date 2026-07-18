@@ -95,10 +95,28 @@ final class AppAttestDeviceCheckProvider: DeviceAttestationProvider {
             guard let nonce = Self.randomBytes(count: 32) else { return nil }
             let clientDataHash = Data(SHA256.hash(data: nonce))
 
-            // UNVERIFIED: DeviceCheck API — confirm `generateAssertion(_:clientDataHash:)`'s exact
-            // async/throws signature on macOS 26 SDK (real Apple surface takes `keyId: String`,
-            // returns raw `Data`).
-            let assertion = try await DCAppAttestService.shared.generateAssertion(keyId, clientDataHash: clientDataHash)
+            let assertion: Data
+            do {
+                // UNVERIFIED: DeviceCheck API — confirm `generateAssertion(_:clientDataHash:)`'s
+                // exact async/throws signature on macOS 26 SDK (real Apple surface takes
+                // `keyId: String`, returns raw `Data`).
+                assertion = try await DCAppAttestService.shared.generateAssertion(keyId, clientDataHash: clientDataHash)
+            } catch let dcError as DCError where dcError.code == .invalidKey || dcError.code == .invalidInput {
+                // A persisted `keyId` whose Secure Enclave key was lost (reinstall, OS-level
+                // invalidation, etc.) makes `generateAssertion` fail with `.invalidKey` FOREVER —
+                // nothing else ever clears the stored id, so every future call would silently
+                // fail this same way. `.invalidKey`/`.invalidInput` specifically mean the keyId
+                // itself is unusable (not a transient network/server issue), so clear BOTH the
+                // stored keyId and the attested flag here: the NEXT call's `currentOrNewKeyId()`
+                // then regenerates + re-attests from scratch. This call still returns `nil` (no
+                // token this round) — never retried inline, per this protocol's "never throws,
+                // nil means try again next time" contract.
+                // UNVERIFIED: `DCError.code` / `DCError.Code.invalidKey` / `.invalidInput` exact
+                // spelling — confirm against the real DeviceCheck framework on macOS 26 SDK.
+                defaults.removeObject(forKey: Self.keyIdDefaultsKey)
+                defaults.removeObject(forKey: Self.attestedDefaultsKey)
+                return nil
+            }
 
             // `keyId` is already the base64 `String` `generateKey()` returns (see
             // `currentOrNewKeyId` doc comment) — sent as-is, not re-encoded.
@@ -110,8 +128,10 @@ final class AppAttestDeviceCheckProvider: DeviceAttestationProvider {
             guard let json = try? JSONEncoder().encode(wire) else { return nil }
             return Self.base64URLNoPadding(json)
         } catch {
-            // Any failure (key generation, attestation, assertion, keychain/UserDefaults I/O) ->
-            // graceful nil, never a crash, never a partially-built token sent to the network.
+            // Any other failure (key generation, keychain/UserDefaults I/O, or the attestation
+            // path's rethrown `.invalidKey`/`.invalidInput` from `currentOrNewKeyId` below, which
+            // has already cleared the stored keyId itself) -> graceful nil, never a crash, never a
+            // partially-built token sent to the network.
             return nil
         }
         #else
@@ -144,12 +164,19 @@ final class AppAttestDeviceCheckProvider: DeviceAttestationProvider {
         defaults.set(keyId, forKey: Self.keyIdDefaultsKey)
 
         // Best-effort one-time attestation (see doc comment above for why failure isn't fatal).
+        // The flag must only be set on an actual success: `try?` alone would swallow the
+        // throw and still mark this key as attested, so a real failure (network blip, Apple
+        // service hiccup) would never be retried on a later call.
         if !defaults.bool(forKey: Self.attestedDefaultsKey) {
             if let challenge = Self.randomBytes(count: 32) {
                 let challengeHash = Data(SHA256.hash(data: challenge))
-                // UNVERIFIED: DeviceCheck API — `attestKey(_:clientDataHash:)` signature.
-                _ = try? await DCAppAttestService.shared.attestKey(keyId, clientDataHash: challengeHash)
-                defaults.set(true, forKey: Self.attestedDefaultsKey)
+                do {
+                    // UNVERIFIED: DeviceCheck API — `attestKey(_:clientDataHash:)` signature.
+                    _ = try await DCAppAttestService.shared.attestKey(keyId, clientDataHash: challengeHash)
+                    defaults.set(true, forKey: Self.attestedDefaultsKey)
+                } catch {
+                    // Leave the flag unset so a future call retries attestation.
+                }
             }
         }
         return keyId

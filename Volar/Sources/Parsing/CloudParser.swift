@@ -102,10 +102,34 @@ struct CloudParser: Sendable {
     /// `isIso8601WithZone` check (`_shared/schema.ts`) that requires a zone designator on `now`.
     private static func makeRequestFormatter() -> ISO8601DateFormatter { ISO8601DateFormatter() }
 
+    /// Truncates by UTF-16 code units — matching the server's validation (`_shared/schema.ts`
+    /// checks JS string `.length`, which counts UTF-16 units, not Unicode scalars or grapheme
+    /// clusters). Swift's `String.prefix(_:)`/`.count` count `Character`s (extended grapheme
+    /// clusters): a single emoji (optionally with skin-tone/ZWJ modifiers) is ONE `Character` but
+    /// can be MANY UTF-16 units, so emoji-heavy input could pass this client's old `Character`-
+    /// count cap while still exceeding the server's UTF-16-based cap — the server then 400s and
+    /// `IntentRouter` silently falls back to Heuristic, degrading quality for no visible reason.
+    /// Walks `Character`-by-`Character`, accumulating UTF-16 width, and stops BEFORE the running
+    /// total would exceed `maxUnits` — this never splits a grapheme cluster (unlike truncating the
+    /// raw UTF-16 view directly, which could cut a surrogate pair or a ZWJ sequence in half and
+    /// produce a different, possibly invalid, string). O(n) in the string's `Character` count.
+    private static func utf16Prefix(_ s: String, _ maxUnits: Int) -> String {
+        guard maxUnits > 0 else { return "" }
+        var result = String()
+        var used = 0
+        for ch in s {
+            let width = String(ch).utf16.count
+            guard used + width <= maxUnits else { break }
+            result.append(ch)
+            used += width
+        }
+        return result
+    }
+
     // MARK: Parse mode
 
     func parseDetailed(_ transcript: String, now: Date, openTaskTitles: [String]) async -> CloudParseOutcome {
-        let trimmed = String(transcript.prefix(maxTranscriptChars))
+        let trimmed = Self.utf16Prefix(transcript, maxTranscriptChars)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .unavailable }
 
@@ -123,7 +147,7 @@ struct CloudParser: Sendable {
             "now": Self.makeRequestFormatter().string(from: now),
         ]
         if !openTaskTitles.isEmpty {
-            payload["open_task_titles"] = Array(openTaskTitles.prefix(100)).map { String($0.prefix(200)) }
+            payload["open_task_titles"] = Array(openTaskTitles.prefix(100)).map { Self.utf16Prefix($0, 200) }
         }
 
         guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
@@ -176,10 +200,10 @@ struct CloudParser: Sendable {
 
         var payload: [String: Any] = [
             "mode": "breakdown",
-            "task_title": String(trimmedTitle.prefix(300)),
+            "task_title": Self.utf16Prefix(trimmedTitle, 300),
         ]
         if let notes, !notes.isEmpty {
-            payload["notes"] = String(notes.prefix(1000))
+            payload["notes"] = Self.utf16Prefix(notes, 1000)
         }
 
         guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {

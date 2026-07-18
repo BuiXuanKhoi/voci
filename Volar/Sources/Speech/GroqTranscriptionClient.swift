@@ -26,6 +26,25 @@ enum GroqTranscriptionError: Error, Sendable {
     case emptyTranscript
 }
 
+extension GroqTranscriptionError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .missingCredentials:
+            return "No Groq credentials are configured."
+        case .audioTooLarge(let bytes):
+            return "Recording is too large to upload (\(bytes) bytes)."
+        case .http(let status, _):
+            return "Groq request failed (HTTP \(status))."
+        case .decoding:
+            return "Couldn't read Groq's transcription response."
+        case .network(let message):
+            return "Network error talking to Groq: \(message)"
+        case .emptyTranscript:
+            return "Nothing was recognized in the recording."
+        }
+    }
+}
+
 /// Supplies the transcription endpoint + authorization. Injected so the real Groq key NEVER lives
 /// in the app binary: in production this returns the Volar **proxy** base URL + a short-lived
 /// app/user token (the proxy holds the Groq key and gates by paid tier); for local dev it can be

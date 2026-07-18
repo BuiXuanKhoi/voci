@@ -154,24 +154,13 @@ final class HotkeyManager {
         appState = nil
     }
 
-    /// Mirrors `stop()`'s Carbon teardown for the case where this instance is deallocated without
-    /// an explicit `stop()` call. Deliberately does NOT call `stop()` itself: `stop()` is
-    /// `@MainActor`-isolated (the whole class is), and Swift does not allow synchronously calling
-    /// an isolated method from a nonisolated `deinit`. Direct stored-property access is fine here
-    /// per Swift's deinit exception (no concurrent access can race a deinitializing instance), and
-    /// `UnregisterEventHotKey`/`RemoveEventHandler`/`Unmanaged.release()` are plain C calls with no
-    /// actor isolation of their own — so this stays within what a nonisolated deinit can do.
-    deinit {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
-        }
-        if let eventHandlerRef {
-            RemoveEventHandler(eventHandlerRef)
-        }
-        if let retainedSelfPointer {
-            Unmanaged<HotkeyManager>.fromOpaque(retainedSelfPointer).release()
-        }
-    }
+    // No `deinit`: teardown happens via `stop()`. A `deinit` here is unreachable while Carbon
+    // registration is live — `start()` hands Carbon `Unmanaged.passRetained(self)`, which keeps
+    // this instance alive for as long as `hotKeyRef`/`eventHandlerRef` are registered, and `stop()`
+    // is the only thing that releases that pointer. Swift 6 also forbids a `deinit` on a
+    // `@MainActor`-isolated class from touching non-Sendable MainActor-isolated stored properties
+    // like `EventHotKeyRef?`/`EventHandlerRef?`/`UnsafeMutableRawPointer?` (compile error under
+    // strict concurrency), so even if this were somehow reachable it could not be written this way.
 
     /// Same logic as the pre-Carbon `handle(keyCode:modifiers:isKeyDown:appState:)`, minus the
     /// keyCode/modifiers checks — Carbon only ever calls back for the exact combo registered in

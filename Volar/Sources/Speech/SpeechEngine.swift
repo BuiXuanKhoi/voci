@@ -48,4 +48,9 @@ protocol SpeechEngine: AnyObject {
     /// Ends capture. Streaming engines flush a final result; batch engines begin the upload and
     /// deliver the transcript through `onFinal` when it returns.
     func stop()
+
+    /// Immediately abandons the in-flight capture: stops recording, discards buffered/recorded
+    /// audio (deleting any temp file), and guarantees neither `onFinal` nor `onError` fires for
+    /// this session.
+    func cancel()
 }

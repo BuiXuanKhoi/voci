@@ -354,7 +354,11 @@ struct HeuristicNLParser: NLParser {
 
     private static func nextOccurrence(ofWeekday targetWeekday: Int, from now: Date, calendar: Calendar) -> Date {
         let currentWeekday = calendar.component(.weekday, from: now)
-        let daysToAdd = (targetWeekday - currentWeekday + 7) % 7
+        // When the spoken weekday equals today's weekday, `(target - current + 7) % 7` is 0 —
+        // that must mean "next <weekday>" (7 days out), NEVER "today" (a no-op that would make
+        // "thứ 2 mới làm"/"do it Monday" said ON a Monday silently resolve to right now).
+        let d = (targetWeekday - currentWeekday + 7) % 7
+        let daysToAdd = d == 0 ? 7 : d
         return calendar.date(byAdding: .day, value: daysToAdd, to: now) ?? now
     }
 

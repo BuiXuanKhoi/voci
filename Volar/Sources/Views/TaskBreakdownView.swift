@@ -150,53 +150,66 @@ struct TaskBreakdownView: View {
     // MARK: - Actions
 
     private var actions: some View {
-        HStack(spacing: 8) {
-            Button {
-                // Real per-step editing lands with the AI-breakdown generator; for now, "Edit"
-                // just dismisses like Cancel.
-                onClose()
-            } label: {
-                Text("Edit")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VolarColor.textPri)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-            }
-            .buttonStyle(.plain)
-            .background(Color.white.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .volarHairline(cornerRadius: 9)
-
-            Button {
-                onClose()
-            } label: {
-                Text("Cancel")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VolarColor.textPri)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-            }
-            .buttonStyle(.plain)
-            .background(Color.white.opacity(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .volarHairline(cornerRadius: 9)
-
-            Button {
-                onSave(steps.map(\.label))
-            } label: {
-                HStack(spacing: 8) {
-                    Text("Save all as tasks")
-                    Text("\u{21A9}").opacity(0.85)
+        VStack(alignment: .trailing, spacing: 6) {
+            HStack(spacing: 8) {
+                Button {
+                    // Real per-step editing lands with the AI-breakdown generator; for now, "Edit"
+                    // just dismisses like Cancel.
+                    onClose()
+                } label: {
+                    Text("Edit")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(VolarColor.textPri)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
                 }
-                .font(.system(size: 13, weight: .medium))
-                .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 34)
+                .buttonStyle(.plain)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .volarHairline(cornerRadius: 9)
+
+                Button {
+                    onClose()
+                } label: {
+                    Text("Cancel")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(VolarColor.textPri)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(Color.white.opacity(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .volarHairline(cornerRadius: 9)
+
+                // FIX G: the 5 steps above are hard-coded sample content ("Open Framer", "Draft
+                // headline + subhead", ...) — this button used to persist them as real tasks via
+                // `onSave`/`AppState.saveBreakdown`, silently adding sample junk to the user's list
+                // regardless of which task's context menu opened this sheet. Disabled (with an
+                // explanatory caption below) until a real breakdown generator actually produces
+                // per-task steps; `AppState.saveBreakdown` itself is untouched so wiring this back
+                // up later is a one-line change (drop `.disabled`).
+                Button {
+                    onSave(steps.map(\.label))
+                } label: {
+                    HStack(spacing: 8) {
+                        Text("Save all as tasks")
+                        Text("\u{21A9}").opacity(0.85)
+                    }
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(accentColors.solid)
+                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .shadow(color: accentColors.glow, radius: 12, y: 4)
+                .disabled(true)
             }
-            .buttonStyle(.plain)
-            .background(accentColors.solid)
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .shadow(color: accentColors.glow, radius: 12, y: 4)
+            Text("Breakdown generator coming soon")
+                .font(.system(size: 11))
+                .foregroundStyle(VolarColor.textMut)
         }
     }
 }

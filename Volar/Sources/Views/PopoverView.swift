@@ -122,6 +122,26 @@ struct PopoverView: View {
             .foregroundStyle(VolarColor.textMut)
         }
         .font(.system(size: 11.5))
+        // FIX D: the hint row above promises "Esc cancel", but nothing actually had
+        // `.keyboardShortcut(.cancelAction)` wired during `.recording`/`.parsing` — those two
+        // states show no Cancel button at all (`actionsRow`/`errorActionsRow`'s own Esc-bound
+        // Cancel/Dismiss buttons only ever render for `.parsed`/`.saving`/`.error`), so the
+        // promised shortcut silently did nothing. A zero-size, invisible button carries the
+        // shortcut instead of adding new visible chrome.
+        .background(escCancelButton)
+    }
+
+    /// FIX D: invisible `.cancelAction`-bound button, mounted only while the hint row's "Esc
+    /// cancel" copy has no other Cancel control backing it up.
+    @ViewBuilder
+    private var escCancelButton: some View {
+        if appState.captureState == .recording || appState.captureState == .parsing {
+            Button("") { appState.cancelCapture() }
+                .keyboardShortcut(.cancelAction)
+                .opacity(0)
+                .frame(width: 0, height: 0)
+                .accessibilityHidden(true)
+        }
     }
 
     @ViewBuilder
@@ -480,7 +500,14 @@ struct PopoverView: View {
     /// confident match — and it MUST NOT auto-attach: show the picker instead.
     @ViewBuilder
     private func taskDoneRow(titleQuery: String, confidence: Double, index: Int, draft: ConfirmDraft) -> some View {
-        if let resolvedID = draft.resolvedTaskDone[index], confidence >= 0.7 {
+        // FIX C: used to also require `confidence >= 0.7`, so an explicit LOW-confidence picker
+        // choice (`resolveTaskDone`, constitution II's whole reason for existing) rendered no
+        // feedback at all — the resolved chip only ever showed for the auto-resolved (>=0.7) path.
+        // `draft.resolvedTaskDone[index]` alone is the correct gate: it's populated by BOTH
+        // `preResolveConditions` (confident auto-match) AND the user's own explicit picker tap
+        // (`AppState.resolveTaskDone`), and an unresolved condition is simply absent from it either
+        // way (falls through to the picker below, unchanged).
+        if let resolvedID = draft.resolvedTaskDone[index] {
             let title = appState.openTasks.first { $0.id == resolvedID }?.title ?? titleQuery
             Chip(
                 label: "After: \(title)",

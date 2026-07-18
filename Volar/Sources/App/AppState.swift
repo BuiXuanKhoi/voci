@@ -329,6 +329,13 @@ final class AppState {
     /// timed flash.
     private(set) var lastAppLinkAt: Date?
     private var delegationTimer: Timer?
+    /// FIX B: owns the focus-session 1s countdown — moved here from `FocusOverlay`'s own
+    /// `Timer.publish`, which stopped firing the instant the overlay window closed (the menu bar's
+    /// `focusSecondsLeft` readout froze and the session never auto-ended). Mirrors
+    /// `delegationTimer`'s exact construction pattern (`startDelegationTimer()`) so this survives
+    /// the same way regardless of which window/view is on screen. See `startFocus()`/`endFocus()`/
+    /// `focusTick()`.
+    private var focusTimer: Timer?
 
     // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
 
@@ -648,8 +655,20 @@ final class AppState {
                 self.captureState = .error
                 return
             }
-            engine.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
-            engine.onError = { [weak self] error in self?.handleCaptureError(error) }
+            // FIX 2b (privacy seam): guard against a late callback landing after this session was
+            // superseded (Esc/cancel/a fresh capture already started) — without this, a `.stop()`
+            // caller (`stopCapture`/`confirmSave`'s siblings) that genuinely wants the final result
+            // is unaffected, but a callback arriving after `cancelCapture`/`dismissVoiceDoneConfirm`
+            // already moved on (now routed through `.cancel()`, see those methods below) can no
+            // longer resurrect a confirm card the user already dismissed.
+            engine.onFinal = { [weak self] transcript in
+                guard let self, self.captureSession == session else { return }
+                self.finishRecording(transcript: transcript)
+            }
+            engine.onError = { [weak self] error in
+                guard let self, self.captureSession == session else { return }
+                self.handleCaptureError(error)
+            }
             // Apple-only: server-consent + (locale already applied via setRecognitionLocale).
             // WhisperKit/Groq auto-detect language, so there's nothing analogous to wire for them.
             if let apple = engine as? SpeechCapture {
@@ -698,7 +717,12 @@ final class AppState {
         voiceDoneNoMatchTranscript = nil
         pendingCloudConsent = false
         pendingParseTranscript = nil
-        runningEngine?.stop()
+        // FIX 2a (privacy seam): `.stop()` means "finish and deliver" — Groq would still upload the
+        // in-flight audio and a late `onFinal` could pop a confirm card after Esc. `.cancel()`
+        // immediately abandons capture and discards the audio; neither `onFinal` nor `onError` fires
+        // for it (the `captureSession` guard on both closures in `startCapture()` is defense-in-depth
+        // on top of that contract, not a substitute for it).
+        runningEngine?.cancel()
         runningEngine = nil
     }
 
@@ -961,7 +985,10 @@ final class AppState {
         voiceDoneNoMatchTranscript = nil
         captureState = .idle
         liveTranscript = ""
-        runningEngine?.stop()
+        // FIX 2a (privacy seam): same rationale as `cancelCapture()` above — this is a decline/
+        // dismiss path, not a "give me the final transcript" path, so it must not leave Groq
+        // uploading audio (or any engine still capturing) behind it.
+        runningEngine?.cancel()
         runningEngine = nil
     }
 
@@ -1458,9 +1485,40 @@ final class AppState {
         if voiceFeedback {
             voice.speak("Focus session started. \(frogTask?.title ?? "Twenty five minutes.")")
         }
+        // FIX B: (re)start the countdown owned by this instance — invalidate any timer left over
+        // from a previous session first so two overlapping sessions can never double-decrement.
+        // Mirrors `startDelegationTimer()`'s exact construction (`Timer(timeInterval:repeats:
+        // block:)` + `RunLoop.main.add(_:forMode:.common)`) — the `@Sendable` block hops back onto
+        // `@MainActor` via `_Concurrency.Task` for the same Swift 6 isolation reason documented
+        // there.
+        focusTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.focusTick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        focusTimer = timer
+    }
+
+    /// FIX B: 1s tick, moved verbatim from `FocusOverlay.tick()` (see that file's git history) so
+    /// the countdown keeps running even while the fullscreen overlay isn't mounted — only the
+    /// visuals stayed behind in `FocusOverlay`, not the timing logic.
+    private func focusTick() {
+        guard focusActive, !focusPaused else { return }
+        guard focusSecondsLeft > 0 else {
+            endFocus()
+            return
+        }
+        focusSecondsLeft -= 1
+        if focusSecondsLeft <= 0 {
+            endFocus()
+        }
     }
 
     func endFocus() {
+        focusTimer?.invalidate()
+        focusTimer = nil
         focusActive = false
         focusSecondsLeft = 25 * 60
         focusPaused = false
@@ -1526,10 +1584,23 @@ final class AppState {
 
     /// Sets `id` as the single "frog of the day", clearing the flag on every other task —
     /// mirrors `volar-mac.jsx`'s single-frog invariant.
+    ///
+    /// FIX 6 (data hygiene): used to only mutate the in-memory `tasks` array, never the store — the
+    /// very next `tasks = store.fetchAll()` (any other mutation) silently wiped the flag, and it
+    /// never survived relaunch at all. Store-backed path now routes through `TaskStore.setFrog(_:)`
+    /// (persists, and is itself the single source of truth for the invariant) and refreshes `tasks`
+    /// from it, same "mutate via store, refresh tasks" convention every other store-backed mutation
+    /// in this file already follows. No-store fallback (previews/tests) keeps the old in-memory-only
+    /// loop.
     func setFrog(_ id: UUID) {
-        for index in tasks.indices {
-            tasks[index].frog = (tasks[index].id == id)
+        guard let store else {
+            for index in tasks.indices {
+                tasks[index].frog = (tasks[index].id == id)
+            }
+            return
         }
+        store.setFrog(id)
+        tasks = store.fetchAll()
     }
 
     // MARK: - Modal / banner actions (Phase 3)
@@ -1708,11 +1779,24 @@ final class AppState {
         return openTasks.filter { (triageKeptAt[$0.id] ?? $0.createdAt) <= cutoff }
     }
 
+    /// FIX A (compile break): processing the last item of a sweep/triage batch used to leave an
+    /// open blank sheet with no dismiss control — `showSweep`/`showTriage` only ever got set to
+    /// `false` by their own explicit dismiss actions (`dismissSweep()`, or nothing at all for
+    /// triage), never by the batch simply running out of items. Called at the tail of every
+    /// mutating triage/sweep action (`triageKeep`/`triageBreakdown`/`triageDefer`/`triageDrop`/
+    /// `sweepComplete`) so the sheet closes itself the instant its backing list empties out — a
+    /// pure UI convenience, no store/model side effects.
+    private func dismissBatchSheetsIfEmpty() {
+        if showSweep, sweepItems.isEmpty { showSweep = false }
+        if showTriage, staleTasks.isEmpty { showTriage = false }
+    }
+
     /// Triage "Keep": no destructive/creative side effect on the task itself — just resets this
     /// task's staleness clock so it doesn't reappear in next week's batch.
     func triageKeep(_ item: TaskItem) {
         triageKeptAt[item.id] = clock()
         persistTriageKeptAt()
+        dismissBatchSheetsIfEmpty()
     }
 
     /// Triage "Break down": opens the existing breakdown sheet.
@@ -1725,6 +1809,7 @@ final class AppState {
     /// `TaskBreakdownView.swift`, not one of this task's 5 owned files).
     func triageBreakdown(_ item: TaskItem) {
         showBreakdown = true
+        dismissBatchSheetsIfEmpty()
     }
 
     /// Triage "Defer": adds a `.afterDate` condition `triageDeferInterval` out, matching FR-017's
@@ -1736,6 +1821,7 @@ final class AppState {
             if let index = tasks.firstIndex(where: { $0.id == item.id }) {
                 tasks[index].conditions.append(.afterDate(now.addingTimeInterval(Self.triageDeferInterval)))
             }
+            dismissBatchSheetsIfEmpty()
             return
         }
         let before = tasks
@@ -1744,12 +1830,14 @@ final class AppState {
         // WG-1: re-derive this task's reminders (deadline/condition state just changed).
         scheduler?.scheduleReminders(taskId: item.id)
         notifyEligibilityAndScheduleResurface(before: before, now: now)
+        dismissBatchSheetsIfEmpty()
     }
 
     /// Triage "Drop": a plain delete — same path (and same FR-015 re-eligibility notification) as
     /// any other task deletion.
     func triageDrop(_ item: TaskItem) {
         deleteTask(item.id)
+        dismissBatchSheetsIfEmpty()
     }
 
     private func persistTriageKeptAt() {
@@ -1845,6 +1933,7 @@ final class AppState {
     /// the batch).
     func sweepComplete(_ item: TaskItem) {
         toggleDone(item.id)
+        dismissBatchSheetsIfEmpty()
     }
 
     /// `SweepView.onSkip`: no-op — "Skip" means "didn't get to it today," carried over silently
@@ -1915,6 +2004,15 @@ final class AppState {
         offerRescheduleForOverdueTasks(now: clock())
         // T043 (phase6-contract.md §C): starts the minute-scale ambient recheck timer.
         startDelegationTimer()
+        // FIX 3: a persisted `.whisperKit` engine choice used to only ever call `whisper.prepare()`
+        // from `setSpeechEngine` (Settings) — so on relaunch, `speechEngineChoice` restores from
+        // `UserDefaults` correctly but the model itself was never (re)loaded, silently falling back
+        // to Apple on-device for the whole session (see `selectedEngine`'s `isModelReady` gate).
+        // `WhisperKitEngine.prepare()` is documented idempotent (self-guards on `.preparing`/`.ready`
+        // — see its own doc comment), so no extra guard is needed here.
+        if speechEngineChoice == .whisperKit, WhisperKitEngine.isSupported {
+            _Concurrency.Task { await whisper.prepare() }
+        }
     }
 
     // MARK: - Phase 4: overdue-reschedule scan (WG-3, FR-016)

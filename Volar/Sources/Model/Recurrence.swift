@@ -138,12 +138,29 @@ enum RecurrenceEngine {
         anchorToCompletion: Bool,
         calendar: Calendar
     ) -> Reset {
+        // FIX E: a single `advance(anchor, ...)` call only moves ONE period past the old
+        // deadline/condition date. Completing a recurring task more than one period late (e.g. a
+        // daily task completed after 5 days away) then reopened it with a deadline that's still
+        // in the past, which immediately re-fires as overdue — a burst of instantly-overdue
+        // notifications on the very next `rebuildFromStorage`/derive. Loop the advance until the
+        // new date is strictly after `completedAt`, so the reopened task's next occurrence is
+        // always actually in the future. `maxIterations` is a defensive backstop (mirrors
+        // `advance`'s own defensive-guard philosophy above) against a pathological/corrupted rule
+        // that would otherwise spin — e.g. `advance` returning the same instant it was given.
         func nextOccurrence(from original: Date) -> Date {
             let anchor = anchorToCompletion ? completedAt : original
-            // If advancing ever fails (defensive — see `advance`'s doc comment), fall back to the
-            // anchor unshifted rather than producing `nil`/crashing; a stuck-in-place recurring
-            // task is a visible, recoverable bug, not a crash.
-            return advance(anchor, by: recurrence, calendar: calendar) ?? anchor
+            var candidate = anchor
+            var iterations = 0
+            let maxIterations = 1000
+            while candidate <= completedAt, iterations < maxIterations {
+                // If advancing ever fails (defensive — see `advance`'s doc comment), stop and fall
+                // back to the last good candidate rather than producing `nil`/crashing; a
+                // stuck-in-place recurring task is a visible, recoverable bug, not a crash.
+                guard let advanced = advance(candidate, by: recurrence, calendar: calendar) else { break }
+                candidate = advanced
+                iterations += 1
+            }
+            return candidate
         }
 
         let nextDeadline: Date?

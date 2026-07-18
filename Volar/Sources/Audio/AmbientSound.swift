@@ -30,12 +30,16 @@ final class AmbientSound {
     }
 
     /// `useAmbientSound().start(mode)` — mirrors the JS `start()`, which always tears down any
-    /// existing audio graph first. No-ops for `.none`/`.custom` (there is no ambient *sound* for
-    /// those visual modes in the prototype). Degrades silently (no throw, no crash) if the audio
-    /// engine can't start — e.g. no output device, or the sandbox denies audio.
+    /// existing audio graph first. No-ops for `.none` (no ambient *sound* for that visual mode).
+    /// `.custom` (a user-supplied background image) has no synthesized sound of its own, so it is
+    /// mapped to the same sound as `.rain` — see `makeNoiseBuffer`/`lowPassFrequency`/
+    /// `targetVolume`, all of which treat `.custom` identically to `.rain` — so the sound toggle
+    /// still does something audible when a custom background is set. Degrades silently (no throw,
+    /// no crash) if the audio engine can't start — e.g. no output device, or the sandbox denies
+    /// audio.
     func start(_ mode: AmbientMode) {
         stop()
-        guard mode == .rain || mode == .snow || mode == .embers else { return }
+        guard mode == .rain || mode == .snow || mode == .embers || mode == .custom else { return }
         guard let buffer = makeNoiseBuffer(for: mode) else { return }
 
         let format = buffer.format
@@ -68,8 +72,15 @@ final class AmbientSound {
     func stop() {
         fadeTask?.cancel()
         fadeTask = nil
-        player.stop()
-        engine.stop()
+        // Guard against touching a node that was never attached (e.g. `stop()` called when
+        // `start()` bailed early via `teardownGraph()` after `engine.start()` threw) — calling
+        // `stop()`/detach on an unattached node is a programmer error AVAudioEngine traps on.
+        if engine.attachedNodes.contains(player) {
+            player.stop()
+        }
+        if engine.isRunning {
+            engine.stop()
+        }
         teardownGraph()
         isPlaying = false
     }
@@ -93,24 +104,25 @@ final class AmbientSound {
         buffer.frameLength = frameCount
 
         var last: Float = 0
+        let isRainLike = mode == .rain || mode == .custom
         for i in 0..<Int(frameCount) {
             let w = Float.random(in: -1...1)
             last = (last + 0.02 * w) / 1.02
-            data[i] = mode == .rain ? w * 0.5 : last * 3.5
+            data[i] = isRainLike ? w * 0.5 : last * 3.5
         }
         return buffer
     }
 
     private func lowPassFrequency(for mode: AmbientMode) -> Float {
         switch mode {
-        case .rain: return 1500
+        case .rain, .custom: return 1500 // `.custom` maps to the same sound as `.rain`
         case .snow: return 420
-        default: return 300 // embers (only reachable modes here are rain/snow/embers)
+        default: return 300 // embers (only reachable modes here are rain/snow/embers/custom)
         }
     }
 
     private func targetVolume(for mode: AmbientMode) -> Float {
-        mode == .rain ? 0.10 : 0.13
+        (mode == .rain || mode == .custom) ? 0.10 : 0.13
     }
 
     /// Linear fade-in over ~1.4s — `AVAudioEngine` has no built-in parameter-ramp API like Web

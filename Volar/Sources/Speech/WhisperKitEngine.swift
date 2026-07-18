@@ -179,4 +179,20 @@ final class WhisperKitEngine: SpeechEngine {
             }
         }
     }
+
+    /// Immediately abandons the in-flight capture: bumps `session` FIRST (so an already-running
+    /// `stop()` transcription's session check above discards its result — no `onFinal`/`onError`
+    /// — instead of delivering it), stops the recorder, and deletes any temp audio file still
+    /// referenced (a transcription already past the recorder handoff cleans up its own copy of
+    /// the file; this covers the "still recording" case where `fileURL` is still ours to delete).
+    func cancel() {
+        session += 1
+        isRunning = false
+        recorder?.stop()
+        recorder = nil
+        if let url = fileURL {
+            fileURL = nil
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
 }

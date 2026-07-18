@@ -88,6 +88,9 @@ final class GroqEngine: SpeechEngine {
         Task { @MainActor [weak self] in
             guard let self else { return }
             defer { try? FileManager.default.removeItem(at: url) }
+            // A cancel() racing in between stop() and this task body running must prevent
+            // the upload from ever starting, not just discard its result.
+            guard self.session == token else { return }
             let audio: Data
             do {
                 audio = try Data(contentsOf: url)
@@ -123,6 +126,25 @@ final class GroqEngine: SpeechEngine {
         case .network: return true
         case .http(let status, _): return (500..<600).contains(status)
         case .missingCredentials, .audioTooLarge, .decoding, .emptyTranscript: return false
+        }
+    }
+
+    /// Immediately abandons the in-flight capture. Bumps `session` FIRST — before anything else
+    /// — so: (1) if `stop()` hasn't run yet, no upload ever starts for this session; (2) if an
+    /// upload from `stop()` is already in flight, its session check (`guard self.session == token
+    /// else { return }` above) discards the result when it resolves — neither `onFinal` nor
+    /// `onError` fires. The network request itself may still complete in the background (Groq
+    /// isn't told to abort), but its transcript can never reach the app. Then stops the recorder
+    /// and deletes any temp audio file still referenced (a `stop()`-started upload already
+    /// captured its own copy of the file path and cleans it up itself via `defer`).
+    func cancel() {
+        session += 1
+        isRunning = false
+        recorder?.stop()
+        recorder = nil
+        if let url = fileURL {
+            fileURL = nil
+            try? FileManager.default.removeItem(at: url)
         }
     }
 }

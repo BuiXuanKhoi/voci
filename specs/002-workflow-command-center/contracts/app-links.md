@@ -33,14 +33,26 @@ Used by the Services/share-extension path (FR-040). Never bypasses the confirm c
 
 ## Claude Code hook (installed by "Connect Claude Code")
 
-Entry appended to `~/.claude/settings.json` → `hooks.Stop` (additive merge; marker = command
-contains `volar://`):
+Entry appended to `~/.claude/settings.json` → `hooks.Stop` (additive merge; marker = a
+`command` string anywhere in the entry containing `volar://`). Stop hooks use Claude Code's
+matcher-group shape (no `matcher` key needed for `Stop`):
 
 ```json
-{ "type": "command", "command": "open \"volar://ai-done?cwd=$PWD\"" }
+{
+  "hooks": [
+    { "type": "command", "command": "open \"volar://ai-done?cwd=$(printf %s \"$PWD\" | base64)\"" }
+  ]
+}
 ```
+
+`$PWD` is base64-encoded before being embedded in the `cwd=` query param, so a path containing
+a space/`#`/`&`/non-ASCII byte can't break the URL the shell hook constructs. The receiver
+(`AppLinkHandler`) base64-decodes `cwd` on receipt, falling back to the raw value for a hook
+installed by a previous build.
 
 Install contract: preview exact JSON → backup `settings.json.volar-backup-<timestamp>` →
 parse-validate → merge (never replaces existing hooks) → write → test-signal round-trip
-confirmation. Uninstall removes only marker-matching entries. File access via user-granted
-security-scoped bookmark to `~/.claude` (NSOpenPanel pre-targeted, one grant, persisted).
+confirmation. Uninstall removes only marker-matching entries, recognizing both this
+matcher-group shape and the flat `{"type":"command","command":...}` shape written by earlier
+builds. File access via user-granted security-scoped bookmark to `~/.claude` (NSOpenPanel
+pre-targeted, one grant, persisted).

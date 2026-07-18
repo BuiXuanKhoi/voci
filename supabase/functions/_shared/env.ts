@@ -12,11 +12,13 @@ export function readEnv(name: string): string | undefined {
   return v && v.length > 0 ? v : undefined;
 }
 
+/** Accepts `n >= 0` (not just `n > 0`) so e.g. `PARSE_DAILY_QUOTA=0` can deliberately hard-disable
+ *  a tier without a code change — only genuinely invalid/negative values fall back to `fallback`. */
 export function readEnvInt(name: string, fallback: number): number {
   const raw = readEnv(name);
   if (raw === undefined) return fallback;
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 /** Collects every named env var; if any are missing, returns the missing list instead of values

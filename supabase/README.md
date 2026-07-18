@@ -40,9 +40,12 @@ must be set explicitly via `supabase secrets set`.
 
 ## Required secrets / env
 
-The function fails closed (typed `503 config_missing`, naming exactly which keys are absent —
-never a silent bypass) for any auth path whose config is missing. Nothing here is optional if you
-want that path to work; both auth paths can be configured independently (e.g. ship paid-only
+The function fails closed (typed `503 config_missing`) for any auth path whose config is missing —
+never a silent bypass. The HTTP response body is deliberately opaque (`{"reason":"config_missing"}`,
+no key names — an unauthenticated internet caller should not learn which secrets a deployment is
+missing); the specific missing key names are logged server-side instead (see `_shared/log.ts`), so
+an operator can `supabase functions logs parse` to see exactly what's absent. Nothing here is
+optional if you want that path to work; both auth paths can be configured independently (e.g. ship paid-only
 first).
 
 | Var | Required for | Description |
