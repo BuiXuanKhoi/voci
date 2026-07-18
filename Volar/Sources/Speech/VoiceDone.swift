@@ -31,14 +31,16 @@
 // transcripts (spacing/casing quirks WhisperKit/Groq may emit) has not been exercised against
 // real audio output.
 //
-// CONCURRENCY NOTE: the private static helpers below (`classifyImpl` and everything it calls) are
-// marked `nonisolated` even though the enclosing struct is `@MainActor`. They're pure/stateless
-// (no actor-isolated state touched), and two of them (`normalizedTokens`) are referenced as bare
-// function values in `completionCuePhrases`/`externalCuePhrases`'s `static let` initializers via
-// `.map(normalizedTokens)` — passing an implicitly-`@MainActor`-isolated function value there
-// triggers "converting function value of type '@MainActor (String) -> [String]' to '(String) ->
-// [String]' loses global actor 'MainActor'" under Swift 6 strict concurrency. `nonisolated` on the
-// static funcs removes the mismatch at the source rather than wrapping the call sites in closures.
+// CONCURRENCY: this type is deliberately NOT `@MainActor`. It is pure and stateless — no stored
+// properties, no UI, no actor-isolated state — so it needs no isolation, and `Sendable` lets
+// `AppState` (a `@MainActor` type) hold and call it freely. Marking the struct `@MainActor` was
+// actively harmful under Swift 6 strict concurrency: it isolates the static STORED PROPERTIES
+// (`completionCuePhrases`, `cueStripTokens`, the tuning constants) as well as the methods, so the
+// `static let` initializer `[...].map(normalizedTokens)` tried to convert an implicitly-isolated
+// `@MainActor (String) -> [String]` to a plain `(String) -> [String]` and failed with "loses
+// global actor 'MainActor'". Leaving the struct isolated and marking only the helpers
+// `nonisolated` just trades that error for ~15 "main actor-isolated static property can not be
+// referenced from a nonisolated context" errors. Dropping the isolation entirely is the fix.
 import Foundation
 
 // MARK: - Frozen seam (phase5-contract.md §A)
@@ -77,8 +79,7 @@ struct VoiceDoneTask: Sendable, Equatable {
 }
 
 /// Vietnamese+English aware voice-done matcher. Pure, stateless, deterministic — see file header.
-@MainActor
-struct VoiceDone {
+struct VoiceDone: Sendable {
     func classify(_ transcript: String, openTasks: [VoiceDoneTask]) -> VoiceDoneIntent {
         Self.classifyImpl(transcript, openTasks: openTasks)
     }
@@ -117,14 +118,14 @@ struct VoiceDone {
     private static let completionCuePhrases: [[String]] = [
         "làm xong", "đã xong", "xong rồi", "hoàn thành", "hoàn tất",
         "xong", "finished", "done", "completed", "complete"
-    ].map(normalizedTokens)
+    ].map { normalizedTokens($0) }
 
     /// Phrases indicating an EXTERNAL party finished their part (clears a `.external` condition)
     /// rather than the speaker's own task, same token-sequence convention as above.
     private static let externalCuePhrases: [[String]] = [
         "đã ký", "ký rồi", "đã gửi", "gửi rồi", "đã trả lời", "trả lời rồi",
         "signed", "sent", "replied", "responded", "answered"
-    ].map(normalizedTokens)
+    ].map { normalizedTokens($0) }
 
     /// Flattened set of every token appearing in any cue phrase above. Stripped out of the
     /// transcript's token set before fuzzy-matching against titles/external-descriptions so cue
@@ -139,7 +140,7 @@ struct VoiceDone {
 
     // MARK: - Classification
 
-    private nonisolated static func classifyImpl(_ transcript: String, openTasks: [VoiceDoneTask]) -> VoiceDoneIntent {
+    private static func classifyImpl(_ transcript: String, openTasks: [VoiceDoneTask]) -> VoiceDoneIntent {
         let bounded = transcript.count > maxWorkingLength ? String(transcript.prefix(maxWorkingLength)) : transcript
         guard !bounded.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return .notACompletion }
 
@@ -172,7 +173,7 @@ struct VoiceDone {
     /// `phraseTokens.count` equality check). Cue phrase lists are short (~10 entries) and `tokens`
     /// is bounded by `maxTokens`, so the worst case is a small, fixed amount of work — no
     /// catastrophic-regex-style blowup.
-    private nonisolated static func containsCuePhrase(_ phraseTokens: [String], in tokens: [String]) -> Bool {
+    private static func containsCuePhrase(_ phraseTokens: [String], in tokens: [String]) -> Bool {
         guard !phraseTokens.isEmpty, phraseTokens.count <= tokens.count else { return false }
         if phraseTokens.count == 1 { return tokens.contains(phraseTokens[0]) }
         for start in 0...(tokens.count - phraseTokens.count) {
@@ -188,7 +189,7 @@ struct VoiceDone {
     /// the whole utterance WAS the cue phrase, like a bare "xong") always yields no candidates —
     /// this is the "done-phrase present but nothing matched" case the contract requires to surface
     /// as empty candidates rather than a guess.
-    private nonisolated static func scoredTitleCandidates(referenceTokens: Set<String>, openTasks: [VoiceDoneTask]) -> [VoiceMatch] {
+    private static func scoredTitleCandidates(referenceTokens: Set<String>, openTasks: [VoiceDoneTask]) -> [VoiceMatch] {
         guard !referenceTokens.isEmpty else { return [] }
         var results: [VoiceMatch] = []
         for task in openTasks {
@@ -203,7 +204,7 @@ struct VoiceDone {
     /// task's BEST-matching description as that task's candidate score (a task is a single
     /// candidate for disambiguation purposes even if it has several unsatisfied external
     /// conditions).
-    private nonisolated static func scoredExternalCandidates(referenceTokens: Set<String>, openTasks: [VoiceDoneTask]) -> [VoiceMatch] {
+    private static func scoredExternalCandidates(referenceTokens: Set<String>, openTasks: [VoiceDoneTask]) -> [VoiceMatch] {
         guard !referenceTokens.isEmpty else { return [] }
         var results: [VoiceMatch] = []
         for task in openTasks {
@@ -229,7 +230,7 @@ struct VoiceDone {
     /// Stable ordering: score descending, then `taskId` string ascending (mirrors
     /// `ConflictCheck.swift`'s id-lexical tiebreak), so output is deterministic for identical
     /// input regardless of `openTasks`' original order.
-    private nonisolated static func selectCandidates(_ candidates: [VoiceMatch]) -> [VoiceMatch] {
+    private static func selectCandidates(_ candidates: [VoiceMatch]) -> [VoiceMatch] {
         guard !candidates.isEmpty else { return [] }
         let sorted = candidates.sorted { lhs, rhs in
             if lhs.score != rhs.score { return lhs.score > rhs.score }
@@ -250,7 +251,7 @@ struct VoiceDone {
     /// expensive. Identical formula to `ConflictCheck.normalizedTitleTokens` — see that file's
     /// comment for why "đ"/"Đ" needs an explicit post-fold replace (it has no Unicode diacritic
     /// decomposition, unlike ô/ơ/ư/tone marks).
-    private nonisolated static func normalizedTokens(_ text: String) -> [String] {
+    private static func normalizedTokens(_ text: String) -> [String] {
         let bounded = text.count > maxWorkingLength ? String(text.prefix(maxWorkingLength)) : text
         let folded = bounded.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "vi_VN"))
         let strokeNormalized = folded.replacingOccurrences(of: "đ", with: "d")
@@ -259,7 +260,7 @@ struct VoiceDone {
         return tokens.count > maxTokens ? Array(tokens.prefix(maxTokens)) : tokens
     }
 
-    private nonisolated static func normalizedTokenSet(_ text: String) -> Set<String> {
+    private static func normalizedTokenSet(_ text: String) -> Set<String> {
         Set(normalizedTokens(text))
     }
 
@@ -267,7 +268,7 @@ struct VoiceDone {
     /// `ConflictCheck.titleSimilarity`. Either side being empty (a title/description that
     /// tokenizes to nothing, or an utterance that was entirely cue words) never matches — no
     /// divide-by-zero, no degenerate empty-vs-empty "match".
-    private nonisolated static func jaccard(_ a: Set<String>, _ b: Set<String>) -> Double {
+    private static func jaccard(_ a: Set<String>, _ b: Set<String>) -> Double {
         guard !a.isEmpty, !b.isEmpty else { return 0 }
         let intersection = a.intersection(b).count
         let union = a.union(b).count
