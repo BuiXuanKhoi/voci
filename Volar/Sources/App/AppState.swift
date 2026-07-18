@@ -358,6 +358,20 @@ final class AppState {
     /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
     /// file; no sibling reads this one.
     private static let triageKeptAtKey = "volar.triageKeptAt"
+    /// FIX 4: `accent`/`density` used to only ever be assigned from this `init`'s parameters —
+    /// there was no read-back from `UserDefaults` here (unlike every other Settings → Appearance
+    /// control: `ambientKey`/`customImageKey` right above both get one) and no write anywhere
+    /// either, so a real launch (`VolarApp.swift` calls `AppState(store:)` with neither parameter
+    /// supplied) silently reset both to their compiled-in defaults (`.indigo`/`.comfy`) every
+    /// time, discarding whatever `SettingsView` had set last session.
+    private static let accentKey = "volar.accent"
+    /// `Density` (Theme.swift) is NOT `RawRepresentable`/`String`-backed like `VolarAccent` is, so
+    /// there's no `.rawValue` to persist directly. Rather than invent a new ad hoc encoding, this
+    /// reuses the EXACT `"cozy"`/`"comfy"`/`"roomy"` string mapping `SettingsView.densityID(_:)`/
+    /// `density(fromID:)` already define for its own `Segmented` binding (`SettingsView.swift`) —
+    /// same values, same default-to-`.comfy` fallback — so this is the established convention,
+    /// not a new one.
+    private static let densityKey = "volar.density"
 
     init(
         store: TaskStore? = nil,
@@ -385,6 +399,15 @@ final class AppState {
         }
         if let p = UserDefaults.standard.string(forKey: Self.customImageKey) {
             self.customImageURL = URL(fileURLWithPath: p)
+        }
+        // FIX 4: same override convention as `ambient`/`customImageURL` immediately above —
+        // persisted choice wins, caller-supplied parameter is only the previews/tests fallback.
+        if let raw = UserDefaults.standard.string(forKey: Self.accentKey), let a = VolarAccent(rawValue: raw) {
+            self.accent = a
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.densityKey),
+           let d = Self.densityFromPersistedID(raw) {
+            self.density = d
         }
         self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
@@ -734,7 +757,20 @@ final class AppState {
     /// is untouched.
     func stopCapture() {
         if let engine = runningEngine, engine.isRunning {
-            if !engine.supportsPartialResults { captureState = .parsing } // batch: show "working…" while it transcribes
+            // FIX 1: `SpeechCapture.stop()` sets `isRunning = false` SYNCHRONOUSLY
+            // (SpeechCapture.swift:308) but the final transcript still arrives async via
+            // `onFinal`. This used to only flip to `.parsing` for a batch engine
+            // (`!supportsPartialResults`), so a partial-results engine (Apple) stayed stuck in
+            // `.recording` for that whole gap. A second `stopCapture()` call landing in that
+            // window then fell through to the `else if captureState == .recording` branch below,
+            // which bumps `captureSession` — invalidating the very session `onFinal`'s guard
+            // checks — and silently swallowed the transcript. `.parsing` is the correct state for
+            // EVERY engine here: it means "mic is off, waiting on the final result," which is
+            // just as true with partial results as without. It is also what disarms the second
+            // call: with `isRunning` already false AND `captureState` no longer `.recording`,
+            // neither branch matches, so `stopCapture()` becomes a clean no-op that leaves the
+            // in-flight session intact instead of taking the destructive `else if`.
+            captureState = .parsing
             engine.stop()
         } else if captureState == .recording {
             captureSession += 1
@@ -1531,10 +1567,19 @@ final class AppState {
     /// Completes the given task and advances the focus index, clamping into range — mirrors the
     /// prototype's `completeFocusTask`. If that was the last open task, ends the session.
     func completeFocusTask(_ id: UUID) {
-        let remaining = max(openTasks.count - 1, 0)
+        // FIX 3: `remaining` used to be computed as `openTasks.count - 1` BEFORE calling
+        // `toggleDone`, assuming completing one task always drops the open count by exactly one.
+        // That's not true: `TaskStore.completeOne` (TaskStore.swift:394) resets a task with a
+        // `recurrence` back to `.status == .todo` in place rather than closing it — it stays in
+        // `openTasks`, a delta of 0, not -1 — and `TaskStore.toggle`'s parent auto-complete
+        // cascade (TaskStore.swift:367-369) can additionally close the now-childless parent in
+        // the same call, a delta of -2. Reading `openTasks.count` fresh AFTER `toggleDone` (which
+        // itself refreshes `tasks` from the store) reports whichever of those actually happened
+        // instead of guessing "-1".
         toggleDone(id)
+        let remaining = openTasks.count
         focusIndex = remaining > 0 ? max(0, min(focusIndex, remaining - 1)) : 0
-        if openTasks.isEmpty {
+        if remaining == 0 {
             focusActive = false
         }
         if voiceFeedback {
@@ -1548,7 +1593,61 @@ final class AppState {
         voice.readDay(self)
     }
 
-    // MARK: - Ambient background controls (Settings → Appearance → Background)
+    // MARK: - Appearance controls (Settings → Appearance)
+
+    /// FIX 4: sets the accent color and persists it, so it survives relaunch — same "mutate +
+    /// persist together" shape as `setAmbient` right below. A plain stored-property `didSet` was
+    /// considered instead (would avoid touching `SettingsView.swift` at all), but this file has
+    /// zero existing `didSet`/`willSet` usage anywhere, `@Observable`'s macro expansion turns a
+    /// stored property into a computed one and the exact interaction with property observers
+    /// isn't exercised anywhere else in this codebase to lean on — an explicit setter method
+    /// mirrors the established, already-proven convention every other persisted Settings control
+    /// in this file uses (`setAmbient`/`setSpeechEngine`/`setRecognitionLocale`/
+    /// `setVoiceDeliveryMode`/`setGlobalReminderPolicy`), so it's the safer choice here.
+    /// `SettingsView.swift`'s tap handler calls this instead of assigning `appState.accent`
+    /// directly.
+    func setAccent(_ a: VolarAccent) {
+        accent = a
+        UserDefaults.standard.set(a.rawValue, forKey: Self.accentKey)
+    }
+
+    /// FIX 4: sets the row/section density and persists it — same rationale/shape as `setAccent`
+    /// above. `Density` has no `.rawValue` (see `densityKey`'s doc comment), so persistence goes
+    /// through the two small string-mapping helpers below instead.
+    func setDensity(_ d: Density) {
+        density = d
+        UserDefaults.standard.set(Self.densityPersistedID(d), forKey: Self.densityKey)
+    }
+
+    /// `Density -> String`, for persistence — deliberately the exact same three values as
+    /// `SettingsView.densityID(_:)` (that method stays private to its view; this is the
+    /// AppState-side mirror `setDensity`/`init` need for `UserDefaults`, not a second source of
+    /// truth — see `densityKey`'s doc comment).
+    private static func densityPersistedID(_ d: Density) -> String {
+        switch d {
+        case .cozy: return "cozy"
+        case .comfy: return "comfy"
+        case .roomy: return "roomy"
+        }
+    }
+
+    /// The inverse of `densityPersistedID(_:)` above. Returns `nil` — rather than defaulting to
+    /// `.comfy` — for an unrecognized/corrupted stored value, so `init` can leave the
+    /// caller-supplied `density:` argument standing instead of stomping it with a hardcoded
+    /// default. That matters because the init parameters are documented as the fallback for
+    /// previews/tests, and it keeps this path symmetric with `accent`'s
+    /// `VolarAccent(rawValue:)`, which is already `nil`-on-garbage for the same reason. Named
+    /// distinctly from the `density` stored property (rather than overloading that name, as
+    /// `densityPersistedID(_:)`'s counterpart does with `accent`/`setAccent`) purely so this static
+    /// helper reads unambiguously at its one call site in `init` above.
+    private static func densityFromPersistedID(_ id: String) -> Density? {
+        switch id {
+        case "cozy": return .cozy
+        case "comfy": return .comfy
+        case "roomy": return .roomy
+        default: return nil
+        }
+    }
 
     /// Sets the ambient visual mode and persists it, so it survives relaunch.
     func setAmbient(_ mode: AmbientMode) {
@@ -1696,17 +1795,30 @@ final class AppState {
     private func scheduleNextResurface(from snapshot: [VolarCore.Task], now: Date) {
         resurfaceSession += 1
         let session = resurfaceSession
-        guard let date = VolarCore.nextResurfaceDate(in: snapshot, after: now) else { return }
-        // `nextResurfaceDate` only returns the winning `Date`, not which task owns it — recover
-        // the owner by re-scanning for the first task carrying that exact date (deterministic:
-        // same snapshot, same earliest-date rule `nextResurfaceDate` itself applies).
-        guard let taskId = snapshot.first(where: { task in
-            task.conditions.contains { condition in
-                if case .afterDate(let d) = condition { return d == date }
-                return false
+        // FIX 2: `VolarCore.nextResurfaceDate` returns only the SINGLE earliest `.afterDate`
+        // across the whole snapshot, so registering just that one task with the durable scheduler
+        // left every OTHER task's `.afterDate` completely unregistered. There's no safety net for
+        // those either: `ReminderScheduler.rebuildFromStorage()` only rescans tasks with
+        // `deadline != nil`, never `.afterDate` conditions, and a local in-memory wake (the sleep
+        // below) doesn't survive an app quit. A task whose `.afterDate` isn't the single nearest
+        // one across the whole store would then simply never resurface. Scan the snapshot
+        // ourselves instead and register EVERY task's own earliest future `.afterDate`
+        // individually — safe to call on every mutation because `ReminderScheduler.scheduleResurface`
+        // (ReminderScheduler.swift:200-217) already dedupes per task (same `fireAt` -> no-op,
+        // different `fireAt` -> updates the existing row in place), so this never piles up
+        // duplicate durable records or duplicate system notifications.
+        var earliestOverall: Date?
+        for task in snapshot {
+            var earliestForTask: Date?
+            for condition in task.conditions {
+                guard case .afterDate(let date) = condition, date > now else { continue }
+                if earliestForTask == nil || date < earliestForTask! { earliestForTask = date }
             }
-        })?.id else { return }
-        scheduler?.scheduleResurface(at: date, taskId: taskId)
+            guard let taskDate = earliestForTask else { continue }
+            scheduler?.scheduleResurface(at: taskDate, taskId: task.id)
+            if earliestOverall == nil || taskDate < earliestOverall! { earliestOverall = taskDate }
+        }
+        guard let date = earliestOverall else { return }
 
         // Defensive cap (self-review "client-exploit"): a corrupted/hostile store could carry an
         // absurd far-future `.afterDate`; clamp the LOCAL convenience wake so `UInt64(seconds *
@@ -1723,6 +1835,15 @@ final class AppState {
                 // observer recomputing `activeTask` at this instant actually re-renders.
                 self.tasks = self.tasks
             }
+            // FIX 2 (chain): the refresh above only advances `tasks` past the resurface moment
+            // that just fired — on its own it does NOT re-arm whichever `.afterDate` comes next.
+            // Re-running this same method against a fresh snapshot/`now` is what chains forward.
+            // This cannot loop forever: the moment that just fired is now <= `now` (this closure
+            // only runs once the sleep above has elapsed), and the scan above requires strictly
+            // `date > now` to even be a candidate, so that same moment can never be picked again —
+            // each recursive call either lands on a strictly later date (and stops after that
+            // one sleep) or finds none left at all (and returns immediately, ending the chain).
+            self.scheduleNextResurface(from: self.tasks.map { $0.snapshot() }, now: self.clock())
         }
     }
 
@@ -2002,6 +2123,15 @@ final class AppState {
         // resurrected, per this fix's instruction). Reassigning it a second time here would only
         // double-assign the same delegate, so this call is deleted, not replaced.
         offerRescheduleForOverdueTasks(now: clock())
+        // FIX 2 (re-arm on launch): `scheduleNextResurface`'s local one-shot wake (the sleep
+        // continuation inside it) lives only in memory, so it doesn't survive a quit/relaunch —
+        // without this call, a task with a future `.afterDate` would sit unregistered (durably
+        // AND locally) until some other mutation happened to touch `tasks` first. Idempotent if
+        // `activateServices()` is ever called twice: each call bumps `resurfaceSession`, which
+        // invalidates any still-pending sleep from the previous call, and every
+        // `scheduler?.scheduleResurface` it issues is itself deduped per task (see that method's
+        // own doc comment) — so a repeat call just re-arms the same state, never a duplicate.
+        scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: clock())
         // T043 (phase6-contract.md §C): starts the minute-scale ambient recheck timer.
         startDelegationTimer()
         // FIX 3: a persisted `.whisperKit` engine choice used to only ever call `whisper.prepare()`

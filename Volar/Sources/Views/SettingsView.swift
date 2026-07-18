@@ -392,7 +392,10 @@ struct SettingsView: View {
                                     .padding(-2.5)
                             )
                             .onTapGesture {
-                                appState.accent = candidate
+                                // FIX 4: routes through `AppState.setAccent` (persists to
+                                // UserDefaults) instead of a bare property assignment — a plain
+                                // `appState.accent = candidate` never survived relaunch.
+                                appState.setAccent(candidate)
                             }
                     }
                 }
@@ -404,7 +407,10 @@ struct SettingsView: View {
                 Segmented(
                     value: Binding(
                         get: { densityID(appState.density) },
-                        set: { appState.density = density(fromID: $0) }
+                        // FIX 4: routes through `AppState.setDensity` (persists to UserDefaults)
+                        // instead of a bare property assignment — a plain `appState.density = ...`
+                        // never survived relaunch.
+                        set: { appState.setDensity(density(fromID: $0)) }
                     ),
                     options: [
                         .init(id: "cozy", label: "Cozy"),
