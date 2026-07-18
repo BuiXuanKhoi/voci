@@ -345,8 +345,12 @@ final class AppState {
     private static let recognitionLocaleKey = "volar.recognitionLocale"
     private static let speechEngineKey = "volar.speechEngine"
     /// One-time cloud-parse consent. `fileprivate` (not `private`) so `DefaultCloudParseGate`
-    /// (bottom of this file) can read the same key from `isOptedIn()`.
-    fileprivate static let cloudParseConsentKey = "volar.cloudParseConsent"
+    /// (bottom of this file) can read the same key from `isOptedIn()`. `nonisolated` because a
+    /// `static let` declared inside a `@MainActor` type inherits that isolation (only statics at
+    /// global/file scope are implicitly `nonisolated`), and `DefaultCloudParseGate` is deliberately
+    /// NOT main-actor-isolated — without this, `isOptedIn()` fails to compile with "main
+    /// actor-isolated static property ... cannot be accessed from outside of the actor".
+    fileprivate nonisolated static let cloudParseConsentKey = "volar.cloudParseConsent"
     /// Phase 4 (T033): `static`/internal, NOT `private` — this is the exact key
     /// `ReminderScheduler`/`VoiceReminderChannel` (contract A/B, `Sources/Reminders/**`,
     /// sibling-owned) are expected to read directly, since their frozen inits take no policy
@@ -2327,9 +2331,10 @@ final class DefaultCloudParseGate: CloudParseGate, @unchecked Sendable {
     init() {
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            self.lock.lock()
-            self.pathSatisfied = path.status == .satisfied
-            self.lock.unlock()
+            // Same scoped form as `isOnline()` below — this closure is synchronous so the manual
+            // pair would compile here, but keeping one locking idiom means a future edit can't
+            // accidentally leave an early return between `lock()` and `unlock()`.
+            self.lock.withLock { self.pathSatisfied = path.status == .satisfied }
         }
         monitor.start(queue: DispatchQueue(label: "volar.cloudParseGate.reachability"))
     }
@@ -2342,9 +2347,12 @@ final class DefaultCloudParseGate: CloudParseGate, @unchecked Sendable {
         UserDefaults.standard.bool(forKey: AppState.cloudParseConsentKey)
     }
 
+    /// Scoped `withLock` rather than a manual `lock()`/`defer { unlock() }` pair: `NSLock`'s
+    /// `lock()`/`unlock()` are `@available(*, noasync)`, so calling them directly in an `async`
+    /// method is a compile error — a suspension between the two could resume on a different
+    /// thread and unlock from the wrong one. `withLock`'s body is synchronous and cannot suspend,
+    /// which is exactly why it stays available here.
     func isOnline() async -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return pathSatisfied
+        lock.withLock { pathSatisfied }
     }
 }

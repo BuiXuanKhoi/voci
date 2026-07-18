@@ -190,7 +190,13 @@ final class HotkeyManager {
     /// `GetEventKind`, then hops to `@MainActor` — same `Task { @MainActor in ... }` pattern the
     /// pre-Carbon `NSEvent` monitor closures used to cross from a non-actor-isolated callback
     /// context into `HotkeyManager`'s (and `AppState`'s) MainActor-isolated state.
-    private static let carbonEventHandler: EventHandlerUPP = { _, eventRef, userData in
+    /// `nonisolated` for the same reason the closure takes `self` through `userData` instead of
+    /// capturing it: Carbon calls this as a raw `@convention(c)` function pointer, from whatever
+    /// thread the event arrives on. A `static let` declared inside this `@MainActor` type would
+    /// otherwise inherit main-actor isolation, and Swift 6 refuses to form a C function pointer
+    /// from an actor-isolated closure. Nothing here touches isolated state directly — the hop to
+    /// `manager.handle` already goes through `Task { @MainActor in ... }` below.
+    private nonisolated static let carbonEventHandler: EventHandlerUPP = { _, eventRef, userData in
         guard let eventRef, let userData else { return noErr }
         let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
         let isKeyDown = GetEventKind(eventRef) == UInt32(kEventHotKeyPressed)
