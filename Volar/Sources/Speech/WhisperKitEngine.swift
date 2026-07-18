@@ -66,7 +66,7 @@ final class WhisperKitEngine: SpeechEngine {
     private(set) var state: State = .notReady
     var isModelReady: Bool { state == .ready }
 
-    private var whisperKit: WhisperKit?
+    private var pipeline: WhisperPipelineBox?
 
     private var recorder: AVAudioRecorder?
     private var fileURL: URL?
@@ -97,8 +97,7 @@ final class WhisperKitEngine: SpeechEngine {
             // UNVERIFIED (Mac/Xcode) — confirm WhisperKitConfig(model:) and the WhisperKit(_:)
             // async-throwing initializer signature against the installed WhisperKit version;
             // this is the documented pattern as of WhisperKit 0.9.x.
-            let pipe = try await WhisperKit(WhisperKitConfig(model: modelName))
-            self.whisperKit = pipe
+            self.pipeline = try await Self.loadPipeline(modelName: modelName)
             self.state = .ready
         } catch {
             self.state = .failed(error.localizedDescription)
@@ -150,7 +149,7 @@ final class WhisperKitEngine: SpeechEngine {
 
         Task { @MainActor [weak self] in
             guard let self else { return }
-            guard let pipe = self.whisperKit else {
+            guard let box = self.pipeline else {
                 if self.session == token {
                     self.onError?(NSError(domain: "Volar.WhisperKit", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not loaded"]))
                 }
@@ -158,13 +157,7 @@ final class WhisperKitEngine: SpeechEngine {
                 return
             }
             do {
-                // UNVERIFIED (Mac/Xcode) — confirm DecodingOptions' field names (`task`,
-                // `detectLanguage`) and `WhisperKit.transcribe(audioPath:decodeOptions:)`'s
-                // signature/return type ([TranscriptionResult]) against the installed WhisperKit
-                // version. No `language:` is passed on purpose so vi/en are auto-detected.
-                let options = DecodingOptions(task: .transcribe, detectLanguage: true)
-                let results = try await pipe.transcribe(audioPath: url.path, decodeOptions: options)
-                let text = results.map { $0.text }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+                let text = try await Self.runTranscription(box, audioPath: url.path)
                 try? FileManager.default.removeItem(at: url)
                 guard self.session == token else { return }
                 if text.isEmpty {
@@ -195,4 +188,39 @@ final class WhisperKitEngine: SpeechEngine {
             try? FileManager.default.removeItem(at: url)
         }
     }
+
+    /// `nonisolated` is load-bearing: `WhisperKit`'s initializer and `transcribe` are both
+    /// `nonisolated async`, so the pipeline must be built and used outside the main actor's region.
+    /// Returning/receiving it inside a `Sendable` box is what lets it cross to `@MainActor` storage.
+    private nonisolated static func loadPipeline(modelName: String) async throws -> WhisperPipelineBox {
+        WhisperPipelineBox(kit: try await WhisperKit(WhisperKitConfig(model: modelName)))
+    }
+
+    private nonisolated static func runTranscription(_ box: WhisperPipelineBox, audioPath: String) async throws -> String {
+        // UNVERIFIED (Mac/Xcode) — confirm DecodingOptions' field names (`task`, `detectLanguage`)
+        // and `WhisperKit.transcribe(audioPath:decodeOptions:)`'s signature/return type
+        // ([TranscriptionResult]) against the installed WhisperKit version. No `language:` is
+        // passed on purpose so vi/en are auto-detected.
+        let options = DecodingOptions(task: .transcribe, detectLanguage: true)
+        let results = try await box.kit.transcribe(audioPath: audioPath, decodeOptions: options)
+        return results.map { $0.text }.joined().trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+}
+
+/// Carries the WhisperKit pipeline across isolation domains.
+///
+/// `WhisperKit` is a non-`Sendable` class whose `transcribe` is `nonisolated async` — it runs its
+/// CoreML work off the main actor on purpose. Holding the object in `WhisperKitEngine`'s
+/// `@MainActor` state and then calling `transcribe` on it hands a main-actor-isolated value to
+/// another executor, which Swift 6 rejects ("Sending 'pipe' risks causing data races"). Wrapping it
+/// in an `actor` does not help — an actor is just a different isolation domain with the same
+/// problem. So the pipeline travels inside this `Sendable` box and is only ever *used* from a
+/// `nonisolated` context, where it is a disconnected value.
+///
+/// The `@unchecked` is sound because of how `WhisperKitEngine` uses it, not because `WhisperKit` is
+/// thread-safe: the box is written exactly once in `prepare()` and only read afterwards, and the
+/// engine serializes captures (`isRunning` guards `start()`, `stop()` runs one transcription per
+/// capture), so two `transcribe` calls never overlap on the same pipeline.
+private struct WhisperPipelineBox: @unchecked Sendable {
+    let kit: WhisperKit
 }
