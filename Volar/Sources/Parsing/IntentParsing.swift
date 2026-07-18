@@ -58,7 +58,7 @@ protocol CloudParseGate: Sendable {
 @MainActor
 final class IntentRouter: IntentParser {
     /// Hard cap, all tiers, all call sites (contract: "Enforces the 10-task cap centrally").
-    static let maxTaskCap = 10
+    nonisolated static let maxTaskCap = 10
 
     /// Which tier actually produced the last successful result — diagnostics only, never PII
     /// (no transcript/title content), safe to log.
@@ -175,9 +175,10 @@ final class IntentRouter: IntentParser {
     // `IntentRouter.isValidBreakdown(...)`) without `await`. Each is a pure function over
     // `Sendable` values touching no actor-isolated state, so `nonisolated` is sound — without it,
     // Swift 6 strict concurrency would require every call site to `await`, or these calls would
-    // fail to compile at all from a non-`@MainActor` context. `maxTaskCap` (a `static let`
-    // constant of a `Sendable` type) needs no such annotation — immutable global/static state is
-    // implicitly `nonisolated` regardless of the enclosing type's actor.
+    // fail to compile at all from a non-`@MainActor` context. `maxTaskCap` needs `nonisolated` for
+    // the same reason: a `static let` declared inside a `@MainActor` type inherits that isolation
+    // (only statics at global/file scope, outside an isolated type, are implicitly `nonisolated`),
+    // so without it the off-main callers hit "cannot be accessed from outside of the actor".
 
     nonisolated static func cap(_ tasks: [ParsedTask]) -> [ParsedTask] {
         Array(tasks.prefix(maxTaskCap))
