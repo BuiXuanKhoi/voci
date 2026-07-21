@@ -626,14 +626,21 @@ extension ReminderScheduler: UNUserNotificationCenterDelegate {
         withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
     ) {
         let identifier = notification.request.identifier
+        // `completionHandler` is not `@Sendable` (the UserNotifications SDK doesn't annotate it), so
+        // capturing it into the `@MainActor` Task below crosses an isolation boundary and Swift 6
+        // flags "sending 'completionHandler' risks causing data races". The OS invokes this delegate
+        // method once and we call the handler exactly once, on the main actor — box it in a
+        // `nonisolated(unsafe) let` to assert that safety, matching this file's/`SpeechCapture.swift`'s
+        // established convention for sending a non-Sendable system value across an isolation hop.
+        nonisolated(unsafe) let handler = completionHandler
         _Concurrency.Task { @MainActor [weak self] in
             guard let self, let recordId = UUID(uuidString: identifier) else {
                 // Not one of ours (foreign identifier) or the scheduler is gone — show it as the
                 // system would by default rather than silently eating a notification.
-                completionHandler([.banner, .sound])
+                handler([.banner, .sound])
                 return
             }
-            completionHandler(self.presentationDecision(for: recordId) ? [.banner, .sound] : [])
+            handler(self.presentationDecision(for: recordId) ? [.banner, .sound] : [])
         }
     }
 
@@ -647,8 +654,12 @@ extension ReminderScheduler: UNUserNotificationCenterDelegate {
     ) {
         let identifier = response.notification.request.identifier
         let actionId = response.actionIdentifier
+        // Same non-Sendable-completion-handler-across-isolation fix as `willPresent` above — box it
+        // in a `nonisolated(unsafe) let` so sending it into the `@MainActor` Task doesn't trip
+        // Swift 6's data-race diagnostic; called exactly once via `defer` on the main actor.
+        nonisolated(unsafe) let handler = completionHandler
         _Concurrency.Task { @MainActor [weak self] in
-            defer { completionHandler() }
+            defer { handler() }
             guard let self, let recordId = UUID(uuidString: identifier) else { return }
             self.handleAction(actionId, recordId: recordId)
         }

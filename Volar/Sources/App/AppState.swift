@@ -451,17 +451,6 @@ final class AppState {
         // instance's construction before any of this init's own statements run.
         self.voiceChannel = VoiceReminderChannel(playback: self.voice)
         self.reminderGate = ReminderContextGate()
-        // M-1 (constitution I): wire the one cheaply-detectable, no-extra-entitlement signal this
-        // file has direct access to — our own `AmbientSound` instance's public `isPlaying` flag —
-        // so a voice reminder never talks over ambient sound already playing. Mic contention is
-        // already wired unconditionally inside `ReminderContextGate` itself
-        // (`AVCaptureDevice.isInUseByAnotherApplication`); DND/screen-share have no public,
-        // unprivileged API on macOS (see `ReminderContextGate.swift`'s own doc comment) and are
-        // deliberately left non-suppressing rather than failing the whole gate open silently.
-        // // UNVERIFIED: this only covers OUR OWN ambient playback, not other apps' audio in
-        // general (no public system-wide "is any app playing audio" API without an entitlement)
-        // — calendar-busy (P3) + call/mic remain the real guards for that case.
-        self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
         if let store {
             let realScheduler = ReminderScheduler(store: store, voice: self.voiceChannel, gate: self.reminderGate)
             self.scheduler = realScheduler
@@ -478,6 +467,20 @@ final class AppState {
             self.delegation = nil
             self.appLinkHandler = nil
         }
+        // M-1 (constitution I): wire the one cheaply-detectable, no-extra-entitlement signal this
+        // file has direct access to — our own `AmbientSound` instance's public `isPlaying` flag —
+        // so a voice reminder never talks over ambient sound already playing. Assigned HERE, after
+        // every stored property above is initialized: this closure captures `self`, and Swift
+        // forbids capturing `self` in a closure until the instance is fully initialized (doing it
+        // earlier produced "variable 'self.scheduler' used before being initialized"). Mic
+        // contention is already wired unconditionally inside `ReminderContextGate` itself
+        // (`AVCaptureDevice.isInUseByAnotherApplication`); DND/screen-share have no public,
+        // unprivileged API on macOS (see `ReminderContextGate.swift`'s own doc comment) and are
+        // deliberately left non-suppressing rather than failing the whole gate open silently.
+        // // UNVERIFIED: this only covers OUR OWN ambient playback, not other apps' audio in
+        // general (no public system-wide "is any app playing audio" API without an entitlement)
+        // — calendar-busy (P3) + call/mic remain the real guards for that case.
+        self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
         speech.setLocale(Locale(identifier: self.recognitionLocaleID))
         // CAPTURE SEAM (AppLinkHandler.swift's own file header): wire `volar://capture?text=...`
         // into the SAME confirm-card-gated pipeline every other capture uses — never a bypass.
