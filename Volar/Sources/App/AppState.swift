@@ -53,6 +53,24 @@ enum SpeechEngineChoice: String, Sendable, Equatable, CaseIterable, Identifiable
     }
 }
 
+/// Local (on-device) vs Cloud task-parsing preference — the Settings switch this feature adds.
+/// A thin bridge OVER the existing one-time cloud-parse consent (`cloudParseConsent` /
+/// `cloudParseConsentKey`), which already gates the router's Cloud tier via
+/// `DefaultCloudParseGate.isOptedIn()`: `.cloud` == opted in, `.onDevice` == not. Keeping that key
+/// as the single source of truth means the voice-capture consent popover and this Settings picker
+/// can never disagree. String-backed + `CaseIterable`/`Identifiable` so Settings drives it off a
+/// picker, same convention as `SpeechEngineChoice` above.
+enum ParseEnginePreference: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case onDevice, cloud
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .onDevice: return "On-device (private, free)"
+        case .cloud: return "Cloud AI (better quality)"
+        }
+    }
+}
+
 /// How reminders are delivered (Phase 4 contract B): the visual `UNUserNotificationCenter`
 /// notification always fires; this only gates the ADDITIONAL spoken channel
 /// (`VoiceReminderChannel`, sibling-owned). Persisted under `AppState.voiceDeliveryModeKey` — the
@@ -254,16 +272,14 @@ final class AppState {
     /// Replaces the v1 `NLParser` direct call (contract "Confirm + materialize" / T025: "Replace
     /// any v1 direct-HeuristicNLParser call with the router"). `IntentRouter` is owned by the
     /// T019 agent (`Sources/Parsing/IntentParsing.swift`, landed) — constructed with its own
-    /// defaults for `foundationModel`/`heuristic`, but wired here with a real `cloudGate:`
-    /// (`DefaultCloudParseGate`, defined at the bottom of this file) so the one-time consent
-    /// decision this file owns (`cloudParseConsent`/`resolveCloudConsent`) actually reaches the
-    /// router. `cloud:` is left at its own default (`nil`) — a working `CloudParser` needs a real
-    /// `ParseCredentialProvider` (StoreKit paid JWS + `DeviceCheckProvider.swift`'s free-tier
-    /// token composed together), which is explicitly "NOT built in `CloudParser.swift`" and isn't
-    /// part of this task's scope (T051 StoreKit is Phase 8, not yet landed) — Cloud is
-    /// consequently inert today (FM -> Heuristic only) regardless of consent; the gate is wired
-    /// correctly for the moment that composite exists. See this task's final report for the
-    /// backlog note.
+    /// defaults for `foundationModel`/`heuristic`, wired here with a real `cloudGate:`
+    /// (`DefaultCloudParseGate`, bottom of this file) so the Local↔Cloud choice this file owns
+    /// (`parseEnginePreference` / `cloudParseConsent` / `resolveCloudConsent`) reaches the router.
+    /// `cloud:` is now wired with `ConfigParseCredentialProvider` (a placeholder credential source):
+    /// the Cloud tier is fully connected and user-switchable from Settings, but stays inert
+    /// (falls back to on-device) until a parse-proxy base URL + token are configured — "code first,
+    /// key later". The real StoreKit paid-JWS + `DeviceCheckProvider.swift` free-token composite
+    /// (Phase 8/T051) supersedes that placeholder when it lands.
     private let router: IntentRouter
     private let store: TaskStore?
     /// Injected clock so `activeTask` stays pure/testable instead of reading the wall clock
@@ -386,7 +402,10 @@ final class AppState {
         ambient: AmbientMode = .none,
         customImageURL: URL? = nil,
         voiceFeedback: Bool = false,
-        router: IntentRouter = IntentRouter(cloudGate: DefaultCloudParseGate()),
+        router: IntentRouter = IntentRouter(
+            cloud: CloudParser(credentials: ConfigParseCredentialProvider()),
+            cloudGate: DefaultCloudParseGate()
+        ),
         clock: @escaping () -> Date = Date.init
     ) {
         self.store = store
@@ -648,12 +667,15 @@ final class AppState {
     private var captureSession = 0
 
     /// Picks the engine for the NEXT capture based on user choice, with safe fallbacks:
-    /// WhisperKit only when supported AND its model is loaded, else Apple. Groq used as chosen.
+    /// WhisperKit only when supported AND its model is loaded, else Apple; Groq (cloud) only when a
+    /// credential is configured, else Apple on-device — so choosing cloud before a key exists
+    /// degrades quietly to local instead of hard-erroring at upload time ("code first, key later",
+    /// mirrors the Local↔Cloud parse switch's fallback).
     private var selectedEngine: SpeechEngine {
         switch speechEngineChoice {
         case .appleOnDevice: return speech
         case .whisperKit: return (WhisperKitEngine.isSupported && whisper.isModelReady) ? whisper : speech
-        case .groq: return groq
+        case .groq: return GroqEngine.isConfigured ? groq : speech
         }
     }
 
@@ -833,6 +855,25 @@ final class AppState {
         if choice == .whisperKit, WhisperKitEngine.isSupported {
             _Concurrency.Task { await whisper.prepare() }
         }
+    }
+
+    /// Local↔cloud parsing switch surfaced in Settings. Reads the SAME `cloudParseConsent` the
+    /// router's Cloud tier is already gated on (`DefaultCloudParseGate`), so this is purely a
+    /// friendlier presentation of that one bit — no second source of truth. A `nil` consent
+    /// (never asked) reads as `.onDevice`, matching the privacy-first "decline ⇒ never cloud" default.
+    var parseEnginePreference: ParseEnginePreference {
+        cloudParseConsent == true ? .cloud : .onDevice
+    }
+
+    /// Change the parsing engine from Settings. Persists to the existing `cloudParseConsentKey` so
+    /// the router's Cloud gate picks it up immediately and the one-time voice-capture consent
+    /// popover never re-appears once the user has made a Settings choice. Picking `.cloud` is
+    /// itself the informed opt-in — the Settings row's hint states cloud parsing sends only the
+    /// TEXT (never audio) of the utterance to our proxy.
+    func setParseEngine(_ preference: ParseEnginePreference) {
+        let allow = (preference == .cloud)
+        cloudParseConsent = allow
+        UserDefaults.standard.set(allow, forKey: Self.cloudParseConsentKey)
     }
 
     /// Not part of the frozen §4 method list, but required to actually drive

@@ -70,6 +70,17 @@ protocol GroqCredentialProvider: Sendable {
 struct EnvironmentGroqCredentialProvider: GroqCredentialProvider {
     static let groqDirectBaseURL = URL(string: "https://api.groq.com/openai/v1")!
 
+    /// True when a bearer token is configured (env `GROQ_PROXY_TOKEN`/`GROQ_API_KEY`, or
+    /// `volar.groqToken`) — lets the app fall back to on-device BEFORE recording (like WhisperKit's
+    /// readiness gate) instead of hard-erroring only at upload time. Reads the SAME sources as
+    /// `authorization()` below so the two can't disagree. Mirrors `ConfigParseCredentialProvider.isConfigured`.
+    static var isConfigured: Bool {
+        let env = ProcessInfo.processInfo.environment
+        let token = env["GROQ_PROXY_TOKEN"] ?? env["GROQ_API_KEY"]
+            ?? UserDefaults.standard.string(forKey: "volar.groqToken")
+        return !(token ?? "").isEmpty
+    }
+
     func baseURL() async throws -> URL {
         if let s = ProcessInfo.processInfo.environment["GROQ_BASE_URL"]
             ?? UserDefaults.standard.string(forKey: "volar.groqBaseURL"),

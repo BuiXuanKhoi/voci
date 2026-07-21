@@ -17,6 +17,12 @@ import AVFoundation
 /// does the on-device engine.
 @MainActor
 final class GroqEngine: SpeechEngine {
+    /// Whether a Groq credential is available (env/UserDefaults token) — drives the pre-record
+    /// fallback in `AppState.selectedEngine` and the Settings status hint, the same "configured?"
+    /// gate WhisperKit expresses via `isModelReady`. `nonisolated` so it's readable from any
+    /// context; it only touches the non-isolated `EnvironmentGroqCredentialProvider` static.
+    nonisolated static var isConfigured: Bool { EnvironmentGroqCredentialProvider.isConfigured }
+
     let supportsPartialResults = false
     private(set) var isRunning = false
 

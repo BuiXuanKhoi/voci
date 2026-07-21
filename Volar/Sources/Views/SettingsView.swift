@@ -169,6 +169,36 @@ struct SettingsView: View {
                         .foregroundStyle(VolarColor.textSec)
                 }
             }
+            if appState.speechEngineChoice == .groq, !GroqEngine.isConfigured {
+                SettingsRow(label: "Groq status", hint: "Add a Groq token (env GROQ_API_KEY / GROQ_PROXY_TOKEN, or UserDefaults volar.groqToken) to enable cloud transcription. Until then Volar uses Apple on-device recognition.") {
+                    Text("Not configured — using Apple on-device")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VolarColor.textSec)
+                }
+            }
+            SettingsRow(label: "Task parsing", hint: "On-device stays private and free (Apple on-device model when available, otherwise a built-in heuristic). Cloud AI sends only the TEXT of what you said (never audio) to our proxy for higher-quality parsing of trickier phrasing.") {
+                // `ParseEnginePreference` doesn't declare Hashable — same convention as the Speech
+                // engine / Density pickers, bind through its `String` rawValue instead of the enum.
+                Picker("", selection: Binding(
+                    get: { appState.parseEnginePreference.rawValue },
+                    set: { if let pref = ParseEnginePreference(rawValue: $0) { appState.setParseEngine(pref) } }
+                )) {
+                    ForEach(ParseEnginePreference.allCases) { pref in
+                        Text(pref.label).tag(pref.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(accentColors.solid)
+                .frame(width: 200)
+            }
+            if appState.parseEnginePreference == .cloud, !ConfigParseCredentialProvider.isConfigured {
+                SettingsRow(label: "Cloud parsing status", hint: "Add a parse-proxy base URL + token (UserDefaults keys volar.parseProxyBaseURL / volar.parseProxyToken) to enable cloud parsing. Until then Volar quietly uses on-device parsing.") {
+                    Text("Not configured — using on-device")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VolarColor.textSec)
+                }
+            }
             SettingsRow(label: "Recognition language", hint: "The language Volar listens for when you capture a task by voice, including Vietnamese.") {
                 Picker("", selection: Binding(
                     get: { appState.recognitionLocaleID },
