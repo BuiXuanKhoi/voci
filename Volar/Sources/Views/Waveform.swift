@@ -79,9 +79,10 @@ struct Waveform: View {
 }
 
 #Preview {
+    let accent = VolarAccent.indigo.accent
     VStack(spacing: 24) {
-        Waveform(active: true, color: Color(volar: 0x6B6BFF), glow: Color(volar: 0x6B6BFF, opacity: 0.45))
-        Waveform(active: false, color: Color(volar: 0x6B6BFF), glow: Color(volar: 0x6B6BFF, opacity: 0.45))
+        Waveform(active: true, color: accent.solid, glow: accent.glow)
+        Waveform(active: false, color: accent.solid, glow: accent.glow)
     }
     .padding(24)
     .background(VolarColor.bg)
