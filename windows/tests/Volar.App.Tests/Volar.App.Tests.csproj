@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    App-layer service tests (Wave 3-C). TFM matches Volar.App's own override (net10.0-windows10.0.
+    19041.0 — WinUI 3 needs the Windows-versioned TFM) because this project references Volar.App
+    directly for Services/Contracts.cs, Services/State/TaskListService.cs,
+    Services/State/EligibilityAndResurfaceService.cs (C2, this project's State/ subfolder) and
+    Services/Adapters/** (C1, this project's Adapters/ subfolder — kept file-disjoint from C2's
+    tests per specs/003-windows-port/wave3c-services.md). A plain "net10.0" test project cannot
+    reference a "net10.0-windows10.0.19041.0"-targeted project (NuGet target-framework
+    compatibility only flows the other direction), so this project must carry the same TFM —
+    UseWinUI/WindowsPackageType/RuntimeIdentifier are deliberately NOT repeated here: this project
+    only consumes plain C# types from Volar.App (no XAML), so it needs none of that.
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.12.0" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\Volar.App\Volar.App.csproj" />
+    <ProjectReference Include="..\..\src\Volar.Core\Volar.Core.csproj" />
+    <ProjectReference Include="..\..\src\Volar.Domain\Volar.Domain.csproj" />
+    <ProjectReference Include="..\..\src\Volar.Data\Volar.Data.csproj" />
+    <ProjectReference Include="..\..\src\Volar.Reminders\Volar.Reminders.csproj" />
+    <!-- Added by C1 for Adapters/** tests (OrchestratorTaskStoreAdapter/FileDelegationMetaStore
+         need Volar.Orchestrator's IOrchestratorTaskStore/IDelegationMetaStore/DelegationTracker). -->
+    <ProjectReference Include="..\..\src\Volar.Orchestrator\Volar.Orchestrator.csproj" />
+  </ItemGroup>
+
+</Project>

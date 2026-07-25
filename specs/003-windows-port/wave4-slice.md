@@ -1,5 +1,30 @@
 # Wave 4 — Vertical Slice: Today + Quick-Capture Popover (REAL data)
 
+> ## ⛔ SUPERSEDED IN PART — read this before using any of it (Opus, 2026-07-25)
+>
+> Three things in this document are now stale. `specs/003-windows-port/views-inventory.md` wins on
+> all three, and `specs/003-windows-port/wave3c-services.md` wins on the fourth:
+>
+> 1. **The design layout spec below (§"Design layout spec", lines ~100-126) is stale.** It describes
+>    a flat "Now / Later today / Completed" row-list ported from `design/volar-mac.jsx`. The actual
+>    `Volar/Sources/Views/TodayView.swift` was restructured by the Studio Dark retheme into a
+>    different visual grammar: ONE spotlit "NOW" hero card, ONE dimmed "NEXT" peek row, and
+>    Later/Completed collapsed into default-collapsed disclosure drawers. `PopoverView.swift`
+>    likewise grew multi-draft confirm cards, attribute chips, conflict advisories and the
+>    voice-done branch. **DECISION: Wave 4 ports the CURRENT SWIFT, not this document's layout** —
+>    the whole point of this effort is parity with the macOS app as it exists (anh Khôi, 2026-07-25:
+>    "2 bản phải đồng nhất"). Where this doc and the Swift disagree, the Swift is the spec.
+> 2. **The theme crib (§"Theme resources") quotes the pre-retheme palette** (e.g. `#1C1C1E`). The
+>    XAML already in `windows/src/Volar.App/Theme/*.xaml` matches the current Swift. Use the XAML
+>    keys and `Volar/Sources/Design/Theme.swift`, never this doc's hex values.
+> 3. **The 3-agent task breakdown (§"Task breakdown") is superseded** by the 14-slice, file-disjoint
+>    proposal in `views-inventory.md` §3, which covers all 18 views rather than just two.
+> 4. **"bind/persist TaskEntity" is superseded**: services and views speak `Volar.Domain.TaskItem`
+>    (`wave3c-services.md` decision 6). `TaskEntity` stays inside `Volar.Data`.
+>
+> Still valid and worth reading: the "Scope boundary", the "HARD GOTCHAS (violating these = native
+> crash)" list, and the 6-point self-review checklist.
+
 Author: Opus (brain). Executors: Sonnet (hands). Branch: `window`, worktree `C:\projects\voci-windows`.
 Goal decided with anh Khôi 2026-07-21: build the **Today** screen + **quick-capture Popover**
 matching `design/volar-mac.jsx` + `design/volar-popover.jsx`, wired to **real data** (SQLite via
