@@ -1,13 +1,14 @@
-// Stubs/Win32EditorTransport.cs — IEditorTransport implementation.
+// Services/Adapters/Win32EditorTransport.cs — IEditorTransport implementation.
 //
 // Not actually a stub: IEditorTransport.cs's own doc comment says Windows has no App Sandbox, so
 // (unlike the Swift original's security-scoped-bookmark dance) every operation here is a direct,
 // literal System.IO/Process.Start call — there's no meaningful "fake" version worth writing
-// instead. Kept in the Stubs namespace/folder for discoverability alongside this file's siblings.
+// instead. Moved out of Stubs/ into Services/Adapters/ by C5 (Wave 3-C stage 3) — it was never a
+// stub, just filed alongside its siblings for discoverability until the real stubs were deleted.
 using System.Diagnostics;
 using Volar.Orchestrator;
 
-namespace Volar.App.Stubs;
+namespace Volar.App.Services.Adapters;
 
 public sealed class Win32EditorTransport : IEditorTransport
 {

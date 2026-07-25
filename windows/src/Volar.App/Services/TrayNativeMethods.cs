@@ -33,6 +33,27 @@ internal static class TrayNativeMethods
     public const uint TPM_RIGHTBUTTON = 0x0002;
     public const uint TPM_RETURNCMD = 0x0100;
 
+    // --- Power/session-change notifications (App.xaml.cs's ReminderScheduler.RebuildFromStorage
+    // wake-recovery hook, wave3c-services.md "Shell/startup obligations" item 3) ------------------
+    // WM_POWERBROADCAST is delivered to every top-level window automatically, no registration
+    // needed. WM_WTSSESSION_CHANGE (session lock/unlock) needs WTSRegisterSessionNotification first
+    // — both are handled on TrayIconService's existing hidden message-only window/pump thread rather
+    // than standing up a second native window just for this.
+    public const int WM_POWERBROADCAST = 0x0218;
+    public const int PBT_APMRESUMESUSPEND = 0x0007;
+    public const int PBT_APMRESUMEAUTOMATIC = 0x0012;
+
+    public const int WM_WTSSESSION_CHANGE = 0x02B1;
+    public const nint WTS_SESSION_UNLOCK = 0x8;
+
+    public const uint NOTIFY_FOR_THIS_SESSION = 0;
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    public static extern bool WTSRegisterSessionNotification(nint hWnd, uint dwFlags);
+
+    [DllImport("wtsapi32.dll", SetLastError = true)]
+    public static extern bool WTSUnRegisterSessionNotification(nint hWnd);
+
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
     public struct NOTIFYICONDATA
     {
