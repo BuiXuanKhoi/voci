@@ -10,3 +10,11 @@ project_id = "nuzrpipwacravfgsiacv"
 [functions.parse]
 enabled = true
 verify_jwt = false
+
+# The groq function is the paid-only Groq Speech-to-Text proxy (see supabase/functions/groq/
+# README.md). Same reasoning as [functions.parse] applies: it does its own auth (StoreKit JWS in
+# Authorization — verifyPaidAuth, no free/App-Attest path for this route) and fails closed on
+# anything else, so it must NOT sit behind Supabase's gateway JWT check either.
+[functions.groq]
+enabled = true
+verify_jwt = false

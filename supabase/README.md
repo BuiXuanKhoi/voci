@@ -1,18 +1,21 @@
 # Volar Supabase backend
 
-Serverless appendix for the Volar macOS app (spec `002-workflow-command-center`). Currently
-implements one route: `POST /functions/v1/parse` — see
+Serverless appendix for the Volar macOS app (spec `002-workflow-command-center`). Implements two
+routes: `POST /functions/v1/parse` — see
 `../specs/002-workflow-command-center/contracts/parse-proxy.md` for the wire contract this code
-implements exactly (status codes, field names, caps). `groq/` is a documented placeholder
-(separate backlog item, not implemented).
+implements exactly (status codes, field names, caps) — and `POST
+/functions/v1/groq/audio/transcriptions`, the paid-only Groq Speech-to-Text proxy (see
+`functions/groq/README.md` for its own contract/threat-model notes; it has no separate spec
+contract doc, only the backlog decision it implements).
 
 ```text
 supabase/
 ├── migrations/
 │   └── 0001_parse_quota.sql   # parse_quota + parse_rate_limit tables, atomic RPC increments
 └── functions/
-    ├── parse/index.ts         # the route
-    ├── groq/README.md         # not implemented — pointer to backlog
+    ├── parse/index.ts         # the parse/breakdown route
+    ├── groq/index.ts          # the Groq Speech-to-Text proxy route (paid-only)
+    ├── groq/README.md         # groq's own contract/threat-model/curl notes
     └── _shared/                # auth.ts, quota.ts, schema.ts, gemini.ts, env.ts, log.ts, http.ts
 ```
 
@@ -30,8 +33,9 @@ supabase db push
 # Set secrets (see full list below) — repeat `supabase secrets set` per key, or use --env-file
 supabase secrets set --env-file ./supabase/.env.deploy   # never commit this file
 
-# Deploy the function
+# Deploy the functions
 supabase functions deploy parse
+supabase functions deploy groq
 ```
 
 `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` do **not** need to be set manually — the Edge
@@ -62,6 +66,7 @@ first).
 | `APPATTEST_TEAM_ID` | free (App Attest) auth | Your Apple Developer Team ID. |
 | `APPATTEST_BUNDLE_ID` | free (App Attest) auth | App bundle id (combined with team id as `appId` for App Attest). |
 | `APPATTEST_ENV` | free (App Attest) auth | `development` or `production`. |
+| `GROQ_API_KEY` | `groq` function only | Groq API key for the Speech-to-Text proxy. See `functions/groq/README.md` for this function's full env list (`GROQ_BASE_URL`, `GROQ_MAX_AUDIO_BYTES`, `GROQ_UPSTREAM_TIMEOUT_MS`) — it reuses `PARSE_PAID_RPM` and the `APPSTORE_*` vars above rather than duplicating them. |
 
 ## Auth design
 
