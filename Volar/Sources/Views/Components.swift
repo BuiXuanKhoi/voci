@@ -48,9 +48,9 @@ struct PriorityBadge: View {
     private var style: (dot: Color, background: Color, foreground: Color, label: String) {
         switch priority {
         case .high:
-            return (VolarColor.high, Color(volar: 0xFF6B6B, opacity: 0.14), Color(volar: 0xFF8B8B), "High")
+            return (VolarColor.high, VolarColor.high.opacity(0.14), VolarColor.high, "High")
         case .medium:
-            return (VolarColor.med, Color(volar: 0xFFB347, opacity: 0.14), Color(volar: 0xFFC279), "Medium")
+            return (VolarColor.med, VolarColor.med.opacity(0.14), VolarColor.med, "Medium")
         case .low:
             return (VolarColor.low, Color.white.opacity(0.05), VolarColor.textSec, "Low")
         }
