@@ -58,7 +58,7 @@ protocol CloudParseGate: Sendable {
 @MainActor
 final class IntentRouter: IntentParser {
     /// Hard cap, all tiers, all call sites (contract: "Enforces the 10-task cap centrally").
-    static let maxTaskCap = 10
+    nonisolated static let maxTaskCap = 10
 
     /// Which tier actually produced the last successful result — diagnostics only, never PII
     /// (no transcript/title content), safe to log.
@@ -141,7 +141,12 @@ final class IntentRouter: IntentParser {
         }
 
         lastRoute = .heuristic
-        let heuristicResult = await heuristic.parse(transcript, now: now, openTaskTitles: [])
+        // R5: every tier sees the SAME (possibly-empty) `titles` list computed once above — this
+        // was previously hardcoded to `[]` here, silently starving the heuristic tier (the ONLY
+        // tier available on macOS 14/15) of dependency-matching context and capping its
+        // taskDone-condition confidence below the 0.7 auto-resolve bar (see
+        // `dependencyConfidence` in `NLParser.swift`).
+        let heuristicResult = await heuristic.parse(transcript, now: now, openTaskTitles: titles)
         if !heuristicResult.isEmpty {
             return Self.cap(heuristicResult)
         }
@@ -170,9 +175,10 @@ final class IntentRouter: IntentParser {
     // `IntentRouter.isValidBreakdown(...)`) without `await`. Each is a pure function over
     // `Sendable` values touching no actor-isolated state, so `nonisolated` is sound — without it,
     // Swift 6 strict concurrency would require every call site to `await`, or these calls would
-    // fail to compile at all from a non-`@MainActor` context. `maxTaskCap` (a `static let`
-    // constant of a `Sendable` type) needs no such annotation — immutable global/static state is
-    // implicitly `nonisolated` regardless of the enclosing type's actor.
+    // fail to compile at all from a non-`@MainActor` context. `maxTaskCap` needs `nonisolated` for
+    // the same reason: a `static let` declared inside a `@MainActor` type inherits that isolation
+    // (only statics at global/file scope, outside an isolated type, are implicitly `nonisolated`),
+    // so without it the off-main callers hit "cannot be accessed from outside of the actor".
 
     nonisolated static func cap(_ tasks: [ParsedTask]) -> [ParsedTask] {
         Array(tasks.prefix(maxTaskCap))
@@ -367,8 +373,17 @@ enum ParsedTaskValidation {
         }
 
         let estimateMinutes: ParsedValue<Int>? = raw.estimateMinutes.flatMap { c in
-            guard validConfidence(c.confidence), c.value.isFinite, c.value > 0 else { return nil }
-            return ParsedValue(value: Int(c.value.rounded()), confidence: c.confidence)
+            // `Int(_:)` on a `Double` TRAPS when the value is out of `Int`'s representable range
+            // (e.g. a well-formed 200 response with `estimateMinutes: 1e300` — the server only
+            // validates `isFinite && > 0`, not any upper bound). `Int(exactly:)` returns `nil`
+            // instead of trapping, and the `1...1440` bound (mirrors this file's own reminder/
+            // heuristic estimate caps — 24h) rejects any in-range-for-Int but nonsensical duration
+            // the same way a schema violation is rejected everywhere else in this function: drop
+            // only this field, keep the rest of the task (constitution II).
+            guard validConfidence(c.confidence), c.value.isFinite, c.value > 0,
+                  let est = Int(exactly: c.value.rounded()), (1...1440).contains(est)
+            else { return nil }
+            return ParsedValue(value: est, confidence: c.confidence)
         }
 
         let priority: ParsedValue<Int>? = raw.priority.flatMap { c in

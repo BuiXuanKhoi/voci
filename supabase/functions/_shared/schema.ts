@@ -116,12 +116,16 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
   if (!isIso8601WithZone(body.now)) {
     return { ok: false, error: "now is required and must be ISO8601 with zone" };
   }
+  // Contract + README use snake_case `locale_hint` on the wire; `body.localeHint` is accepted
+  // too as a defensive fallback (in case a caller sends camelCase), but snake_case wins when both
+  // are present — matching the contract is the source of truth here.
   let localeHint: ParseRequest["localeHint"];
-  if (body.localeHint !== undefined) {
-    if (body.localeHint !== "vi" && body.localeHint !== "en" && body.localeHint !== "mixed") {
+  const localeHintRaw = body.locale_hint !== undefined ? body.locale_hint : body.localeHint;
+  if (localeHintRaw !== undefined) {
+    if (localeHintRaw !== "vi" && localeHintRaw !== "en" && localeHintRaw !== "mixed") {
       return { ok: false, error: "locale_hint must be one of vi|en|mixed" };
     }
-    localeHint = body.localeHint;
+    localeHint = localeHintRaw;
   }
 
   let openTaskTitles: string[] = [];
@@ -395,10 +399,12 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
  *  (contract obligation 4: "enforce ... the 10-task cap server-side" — truncation is the safe
  *  enforcement here, since a prompt-injection attempt to make the model emit >10 tasks must not
  *  be able to smuggle task #11+ through under any circumstance; anything structurally invalid is
- *  rejected outright, not best-effort-repaired). Returns undefined on any structural failure. */
+ *  rejected outright, not best-effort-repaired). Returns undefined on any structural failure.
+ *  An empty array IS a valid, well-formed response (the model legitimately found no actionable
+ *  tasks in the transcript, e.g. small talk) — it must return `200 []`, not a 502; rejecting it
+ *  as malformed would burn a full quota slot on a request that produced a perfectly good answer. */
 export function validateParsedTaskArray(v: unknown): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
   if (!Array.isArray(v)) return undefined;
-  if (v.length === 0) return undefined;
   const tasks: ParsedTaskOut[] = [];
   for (const item of v) {
     const task = validateParsedTask(item);

@@ -24,17 +24,26 @@
 //     "assertion": "<base64 Data from generateAssertion>",
 //     "clientDataHashB64": "<base64 SHA-256 digest the client computed and signed over>" }
 //
-// STATUS: structural validation (below) is fully implemented and runs unconditionally. The final
-// cryptographic step — verifying `assertion`'s signature against the public key Apple attested
-// for `keyId` — requires a public-key registry populated by a ONE-TIME attestation/registration
+// `clientDataHashB64` is bound to THIS request: `verifyFreeAuth` recomputes SHA-256 over the raw
+// request body bytes and requires it to equal the token's `clientDataHashB64` before doing
+// anything else (including the key-store lookup). Without this, a captured token+assertion pair
+// could be replayed against an arbitrary different body, since the assertion signature alone
+// only proves "this client data hash was signed," not "this client data hash matches this body."
+//
+// STATUS: structural validation and the request-body-hash binding above are both fully
+// implemented and run unconditionally. The final cryptographic step — verifying `assertion`'s
+// signature against the public key Apple attested for `keyId` — requires a public-key registry
+// populated by a ONE-TIME attestation/registration
 // ceremony (`attestKey` + `verifyAttestation`) that is explicitly OUT OF SCOPE for this route
 // (contract only specifies `/parse`; no `/attest/register` endpoint or key-storage table exists
 // yet). Until that registry exists, `verifyFreeAuth` fails closed with 503 `config_missing` for
 // well-formed tokens — never a silent pass. See `AppAttestKeyStore` below and the final report's
 // follow-up list.
 
+import { Buffer } from "node:buffer";
 import { readEnv, requireEnv } from "./env.ts";
 import { errorResponse } from "./http.ts";
+import { logError } from "./log.ts";
 
 export type AuthMode = "paid" | "free";
 
@@ -45,7 +54,10 @@ export type AuthResult =
 
 async function sha256Hex(input: string | Uint8Array): Promise<string> {
   const bytes = typeof input === "string" ? new TextEncoder().encode(input) : input;
-  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  // Re-wrap in a fresh `Uint8Array` backed by a plain `ArrayBuffer`: under newer TS lib.dom types,
+  // a generic `Uint8Array<ArrayBufferLike>` (which could be `SharedArrayBuffer`-backed) is not
+  // assignable to `BufferSource`, and `crypto.subtle.digest` requires the narrower type.
+  const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(bytes));
   return Array.from(new Uint8Array(digest))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
@@ -62,6 +74,12 @@ function base64ToBytes(b64: string): Uint8Array | undefined {
   }
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
 // -------------------------------------------------------------------------------------------
 // Paid mode: StoreKit JWS
 // -------------------------------------------------------------------------------------------
@@ -73,13 +91,18 @@ const APPSTORE_ENV_NAMES = ["APPSTORE_BUNDLE_ID", "APPSTORE_ENVIRONMENT", "APPST
  *  individual DER Buffers as required by `SignedDataVerifier`'s `appleRootCAs: Buffer[]` param. */
 function splitPemCertificates(bundle: string): Uint8Array[] {
   const matches = bundle.match(/-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g) ?? [];
-  return matches.map((pem) => {
-    const b64 = pem
-      .replace(/-----BEGIN CERTIFICATE-----/, "")
-      .replace(/-----END CERTIFICATE-----/, "")
-      .replace(/\s+/g, "");
-    return base64ToBytes(b64) ?? new Uint8Array();
-  });
+  // Unparseable blocks are dropped (not mapped to an empty Uint8Array) — an empty buffer would
+  // silently satisfy `rootCAs.length === 0`'s emptiness guard below while contributing nothing
+  // usable to `SignedDataVerifier`, defeating the guard. Only genuinely decoded certs count.
+  return matches
+    .map((pem) => {
+      const b64 = pem
+        .replace(/-----BEGIN CERTIFICATE-----/, "")
+        .replace(/-----END CERTIFICATE-----/, "")
+        .replace(/\s+/g, "");
+      return base64ToBytes(b64);
+    })
+    .filter((bytes): bytes is Uint8Array => bytes !== undefined && bytes.length > 0);
 }
 
 /** Defensive alg check ahead of the library call — reject `alg: none` / non-ES256 JWS before any
@@ -111,57 +134,71 @@ export async function verifyPaidAuth(authorizationHeader: string | null): Promis
 
   const cfg = requireEnv(APPSTORE_ENV_NAMES);
   if (!cfg.ok) {
-    return {
-      ok: false,
-      response: errorResponse(503, "config_missing", {
-        detail: "StoreKit JWS verification is not configured",
-        missingEnv: cfg.missing,
-      }),
-    };
+    // Opaque to the caller (info-leak hardening) — the specific missing keys are only useful to
+    // whoever owns the deployment, never to an unauthenticated internet caller.
+    logError("paid_config_missing", { missingEnv: cfg.missing.join(",") });
+    return { ok: false, response: errorResponse(503, "config_missing") };
   }
   const appAppleIdRaw = readEnv("APPSTORE_APP_APPLE_ID");
   const environment = cfg.values.APPSTORE_ENVIRONMENT;
   if (environment !== "Sandbox" && environment !== "Production") {
-    return {
-      ok: false,
-      response: errorResponse(503, "config_missing", {
-        detail: "APPSTORE_ENVIRONMENT must be 'Sandbox' or 'Production'",
-      }),
-    };
+    logError("paid_config_invalid", { reason: "appstore_environment_not_sandbox_or_production" });
+    return { ok: false, response: errorResponse(503, "config_missing") };
   }
   if (environment === "Production" && !appAppleIdRaw) {
-    return {
-      ok: false,
-      response: errorResponse(503, "config_missing", {
-        detail: "APPSTORE_APP_APPLE_ID is required when APPSTORE_ENVIRONMENT=Production",
-        missingEnv: ["APPSTORE_APP_APPLE_ID"],
-      }),
-    };
+    logError("paid_config_missing", { missingEnv: "APPSTORE_APP_APPLE_ID" });
+    return { ok: false, response: errorResponse(503, "config_missing") };
+  }
+
+  // APPSTORE_APP_APPLE_ID, when present, must decode to a real numeric App Store id — a garbage
+  // value would otherwise be silently coerced to `NaN` by `Number.parseInt` and handed to
+  // `SignedDataVerifier`, which is a config error, not something to discover via a confusing
+  // downstream verifier failure.
+  let appAppleId: number | undefined;
+  if (appAppleIdRaw !== undefined) {
+    const parsed = Number.parseInt(appAppleIdRaw, 10);
+    if (!Number.isSafeInteger(parsed)) {
+      logError("paid_config_invalid", { reason: "appstore_app_apple_id_not_safe_integer" });
+      return { ok: false, response: errorResponse(503, "config_missing") };
+    }
+    appAppleId = parsed;
   }
 
   const rootCAs = splitPemCertificates(cfg.values.APPSTORE_ROOT_CA_PEM);
   if (rootCAs.length === 0) {
-    return {
-      ok: false,
-      response: errorResponse(503, "config_missing", {
-        detail: "APPSTORE_ROOT_CA_PEM did not contain any parseable certificates",
-      }),
-    };
+    logError("paid_config_invalid", { reason: "appstore_root_ca_pem_no_parseable_certificates" });
+    return { ok: false, response: errorResponse(503, "config_missing") };
   }
 
+  // Import + verifier construction get their OWN try/catch, deliberately separate from signature
+  // verification below. Sharing one catch meant an npm import failure or a `SignedDataVerifier`
+  // constructor throw (bad root CA DER, library incompatibility under Deno's Node-compat layer,
+  // etc.) was indistinguishable from "this JWS is fraudulent" — every paid request would 401 with
+  // zero operator-visible signal that the deployment itself was broken. This IS a config/runtime
+  // problem, not proof the caller is unauthorized, so it must fail as 503, not 401, and it must log.
+  // deno-lint-ignore no-explicit-any
+  let verifier: any;
   try {
     // Pinned exact version — see supabase/README.md for the audit trail on this dependency.
     const { SignedDataVerifier, Environment } = await import(
       "npm:@apple/app-store-server-library@3.1.0"
     );
-    const verifier = new SignedDataVerifier(
+    verifier = new SignedDataVerifier(
       rootCAs.map((b) => toNodeBuffer(b)),
       /* enableOnlineChecks */ true,
       environment === "Production" ? Environment.PRODUCTION : Environment.SANDBOX,
       cfg.values.APPSTORE_BUNDLE_ID,
-      appAppleIdRaw ? Number.parseInt(appAppleIdRaw, 10) : undefined,
+      appAppleId,
     );
+  } catch (err) {
+    // Never log the full error message — it may embed input (e.g. a malformed cert) — only the
+    // error's class/name, which is enough to tell an operator "the verifier failed to initialize"
+    // without risking a secret/PII leak into logs.
+    logError("paid_verifier_init_failed", { error: err instanceof Error ? err.name : "unknown" });
+    return { ok: false, response: errorResponse(503, "config_missing") };
+  }
 
+  try {
     // ASSUMPTION (flagged for reconciliation against the real client, CloudParser / T021): the
     // client attaches a `Transaction.jwsRepresentation` from `Transaction.currentEntitlements`
     // (proof of an active purchase/subscription — carries `originalTransactionId`), NOT an
@@ -186,8 +223,8 @@ export async function verifyPaidAuth(authorizationHeader: string | null): Promis
 
 /** Some npm crypto libraries under Deno's Node-compat layer expect a real `Buffer`, not a plain
  *  `Uint8Array`. `node:buffer` is available via the `node:` builtin shim. */
-function toNodeBuffer(bytes: Uint8Array): Uint8Array {
-  return bytes;
+function toNodeBuffer(bytes: Uint8Array): Buffer {
+  return Buffer.from(bytes);
 }
 
 // -------------------------------------------------------------------------------------------
@@ -247,6 +284,7 @@ function parseDeviceToken(header: string): DeviceTokenPayload | undefined {
 
 export async function verifyFreeAuth(
   deviceTokenHeader: string | null,
+  rawBody: string,
   keyStore: AppAttestKeyStore = new UnimplementedAppAttestKeyStore(),
 ): Promise<AuthResult> {
   if (!deviceTokenHeader) {
@@ -275,6 +313,18 @@ export async function verifyFreeAuth(
   }
   if (!assertionBytes || assertionBytes.length === 0) {
     return { ok: false, response: errorResponse(401, "auth_invalid", { detail: "bad_assertion" }) };
+  }
+
+  // Bind the token to THIS request body (see module doc comment). Recompute SHA-256 over the raw
+  // body bytes and require it to equal the token's `clientDataHashB64` BEFORE any config/key-store
+  // work — without this, a captured token+assertion pair could be replayed against an arbitrary
+  // different body, since the assertion signature alone only proves "this client data hash was
+  // signed," not "this client data hash matches this request's body." Pure computation, no config
+  // dependency, so it runs first and is cheap to reject on.
+  const computedBodyHash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(rawBody));
+  const computedBodyHashB64 = bytesToBase64(new Uint8Array(computedBodyHash));
+  if (computedBodyHashB64 !== payload.clientDataHashB64) {
+    return { ok: false, response: errorResponse(401, "auth_invalid", { detail: "body_hash_mismatch" }) };
   }
 
   const cfg = requireEnv(APPATTEST_ENV_NAMES);
@@ -314,14 +364,26 @@ export async function verifyFreeAuth(
   }
 
   try {
+    // RECONCILED against the real published API (npmjs.com/package/appattest-checker-node +
+    // github.com/srinivas1729/appattest-checker-node README, fetched during this fix pass): the
+    // library exports a POSITIONAL signature —
+    //   verifyAssertion(clientDataHash, publicKeyPem, appId, assertion)
+    // — NOT an options-object call. It also does not throw on a bad assertion; failure is
+    // reported as `{ verifyError: string }` in the resolved result, success as `{ signCount }`.
+    // The previous code called it with a single `{ clientDataHash, publicKeyPem, appId, assertion }`
+    // object, which does not match this signature at all and would have failed at runtime the
+    // moment this path was reachable (it is dead code today — key store is stubbed 503 above).
     const { verifyAssertion } = await import("npm:appattest-checker-node@1.0.3");
     const appId = `${cfg.values.APPATTEST_TEAM_ID}.${cfg.values.APPATTEST_BUNDLE_ID}`;
-    const result = await verifyAssertion({
-      clientDataHash,
-      publicKeyPem: stored.publicKeyPem,
+    const result = await verifyAssertion(
+      Buffer.from(clientDataHash),
+      stored.publicKeyPem,
       appId,
-      assertion: assertionBytes,
-    });
+      Buffer.from(assertionBytes),
+    );
+    if (result && typeof result === "object" && "verifyError" in result) {
+      return { ok: false, response: errorResponse(401, "auth_invalid", { detail: "assertion_verify_failed" }) };
+    }
     if (!result || typeof result.signCount !== "number" || result.signCount <= stored.signCount) {
       // Replay: sign counter did not strictly increase.
       return { ok: false, response: errorResponse(401, "auth_invalid", { detail: "replay_detected" }) };

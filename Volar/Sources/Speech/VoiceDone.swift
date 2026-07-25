@@ -27,10 +27,20 @@
 //
 // // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain available in this environment.
 // Needs a `swift build`/`swift test` pass on macOS before merge (build-env split documented in
-// CLAUDE.md). In particular: (a) Swift 6 strict-concurrency acceptance of a stateless `@MainActor
-// struct` whose members are all synchronous pure logic, and (b) `String.folding(options:locale:)`
-// behavior on real Vietnamese ASR transcripts (spacing/casing quirks WhisperKit/Groq may emit)
-// have not been exercised against real audio output.
+// CLAUDE.md). In particular: `String.folding(options:locale:)` behavior on real Vietnamese ASR
+// transcripts (spacing/casing quirks WhisperKit/Groq may emit) has not been exercised against
+// real audio output.
+//
+// CONCURRENCY: this type is deliberately NOT `@MainActor`. It is pure and stateless — no stored
+// properties, no UI, no actor-isolated state — so it needs no isolation, and `Sendable` lets
+// `AppState` (a `@MainActor` type) hold and call it freely. Marking the struct `@MainActor` was
+// actively harmful under Swift 6 strict concurrency: it isolates the static STORED PROPERTIES
+// (`completionCuePhrases`, `cueStripTokens`, the tuning constants) as well as the methods, so the
+// `static let` initializer `[...].map(normalizedTokens)` tried to convert an implicitly-isolated
+// `@MainActor (String) -> [String]` to a plain `(String) -> [String]` and failed with "loses
+// global actor 'MainActor'". Leaving the struct isolated and marking only the helpers
+// `nonisolated` just trades that error for ~15 "main actor-isolated static property can not be
+// referenced from a nonisolated context" errors. Dropping the isolation entirely is the fix.
 import Foundation
 
 // MARK: - Frozen seam (phase5-contract.md §A)
@@ -69,8 +79,7 @@ struct VoiceDoneTask: Sendable, Equatable {
 }
 
 /// Vietnamese+English aware voice-done matcher. Pure, stateless, deterministic — see file header.
-@MainActor
-struct VoiceDone {
+struct VoiceDone: Sendable {
     func classify(_ transcript: String, openTasks: [VoiceDoneTask]) -> VoiceDoneIntent {
         Self.classifyImpl(transcript, openTasks: openTasks)
     }
@@ -109,14 +118,14 @@ struct VoiceDone {
     private static let completionCuePhrases: [[String]] = [
         "làm xong", "đã xong", "xong rồi", "hoàn thành", "hoàn tất",
         "xong", "finished", "done", "completed", "complete"
-    ].map(normalizedTokens)
+    ].map { normalizedTokens($0) }
 
     /// Phrases indicating an EXTERNAL party finished their part (clears a `.external` condition)
     /// rather than the speaker's own task, same token-sequence convention as above.
     private static let externalCuePhrases: [[String]] = [
         "đã ký", "ký rồi", "đã gửi", "gửi rồi", "đã trả lời", "trả lời rồi",
         "signed", "sent", "replied", "responded", "answered"
-    ].map(normalizedTokens)
+    ].map { normalizedTokens($0) }
 
     /// Flattened set of every token appearing in any cue phrase above. Stripped out of the
     /// transcript's token set before fuzzy-matching against titles/external-descriptions so cue

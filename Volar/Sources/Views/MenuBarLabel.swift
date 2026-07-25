@@ -13,6 +13,10 @@ struct MenuBarLabel: View {
     private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
+        // FIX F: `wipCount` was evaluated twice per render (once in the `if`, once again inside
+        // `wipBadge`) — each read re-derives `DelegationTracker.wipCount()`, a SwiftData fetch.
+        // Computed once here and threaded through instead.
+        let wip = wipCount
         HStack(spacing: 6) {
             Group {
                 if appState.focusActive {
@@ -23,8 +27,8 @@ struct MenuBarLabel: View {
                     idleContent
                 }
             }
-            if wipCount > 0 {
-                wipBadge
+            if wip > 0 {
+                wipBadge(count: wip)
             }
         }
     }
@@ -47,8 +51,12 @@ struct MenuBarLabel: View {
     /// `.instrument` tint), deliberately NOT the reserved warm `nowAccent` (informational, not the
     /// NOW spotlight). Shown in every label state (idle/listening/focus-lock) so it stays visible
     /// regardless of what else the menu bar is doing. UNVERIFIED (not rendered).
-    private var wipBadge: some View {
-        Text("\u{23F3} \(wipCount)")
+    ///
+    /// FIX F: takes the already-computed count as a parameter (`body` reads `wipCount` exactly
+    /// once) instead of re-reading the `wipCount` property itself, which re-runs
+    /// `DelegationTracker.wipCount()` — a SwiftData fetch — on every access.
+    private func wipBadge(count: Int) -> some View {
+        Text("\u{23F3} \(count)")
             .font(Font.volarMono(size: 10.5, weight: .medium))
             .foregroundStyle(VolarColor.instrument)
     }

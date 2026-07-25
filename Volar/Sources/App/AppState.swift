@@ -53,6 +53,24 @@ enum SpeechEngineChoice: String, Sendable, Equatable, CaseIterable, Identifiable
     }
 }
 
+/// Local (on-device) vs Cloud task-parsing preference — the Settings switch this feature adds.
+/// A thin bridge OVER the existing one-time cloud-parse consent (`cloudParseConsent` /
+/// `cloudParseConsentKey`), which already gates the router's Cloud tier via
+/// `DefaultCloudParseGate.isOptedIn()`: `.cloud` == opted in, `.onDevice` == not. Keeping that key
+/// as the single source of truth means the voice-capture consent popover and this Settings picker
+/// can never disagree. String-backed + `CaseIterable`/`Identifiable` so Settings drives it off a
+/// picker, same convention as `SpeechEngineChoice` above.
+enum ParseEnginePreference: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case onDevice, cloud
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .onDevice: return "On-device (private, free)"
+        case .cloud: return "Cloud AI (better quality)"
+        }
+    }
+}
+
 /// How reminders are delivered (Phase 4 contract B): the visual `UNUserNotificationCenter`
 /// notification always fires; this only gates the ADDITIONAL spoken channel
 /// (`VoiceReminderChannel`, sibling-owned). Persisted under `AppState.voiceDeliveryModeKey` — the
@@ -254,16 +272,14 @@ final class AppState {
     /// Replaces the v1 `NLParser` direct call (contract "Confirm + materialize" / T025: "Replace
     /// any v1 direct-HeuristicNLParser call with the router"). `IntentRouter` is owned by the
     /// T019 agent (`Sources/Parsing/IntentParsing.swift`, landed) — constructed with its own
-    /// defaults for `foundationModel`/`heuristic`, but wired here with a real `cloudGate:`
-    /// (`DefaultCloudParseGate`, defined at the bottom of this file) so the one-time consent
-    /// decision this file owns (`cloudParseConsent`/`resolveCloudConsent`) actually reaches the
-    /// router. `cloud:` is left at its own default (`nil`) — a working `CloudParser` needs a real
-    /// `ParseCredentialProvider` (StoreKit paid JWS + `DeviceCheckProvider.swift`'s free-tier
-    /// token composed together), which is explicitly "NOT built in `CloudParser.swift`" and isn't
-    /// part of this task's scope (T051 StoreKit is Phase 8, not yet landed) — Cloud is
-    /// consequently inert today (FM -> Heuristic only) regardless of consent; the gate is wired
-    /// correctly for the moment that composite exists. See this task's final report for the
-    /// backlog note.
+    /// defaults for `foundationModel`/`heuristic`, wired here with a real `cloudGate:`
+    /// (`DefaultCloudParseGate`, bottom of this file) so the Local↔Cloud choice this file owns
+    /// (`parseEnginePreference` / `cloudParseConsent` / `resolveCloudConsent`) reaches the router.
+    /// `cloud:` is now wired with `ConfigParseCredentialProvider` (a placeholder credential source):
+    /// the Cloud tier is fully connected and user-switchable from Settings, but stays inert
+    /// (falls back to on-device) until a parse-proxy base URL + token are configured — "code first,
+    /// key later". The real StoreKit paid-JWS + `DeviceCheckProvider.swift` free-token composite
+    /// (Phase 8/T051) supersedes that placeholder when it lands.
     private let router: IntentRouter
     private let store: TaskStore?
     /// Injected clock so `activeTask` stays pure/testable instead of reading the wall clock
@@ -329,6 +345,13 @@ final class AppState {
     /// timed flash.
     private(set) var lastAppLinkAt: Date?
     private var delegationTimer: Timer?
+    /// FIX B: owns the focus-session 1s countdown — moved here from `FocusOverlay`'s own
+    /// `Timer.publish`, which stopped firing the instant the overlay window closed (the menu bar's
+    /// `focusSecondsLeft` readout froze and the session never auto-ended). Mirrors
+    /// `delegationTimer`'s exact construction pattern (`startDelegationTimer()`) so this survives
+    /// the same way regardless of which window/view is on screen. See `startFocus()`/`endFocus()`/
+    /// `focusTick()`.
+    private var focusTimer: Timer?
 
     // MARK: - Ambient background persistence (UserDefaults; Settings → Appearance)
 
@@ -338,8 +361,12 @@ final class AppState {
     private static let recognitionLocaleKey = "volar.recognitionLocale"
     private static let speechEngineKey = "volar.speechEngine"
     /// One-time cloud-parse consent. `fileprivate` (not `private`) so `DefaultCloudParseGate`
-    /// (bottom of this file) can read the same key from `isOptedIn()`.
-    fileprivate static let cloudParseConsentKey = "volar.cloudParseConsent"
+    /// (bottom of this file) can read the same key from `isOptedIn()`. `nonisolated` because a
+    /// `static let` declared inside a `@MainActor` type inherits that isolation (only statics at
+    /// global/file scope are implicitly `nonisolated`), and `DefaultCloudParseGate` is deliberately
+    /// NOT main-actor-isolated — without this, `isOptedIn()` fails to compile with "main
+    /// actor-isolated static property ... cannot be accessed from outside of the actor".
+    fileprivate nonisolated static let cloudParseConsentKey = "volar.cloudParseConsent"
     /// Phase 4 (T033): `static`/internal, NOT `private` — this is the exact key
     /// `ReminderScheduler`/`VoiceReminderChannel` (contract A/B, `Sources/Reminders/**`,
     /// sibling-owned) are expected to read directly, since their frozen inits take no policy
@@ -351,6 +378,20 @@ final class AppState {
     /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
     /// file; no sibling reads this one.
     private static let triageKeptAtKey = "volar.triageKeptAt"
+    /// FIX 4: `accent`/`density` used to only ever be assigned from this `init`'s parameters —
+    /// there was no read-back from `UserDefaults` here (unlike every other Settings → Appearance
+    /// control: `ambientKey`/`customImageKey` right above both get one) and no write anywhere
+    /// either, so a real launch (`VolarApp.swift` calls `AppState(store:)` with neither parameter
+    /// supplied) silently reset both to their compiled-in defaults (`.indigo`/`.comfy`) every
+    /// time, discarding whatever `SettingsView` had set last session.
+    private static let accentKey = "volar.accent"
+    /// `Density` (Theme.swift) is NOT `RawRepresentable`/`String`-backed like `VolarAccent` is, so
+    /// there's no `.rawValue` to persist directly. Rather than invent a new ad hoc encoding, this
+    /// reuses the EXACT `"cozy"`/`"comfy"`/`"roomy"` string mapping `SettingsView.densityID(_:)`/
+    /// `density(fromID:)` already define for its own `Segmented` binding (`SettingsView.swift`) —
+    /// same values, same default-to-`.comfy` fallback — so this is the established convention,
+    /// not a new one.
+    private static let densityKey = "volar.density"
 
     init(
         store: TaskStore? = nil,
@@ -361,7 +402,10 @@ final class AppState {
         ambient: AmbientMode = .none,
         customImageURL: URL? = nil,
         voiceFeedback: Bool = false,
-        router: IntentRouter = IntentRouter(cloudGate: DefaultCloudParseGate()),
+        router: IntentRouter = IntentRouter(
+            cloud: CloudParser(credentials: ConfigParseCredentialProvider()),
+            cloudGate: DefaultCloudParseGate()
+        ),
         clock: @escaping () -> Date = Date.init
     ) {
         self.store = store
@@ -378,6 +422,15 @@ final class AppState {
         }
         if let p = UserDefaults.standard.string(forKey: Self.customImageKey) {
             self.customImageURL = URL(fileURLWithPath: p)
+        }
+        // FIX 4: same override convention as `ambient`/`customImageURL` immediately above —
+        // persisted choice wins, caller-supplied parameter is only the previews/tests fallback.
+        if let raw = UserDefaults.standard.string(forKey: Self.accentKey), let a = VolarAccent(rawValue: raw) {
+            self.accent = a
+        }
+        if let raw = UserDefaults.standard.string(forKey: Self.densityKey),
+           let d = Self.densityFromPersistedID(raw) {
+            self.density = d
         }
         self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
@@ -417,17 +470,6 @@ final class AppState {
         // instance's construction before any of this init's own statements run.
         self.voiceChannel = VoiceReminderChannel(playback: self.voice)
         self.reminderGate = ReminderContextGate()
-        // M-1 (constitution I): wire the one cheaply-detectable, no-extra-entitlement signal this
-        // file has direct access to — our own `AmbientSound` instance's public `isPlaying` flag —
-        // so a voice reminder never talks over ambient sound already playing. Mic contention is
-        // already wired unconditionally inside `ReminderContextGate` itself
-        // (`AVCaptureDevice.isInUseByAnotherApplication`); DND/screen-share have no public,
-        // unprivileged API on macOS (see `ReminderContextGate.swift`'s own doc comment) and are
-        // deliberately left non-suppressing rather than failing the whole gate open silently.
-        // // UNVERIFIED: this only covers OUR OWN ambient playback, not other apps' audio in
-        // general (no public system-wide "is any app playing audio" API without an entitlement)
-        // — calendar-busy (P3) + call/mic remain the real guards for that case.
-        self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
         if let store {
             let realScheduler = ReminderScheduler(store: store, voice: self.voiceChannel, gate: self.reminderGate)
             self.scheduler = realScheduler
@@ -444,6 +486,20 @@ final class AppState {
             self.delegation = nil
             self.appLinkHandler = nil
         }
+        // M-1 (constitution I): wire the one cheaply-detectable, no-extra-entitlement signal this
+        // file has direct access to — our own `AmbientSound` instance's public `isPlaying` flag —
+        // so a voice reminder never talks over ambient sound already playing. Assigned HERE, after
+        // every stored property above is initialized: this closure captures `self`, and Swift
+        // forbids capturing `self` in a closure until the instance is fully initialized (doing it
+        // earlier produced "variable 'self.scheduler' used before being initialized"). Mic
+        // contention is already wired unconditionally inside `ReminderContextGate` itself
+        // (`AVCaptureDevice.isInUseByAnotherApplication`); DND/screen-share have no public,
+        // unprivileged API on macOS (see `ReminderContextGate.swift`'s own doc comment) and are
+        // deliberately left non-suppressing rather than failing the whole gate open silently.
+        // // UNVERIFIED: this only covers OUR OWN ambient playback, not other apps' audio in
+        // general (no public system-wide "is any app playing audio" API without an entitlement)
+        // — calendar-busy (P3) + call/mic remain the real guards for that case.
+        self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
         speech.setLocale(Locale(identifier: self.recognitionLocaleID))
         // CAPTURE SEAM (AppLinkHandler.swift's own file header): wire `volar://capture?text=...`
         // into the SAME confirm-card-gated pipeline every other capture uses — never a bypass.
@@ -611,12 +667,15 @@ final class AppState {
     private var captureSession = 0
 
     /// Picks the engine for the NEXT capture based on user choice, with safe fallbacks:
-    /// WhisperKit only when supported AND its model is loaded, else Apple. Groq used as chosen.
+    /// WhisperKit only when supported AND its model is loaded, else Apple; Groq (cloud) only when a
+    /// credential is configured, else Apple on-device — so choosing cloud before a key exists
+    /// degrades quietly to local instead of hard-erroring at upload time ("code first, key later",
+    /// mirrors the Local↔Cloud parse switch's fallback).
     private var selectedEngine: SpeechEngine {
         switch speechEngineChoice {
         case .appleOnDevice: return speech
         case .whisperKit: return (WhisperKitEngine.isSupported && whisper.isModelReady) ? whisper : speech
-        case .groq: return groq
+        case .groq: return GroqEngine.isConfigured ? groq : speech
         }
     }
 
@@ -648,8 +707,20 @@ final class AppState {
                 self.captureState = .error
                 return
             }
-            engine.onFinal = { [weak self] transcript in self?.finishRecording(transcript: transcript) }
-            engine.onError = { [weak self] error in self?.handleCaptureError(error) }
+            // FIX 2b (privacy seam): guard against a late callback landing after this session was
+            // superseded (Esc/cancel/a fresh capture already started) — without this, a `.stop()`
+            // caller (`stopCapture`/`confirmSave`'s siblings) that genuinely wants the final result
+            // is unaffected, but a callback arriving after `cancelCapture`/`dismissVoiceDoneConfirm`
+            // already moved on (now routed through `.cancel()`, see those methods below) can no
+            // longer resurrect a confirm card the user already dismissed.
+            engine.onFinal = { [weak self] transcript in
+                guard let self, self.captureSession == session else { return }
+                self.finishRecording(transcript: transcript)
+            }
+            engine.onError = { [weak self] error in
+                guard let self, self.captureSession == session else { return }
+                self.handleCaptureError(error)
+            }
             // Apple-only: server-consent + (locale already applied via setRecognitionLocale).
             // WhisperKit/Groq auto-detect language, so there's nothing analogous to wire for them.
             if let apple = engine as? SpeechCapture {
@@ -698,7 +769,12 @@ final class AppState {
         voiceDoneNoMatchTranscript = nil
         pendingCloudConsent = false
         pendingParseTranscript = nil
-        runningEngine?.stop()
+        // FIX 2a (privacy seam): `.stop()` means "finish and deliver" — Groq would still upload the
+        // in-flight audio and a late `onFinal` could pop a confirm card after Esc. `.cancel()`
+        // immediately abandons capture and discards the audio; neither `onFinal` nor `onError` fires
+        // for it (the `captureSession` guard on both closures in `startCapture()` is defense-in-depth
+        // on top of that contract, not a substitute for it).
+        runningEngine?.cancel()
         runningEngine = nil
     }
 
@@ -710,7 +786,20 @@ final class AppState {
     /// is untouched.
     func stopCapture() {
         if let engine = runningEngine, engine.isRunning {
-            if !engine.supportsPartialResults { captureState = .parsing } // batch: show "working…" while it transcribes
+            // FIX 1: `SpeechCapture.stop()` sets `isRunning = false` SYNCHRONOUSLY
+            // (SpeechCapture.swift:308) but the final transcript still arrives async via
+            // `onFinal`. This used to only flip to `.parsing` for a batch engine
+            // (`!supportsPartialResults`), so a partial-results engine (Apple) stayed stuck in
+            // `.recording` for that whole gap. A second `stopCapture()` call landing in that
+            // window then fell through to the `else if captureState == .recording` branch below,
+            // which bumps `captureSession` — invalidating the very session `onFinal`'s guard
+            // checks — and silently swallowed the transcript. `.parsing` is the correct state for
+            // EVERY engine here: it means "mic is off, waiting on the final result," which is
+            // just as true with partial results as without. It is also what disarms the second
+            // call: with `isRunning` already false AND `captureState` no longer `.recording`,
+            // neither branch matches, so `stopCapture()` becomes a clean no-op that leaves the
+            // in-flight session intact instead of taking the destructive `else if`.
+            captureState = .parsing
             engine.stop()
         } else if captureState == .recording {
             captureSession += 1
@@ -766,6 +855,25 @@ final class AppState {
         if choice == .whisperKit, WhisperKitEngine.isSupported {
             _Concurrency.Task { await whisper.prepare() }
         }
+    }
+
+    /// Local↔cloud parsing switch surfaced in Settings. Reads the SAME `cloudParseConsent` the
+    /// router's Cloud tier is already gated on (`DefaultCloudParseGate`), so this is purely a
+    /// friendlier presentation of that one bit — no second source of truth. A `nil` consent
+    /// (never asked) reads as `.onDevice`, matching the privacy-first "decline ⇒ never cloud" default.
+    var parseEnginePreference: ParseEnginePreference {
+        cloudParseConsent == true ? .cloud : .onDevice
+    }
+
+    /// Change the parsing engine from Settings. Persists to the existing `cloudParseConsentKey` so
+    /// the router's Cloud gate picks it up immediately and the one-time voice-capture consent
+    /// popover never re-appears once the user has made a Settings choice. Picking `.cloud` is
+    /// itself the informed opt-in — the Settings row's hint states cloud parsing sends only the
+    /// TEXT (never audio) of the utterance to our proxy.
+    func setParseEngine(_ preference: ParseEnginePreference) {
+        let allow = (preference == .cloud)
+        cloudParseConsent = allow
+        UserDefaults.standard.set(allow, forKey: Self.cloudParseConsentKey)
     }
 
     /// Not part of the frozen §4 method list, but required to actually drive
@@ -961,7 +1069,10 @@ final class AppState {
         voiceDoneNoMatchTranscript = nil
         captureState = .idle
         liveTranscript = ""
-        runningEngine?.stop()
+        // FIX 2a (privacy seam): same rationale as `cancelCapture()` above — this is a decline/
+        // dismiss path, not a "give me the final transcript" path, so it must not leave Groq
+        // uploading audio (or any engine still capturing) behind it.
+        runningEngine?.cancel()
         runningEngine = nil
     }
 
@@ -1458,9 +1569,40 @@ final class AppState {
         if voiceFeedback {
             voice.speak("Focus session started. \(frogTask?.title ?? "Twenty five minutes.")")
         }
+        // FIX B: (re)start the countdown owned by this instance — invalidate any timer left over
+        // from a previous session first so two overlapping sessions can never double-decrement.
+        // Mirrors `startDelegationTimer()`'s exact construction (`Timer(timeInterval:repeats:
+        // block:)` + `RunLoop.main.add(_:forMode:.common)`) — the `@Sendable` block hops back onto
+        // `@MainActor` via `_Concurrency.Task` for the same Swift 6 isolation reason documented
+        // there.
+        focusTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.focusTick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        focusTimer = timer
+    }
+
+    /// FIX B: 1s tick, moved verbatim from `FocusOverlay.tick()` (see that file's git history) so
+    /// the countdown keeps running even while the fullscreen overlay isn't mounted — only the
+    /// visuals stayed behind in `FocusOverlay`, not the timing logic.
+    private func focusTick() {
+        guard focusActive, !focusPaused else { return }
+        guard focusSecondsLeft > 0 else {
+            endFocus()
+            return
+        }
+        focusSecondsLeft -= 1
+        if focusSecondsLeft <= 0 {
+            endFocus()
+        }
     }
 
     func endFocus() {
+        focusTimer?.invalidate()
+        focusTimer = nil
         focusActive = false
         focusSecondsLeft = 25 * 60
         focusPaused = false
@@ -1473,10 +1615,19 @@ final class AppState {
     /// Completes the given task and advances the focus index, clamping into range — mirrors the
     /// prototype's `completeFocusTask`. If that was the last open task, ends the session.
     func completeFocusTask(_ id: UUID) {
-        let remaining = max(openTasks.count - 1, 0)
+        // FIX 3: `remaining` used to be computed as `openTasks.count - 1` BEFORE calling
+        // `toggleDone`, assuming completing one task always drops the open count by exactly one.
+        // That's not true: `TaskStore.completeOne` (TaskStore.swift:394) resets a task with a
+        // `recurrence` back to `.status == .todo` in place rather than closing it — it stays in
+        // `openTasks`, a delta of 0, not -1 — and `TaskStore.toggle`'s parent auto-complete
+        // cascade (TaskStore.swift:367-369) can additionally close the now-childless parent in
+        // the same call, a delta of -2. Reading `openTasks.count` fresh AFTER `toggleDone` (which
+        // itself refreshes `tasks` from the store) reports whichever of those actually happened
+        // instead of guessing "-1".
         toggleDone(id)
+        let remaining = openTasks.count
         focusIndex = remaining > 0 ? max(0, min(focusIndex, remaining - 1)) : 0
-        if openTasks.isEmpty {
+        if remaining == 0 {
             focusActive = false
         }
         if voiceFeedback {
@@ -1490,7 +1641,61 @@ final class AppState {
         voice.readDay(self)
     }
 
-    // MARK: - Ambient background controls (Settings → Appearance → Background)
+    // MARK: - Appearance controls (Settings → Appearance)
+
+    /// FIX 4: sets the accent color and persists it, so it survives relaunch — same "mutate +
+    /// persist together" shape as `setAmbient` right below. A plain stored-property `didSet` was
+    /// considered instead (would avoid touching `SettingsView.swift` at all), but this file has
+    /// zero existing `didSet`/`willSet` usage anywhere, `@Observable`'s macro expansion turns a
+    /// stored property into a computed one and the exact interaction with property observers
+    /// isn't exercised anywhere else in this codebase to lean on — an explicit setter method
+    /// mirrors the established, already-proven convention every other persisted Settings control
+    /// in this file uses (`setAmbient`/`setSpeechEngine`/`setRecognitionLocale`/
+    /// `setVoiceDeliveryMode`/`setGlobalReminderPolicy`), so it's the safer choice here.
+    /// `SettingsView.swift`'s tap handler calls this instead of assigning `appState.accent`
+    /// directly.
+    func setAccent(_ a: VolarAccent) {
+        accent = a
+        UserDefaults.standard.set(a.rawValue, forKey: Self.accentKey)
+    }
+
+    /// FIX 4: sets the row/section density and persists it — same rationale/shape as `setAccent`
+    /// above. `Density` has no `.rawValue` (see `densityKey`'s doc comment), so persistence goes
+    /// through the two small string-mapping helpers below instead.
+    func setDensity(_ d: Density) {
+        density = d
+        UserDefaults.standard.set(Self.densityPersistedID(d), forKey: Self.densityKey)
+    }
+
+    /// `Density -> String`, for persistence — deliberately the exact same three values as
+    /// `SettingsView.densityID(_:)` (that method stays private to its view; this is the
+    /// AppState-side mirror `setDensity`/`init` need for `UserDefaults`, not a second source of
+    /// truth — see `densityKey`'s doc comment).
+    private static func densityPersistedID(_ d: Density) -> String {
+        switch d {
+        case .cozy: return "cozy"
+        case .comfy: return "comfy"
+        case .roomy: return "roomy"
+        }
+    }
+
+    /// The inverse of `densityPersistedID(_:)` above. Returns `nil` — rather than defaulting to
+    /// `.comfy` — for an unrecognized/corrupted stored value, so `init` can leave the
+    /// caller-supplied `density:` argument standing instead of stomping it with a hardcoded
+    /// default. That matters because the init parameters are documented as the fallback for
+    /// previews/tests, and it keeps this path symmetric with `accent`'s
+    /// `VolarAccent(rawValue:)`, which is already `nil`-on-garbage for the same reason. Named
+    /// distinctly from the `density` stored property (rather than overloading that name, as
+    /// `densityPersistedID(_:)`'s counterpart does with `accent`/`setAccent`) purely so this static
+    /// helper reads unambiguously at its one call site in `init` above.
+    private static func densityFromPersistedID(_ id: String) -> Density? {
+        switch id {
+        case "cozy": return .cozy
+        case "comfy": return .comfy
+        case "roomy": return .roomy
+        default: return nil
+        }
+    }
 
     /// Sets the ambient visual mode and persists it, so it survives relaunch.
     func setAmbient(_ mode: AmbientMode) {
@@ -1526,10 +1731,23 @@ final class AppState {
 
     /// Sets `id` as the single "frog of the day", clearing the flag on every other task —
     /// mirrors `volar-mac.jsx`'s single-frog invariant.
+    ///
+    /// FIX 6 (data hygiene): used to only mutate the in-memory `tasks` array, never the store — the
+    /// very next `tasks = store.fetchAll()` (any other mutation) silently wiped the flag, and it
+    /// never survived relaunch at all. Store-backed path now routes through `TaskStore.setFrog(_:)`
+    /// (persists, and is itself the single source of truth for the invariant) and refreshes `tasks`
+    /// from it, same "mutate via store, refresh tasks" convention every other store-backed mutation
+    /// in this file already follows. No-store fallback (previews/tests) keeps the old in-memory-only
+    /// loop.
     func setFrog(_ id: UUID) {
-        for index in tasks.indices {
-            tasks[index].frog = (tasks[index].id == id)
+        guard let store else {
+            for index in tasks.indices {
+                tasks[index].frog = (tasks[index].id == id)
+            }
+            return
         }
+        store.setFrog(id)
+        tasks = store.fetchAll()
     }
 
     // MARK: - Modal / banner actions (Phase 3)
@@ -1625,17 +1843,30 @@ final class AppState {
     private func scheduleNextResurface(from snapshot: [VolarCore.Task], now: Date) {
         resurfaceSession += 1
         let session = resurfaceSession
-        guard let date = VolarCore.nextResurfaceDate(in: snapshot, after: now) else { return }
-        // `nextResurfaceDate` only returns the winning `Date`, not which task owns it — recover
-        // the owner by re-scanning for the first task carrying that exact date (deterministic:
-        // same snapshot, same earliest-date rule `nextResurfaceDate` itself applies).
-        guard let taskId = snapshot.first(where: { task in
-            task.conditions.contains { condition in
-                if case .afterDate(let d) = condition { return d == date }
-                return false
+        // FIX 2: `VolarCore.nextResurfaceDate` returns only the SINGLE earliest `.afterDate`
+        // across the whole snapshot, so registering just that one task with the durable scheduler
+        // left every OTHER task's `.afterDate` completely unregistered. There's no safety net for
+        // those either: `ReminderScheduler.rebuildFromStorage()` only rescans tasks with
+        // `deadline != nil`, never `.afterDate` conditions, and a local in-memory wake (the sleep
+        // below) doesn't survive an app quit. A task whose `.afterDate` isn't the single nearest
+        // one across the whole store would then simply never resurface. Scan the snapshot
+        // ourselves instead and register EVERY task's own earliest future `.afterDate`
+        // individually — safe to call on every mutation because `ReminderScheduler.scheduleResurface`
+        // (ReminderScheduler.swift:200-217) already dedupes per task (same `fireAt` -> no-op,
+        // different `fireAt` -> updates the existing row in place), so this never piles up
+        // duplicate durable records or duplicate system notifications.
+        var earliestOverall: Date?
+        for task in snapshot {
+            var earliestForTask: Date?
+            for condition in task.conditions {
+                guard case .afterDate(let date) = condition, date > now else { continue }
+                if earliestForTask == nil || date < earliestForTask! { earliestForTask = date }
             }
-        })?.id else { return }
-        scheduler?.scheduleResurface(at: date, taskId: taskId)
+            guard let taskDate = earliestForTask else { continue }
+            scheduler?.scheduleResurface(at: taskDate, taskId: task.id)
+            if earliestOverall == nil || taskDate < earliestOverall! { earliestOverall = taskDate }
+        }
+        guard let date = earliestOverall else { return }
 
         // Defensive cap (self-review "client-exploit"): a corrupted/hostile store could carry an
         // absurd far-future `.afterDate`; clamp the LOCAL convenience wake so `UInt64(seconds *
@@ -1652,6 +1883,15 @@ final class AppState {
                 // observer recomputing `activeTask` at this instant actually re-renders.
                 self.tasks = self.tasks
             }
+            // FIX 2 (chain): the refresh above only advances `tasks` past the resurface moment
+            // that just fired — on its own it does NOT re-arm whichever `.afterDate` comes next.
+            // Re-running this same method against a fresh snapshot/`now` is what chains forward.
+            // This cannot loop forever: the moment that just fired is now <= `now` (this closure
+            // only runs once the sleep above has elapsed), and the scan above requires strictly
+            // `date > now` to even be a candidate, so that same moment can never be picked again —
+            // each recursive call either lands on a strictly later date (and stops after that
+            // one sleep) or finds none left at all (and returns immediately, ending the chain).
+            self.scheduleNextResurface(from: self.tasks.map { $0.snapshot() }, now: self.clock())
         }
     }
 
@@ -1708,11 +1948,24 @@ final class AppState {
         return openTasks.filter { (triageKeptAt[$0.id] ?? $0.createdAt) <= cutoff }
     }
 
+    /// FIX A (compile break): processing the last item of a sweep/triage batch used to leave an
+    /// open blank sheet with no dismiss control — `showSweep`/`showTriage` only ever got set to
+    /// `false` by their own explicit dismiss actions (`dismissSweep()`, or nothing at all for
+    /// triage), never by the batch simply running out of items. Called at the tail of every
+    /// mutating triage/sweep action (`triageKeep`/`triageBreakdown`/`triageDefer`/`triageDrop`/
+    /// `sweepComplete`) so the sheet closes itself the instant its backing list empties out — a
+    /// pure UI convenience, no store/model side effects.
+    private func dismissBatchSheetsIfEmpty() {
+        if showSweep, sweepItems.isEmpty { showSweep = false }
+        if showTriage, staleTasks.isEmpty { showTriage = false }
+    }
+
     /// Triage "Keep": no destructive/creative side effect on the task itself — just resets this
     /// task's staleness clock so it doesn't reappear in next week's batch.
     func triageKeep(_ item: TaskItem) {
         triageKeptAt[item.id] = clock()
         persistTriageKeptAt()
+        dismissBatchSheetsIfEmpty()
     }
 
     /// Triage "Break down": opens the existing breakdown sheet.
@@ -1725,6 +1978,7 @@ final class AppState {
     /// `TaskBreakdownView.swift`, not one of this task's 5 owned files).
     func triageBreakdown(_ item: TaskItem) {
         showBreakdown = true
+        dismissBatchSheetsIfEmpty()
     }
 
     /// Triage "Defer": adds a `.afterDate` condition `triageDeferInterval` out, matching FR-017's
@@ -1736,6 +1990,7 @@ final class AppState {
             if let index = tasks.firstIndex(where: { $0.id == item.id }) {
                 tasks[index].conditions.append(.afterDate(now.addingTimeInterval(Self.triageDeferInterval)))
             }
+            dismissBatchSheetsIfEmpty()
             return
         }
         let before = tasks
@@ -1744,12 +1999,14 @@ final class AppState {
         // WG-1: re-derive this task's reminders (deadline/condition state just changed).
         scheduler?.scheduleReminders(taskId: item.id)
         notifyEligibilityAndScheduleResurface(before: before, now: now)
+        dismissBatchSheetsIfEmpty()
     }
 
     /// Triage "Drop": a plain delete — same path (and same FR-015 re-eligibility notification) as
     /// any other task deletion.
     func triageDrop(_ item: TaskItem) {
         deleteTask(item.id)
+        dismissBatchSheetsIfEmpty()
     }
 
     private func persistTriageKeptAt() {
@@ -1845,6 +2102,7 @@ final class AppState {
     /// the batch).
     func sweepComplete(_ item: TaskItem) {
         toggleDone(item.id)
+        dismissBatchSheetsIfEmpty()
     }
 
     /// `SweepView.onSkip`: no-op — "Skip" means "didn't get to it today," carried over silently
@@ -1913,8 +2171,26 @@ final class AppState {
         // resurrected, per this fix's instruction). Reassigning it a second time here would only
         // double-assign the same delegate, so this call is deleted, not replaced.
         offerRescheduleForOverdueTasks(now: clock())
+        // FIX 2 (re-arm on launch): `scheduleNextResurface`'s local one-shot wake (the sleep
+        // continuation inside it) lives only in memory, so it doesn't survive a quit/relaunch —
+        // without this call, a task with a future `.afterDate` would sit unregistered (durably
+        // AND locally) until some other mutation happened to touch `tasks` first. Idempotent if
+        // `activateServices()` is ever called twice: each call bumps `resurfaceSession`, which
+        // invalidates any still-pending sleep from the previous call, and every
+        // `scheduler?.scheduleResurface` it issues is itself deduped per task (see that method's
+        // own doc comment) — so a repeat call just re-arms the same state, never a duplicate.
+        scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: clock())
         // T043 (phase6-contract.md §C): starts the minute-scale ambient recheck timer.
         startDelegationTimer()
+        // FIX 3: a persisted `.whisperKit` engine choice used to only ever call `whisper.prepare()`
+        // from `setSpeechEngine` (Settings) — so on relaunch, `speechEngineChoice` restores from
+        // `UserDefaults` correctly but the model itself was never (re)loaded, silently falling back
+        // to Apple on-device for the whole session (see `selectedEngine`'s `isModelReady` gate).
+        // `WhisperKitEngine.prepare()` is documented idempotent (self-guards on `.preparing`/`.ready`
+        // — see its own doc comment), so no extra guard is needed here.
+        if speechEngineChoice == .whisperKit, WhisperKitEngine.isSupported {
+            _Concurrency.Task { await whisper.prepare() }
+        }
     }
 
     // MARK: - Phase 4: overdue-reschedule scan (WG-3, FR-016)
@@ -2099,9 +2375,10 @@ final class DefaultCloudParseGate: CloudParseGate, @unchecked Sendable {
     init() {
         monitor.pathUpdateHandler = { [weak self] path in
             guard let self else { return }
-            self.lock.lock()
-            self.pathSatisfied = path.status == .satisfied
-            self.lock.unlock()
+            // Same scoped form as `isOnline()` below — this closure is synchronous so the manual
+            // pair would compile here, but keeping one locking idiom means a future edit can't
+            // accidentally leave an early return between `lock()` and `unlock()`.
+            self.lock.withLock { self.pathSatisfied = path.status == .satisfied }
         }
         monitor.start(queue: DispatchQueue(label: "volar.cloudParseGate.reachability"))
     }
@@ -2114,9 +2391,12 @@ final class DefaultCloudParseGate: CloudParseGate, @unchecked Sendable {
         UserDefaults.standard.bool(forKey: AppState.cloudParseConsentKey)
     }
 
+    /// Scoped `withLock` rather than a manual `lock()`/`defer { unlock() }` pair: `NSLock`'s
+    /// `lock()`/`unlock()` are `@available(*, noasync)`, so calling them directly in an `async`
+    /// method is a compile error — a suspension between the two could resume on a different
+    /// thread and unlock from the wrong one. `withLock`'s body is synchronous and cannot suspend,
+    /// which is exactly why it stays available here.
     func isOnline() async -> Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return pathSatisfied
+        lock.withLock { pathSatisfied }
     }
 }

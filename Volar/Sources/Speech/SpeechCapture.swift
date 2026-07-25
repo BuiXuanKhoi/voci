@@ -15,6 +15,21 @@ enum SpeechCaptureError: Error, Sendable {
     case onDeviceUnavailable
 }
 
+extension SpeechCaptureError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .recognizerUnavailable:
+            return "Speech recognizer is unavailable right now."
+        case .authorizationDenied:
+            return "Speech recognition or microphone access was denied."
+        case .recognitionFailed(let message):
+            return "Speech recognition failed: \(message)"
+        case .onDeviceUnavailable:
+            return "On-device dictation is off on this Mac."
+        }
+    }
+}
+
 /// Bridges Apple's Speech framework into a plain start/stop + callback API. Prefers on-device
 /// recognition (`requiresOnDeviceRecognition = true`, no audio/transcript ever leaves the
 /// machine — constitution I); falls back to Apple's server-based recognition only when the
@@ -98,6 +113,13 @@ final class SpeechCapture {
     /// can tell a Dictation-disabled failure apart from any other recognition failure.
     private var isOnDeviceAttempt = false
 
+    /// Bumped on every `start()` and on `cancel()`; the `recognitionTask` completion closure
+    /// captures the token in effect when *its* task was created and only delivers `onFinal`/
+    /// `onError` if `session` still matches it when the (main-actor-hopped) callback runs. This
+    /// guards against a late/stale callback from a superseded or cancelled task reaching the
+    /// current capture (see FIX 2/FIX 4 in HotkeyManager/SpeechCapture review notes).
+    private var session = 0
+
     init(locale: Locale = Locale(identifier: "en-US")) {
         self.recognizer = SFSpeechRecognizer(locale: locale)
         print("[Volar.Speech] recognizer == nil: \(self.recognizer == nil)")
@@ -154,6 +176,14 @@ final class SpeechCapture {
     /// this method's signature matches `start(onPartial: @escaping (String) -> Void)` exactly.
     func start(onPartial: @escaping (String) -> Void) {
         guard !isRunning else { return }
+        // A prior `stop()` ends audio but leaves `task`/`request` alive until the recognizer
+        // delivers its final result asynchronously; if that hasn't happened yet, cancel it now
+        // (not just nil it) so its eventual callback can't deliver into this new capture, and bump
+        // `session` so the token check below also rejects it if it's already past the cancel call.
+        session += 1
+        task?.cancel()
+        task = nil
+        request = nil
         guard let recognizer, recognizer.isAvailable else {
             onError?(SpeechCaptureError.recognizerUnavailable)
             return
@@ -213,21 +243,32 @@ final class SpeechCapture {
 
         isRunning = true
 
+        // Captured by value into the recognitionTask closure below so the (main-actor-hopped)
+        // completion handler can tell whether it belongs to *this* start() call or a stale one
+        // that `cancel()`/a later `start()` has since superseded (see `session` doc comment).
+        let taskSession = session
+
         // `@Sendable` again load-bearing (arbitrary-queue callback; prevents MainActor inference
         // + the Swift 6 runtime isolation trap). Capturing `self` weakly is fine — a @MainActor
         // class is implicitly Sendable.
         task = recognizer.recognitionTask(with: newRequest) { @Sendable [weak self] result, error in
             // This handler runs on an arbitrary queue, and `result`/`error` are non-Sendable.
             // Pull only Sendable primitives out here, then hop to the main actor with just those
-            // (never send SFSpeechRecognitionResult across the actor boundary). Mirrors the
-            // Sendable-primitive extraction pattern in HotkeyManager.
+            // (never send SFSpeechRecognitionResult / NSError across the actor boundary). Mirrors
+            // the Sendable-primitive extraction pattern in HotkeyManager.
             let text = result?.bestTranscription.formattedString
             let isFinal = result?.isFinal ?? false
             let errorMessage = error?.localizedDescription
+            let nsError = error as NSError?
+            let errorDomain = nsError?.domain
+            let errorCode = nsError?.code
             print("[Volar.Speech] recognitionTask error: \(errorMessage ?? "nil")")
             print("[Volar.Speech] partial/final text len=\(text?.count ?? -1) isFinal=\(isFinal)")
             Task { @MainActor [weak self] in
                 guard let self else { return }
+                // Stale callback from a task `cancel()`/a newer `start()` already superseded —
+                // never deliver into the current capture (privacy/correctness guard).
+                guard self.session == taskSession else { return }
                 if let text {
                     if isFinal {
                         self.teardown()
@@ -239,7 +280,14 @@ final class SpeechCapture {
                 if let errorMessage {
                     self.teardown()
                     let lower = errorMessage.lowercased()
-                    if self.isOnDeviceAttempt, lower.contains("dictation") || lower.contains("siri") {
+                    // Dictation-off is reported by the Speech framework as
+                    // `kAFAssistantErrorDomain` code 1101 or 1107 — checked first since the
+                    // string match below only matches English-localized descriptions and misses
+                    // e.g. Vietnamese macOS. // UNVERIFIED: exact domain/code values.
+                    let isDictationDomainError = errorDomain == "kAFAssistantErrorDomain"
+                        && (errorCode == 1101 || errorCode == 1107)
+                    let looksLikeDictationOff = lower.contains("dictation") || lower.contains("siri")
+                    if self.isOnDeviceAttempt, isDictationDomainError || looksLikeDictationOff {
                         self.onError?(SpeechCaptureError.onDeviceUnavailable)
                     } else {
                         self.onError?(SpeechCaptureError.recognitionFailed(errorMessage))
@@ -258,6 +306,15 @@ final class SpeechCapture {
         audioEngine.stop()
         audioEngine.inputNode.removeTap(onBus: 0)
         isRunning = false
+    }
+
+    /// Immediately abandons the in-flight capture: bumps `session` FIRST (so the recognitionTask
+    /// completion closure's session check — see above — drops any result/error already in
+    /// flight, delivering neither `onFinal` nor `onError`), then runs the same teardown `stop()`
+    /// and the recognizer's own completion path share.
+    func cancel() {
+        session += 1
+        teardown()
     }
 
     /// Internal cleanup shared by the "recognizer finished/errored on its own" and `stop()` paths.

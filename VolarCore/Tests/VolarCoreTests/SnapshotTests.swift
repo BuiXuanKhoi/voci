@@ -66,7 +66,9 @@ struct SnapshotTests {
         let diff = eligibilityDiff(before: eligibleSnapshot, after: reblockedSnapshot, now: referenceNow)
 
         #expect(!diff.contains(dependent.id))
-        #expect(diff.isEmpty)
+        // Reopening the prerequisite makes the prerequisite itself newly eligible
+        // (ineligible in `before` while done, eligible in `after` as a todo).
+        #expect(diff == [prerequisite.id])
     }
 
     // A task absent from `before` entirely but eligible in `after` counts as newly eligible.

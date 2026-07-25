@@ -97,7 +97,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
 
   const authResult = authorizationHeader
     ? await verifyPaidAuth(authorizationHeader)
-    : await verifyFreeAuth(deviceTokenHeader);
+    : await verifyFreeAuth(deviceTokenHeader, rawBody);
 
   if (!authResult.ok) {
     logEvent("parse_auth_rejected", {
@@ -113,7 +113,10 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   // through the same mechanism. ---
   const supabaseCfg = requireEnv(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] as const);
   if (!supabaseCfg.ok) {
-    return errorResponse(503, "config_missing", { missingEnv: supabaseCfg.missing });
+    // Opaque to the caller (info-leak hardening) — the specific missing keys are only useful to
+    // whoever owns the deployment, never to an unauthenticated internet caller.
+    logError("supabase_config_missing", { missingEnv: supabaseCfg.missing.join(",") });
+    return errorResponse(503, "config_missing");
   }
   const supabase = createClient(supabaseCfg.values.SUPABASE_URL, supabaseCfg.values.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
@@ -144,9 +147,11 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
           rpmCount: check.count,
           latencyMs: Math.round(performance.now() - startedAt),
         });
-        // Contract only documents a "quota" reason for 429; paid soft-rate-limit reuses the same
-        // shape so the client's existing 429 -> heuristic-fallback branch handles it unchanged.
-        return jsonResponse(429, { reason: "quota", resetAt: check.resetAt });
+        // Contract only documents a "quota" reason for 429, but "rate_limited" is already a typed
+        // ApiErrorReason (http.ts) and is a more accurate label for the paid soft-rate-limit path
+        // (an abuse bound, not a real per-day quota); the client's documented behavior is "any
+        // non-200/401 4xx -> fallback", so this is safe to differentiate from the free-tier 429.
+        return jsonResponse(429, { reason: "rate_limited", resetAt: check.resetAt });
       }
     }
   } catch (err) {
@@ -160,7 +165,8 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
 
   const geminiCfg = requireEnv(["GEMINI_API_KEY"] as const);
   if (!geminiCfg.ok) {
-    return errorResponse(503, "config_missing", { missingEnv: geminiCfg.missing });
+    logError("gemini_config_missing", { missingEnv: geminiCfg.missing.join(",") });
+    return errorResponse(503, "config_missing");
   }
   const model = Deno.env.get("PARSE_MODEL") || DEFAULT_PARSE_MODEL;
   const timeoutMs = readEnvInt("PARSE_UPSTREAM_TIMEOUT_MS", 20000);

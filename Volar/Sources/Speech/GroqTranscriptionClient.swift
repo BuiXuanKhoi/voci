@@ -26,6 +26,25 @@ enum GroqTranscriptionError: Error, Sendable {
     case emptyTranscript
 }
 
+extension GroqTranscriptionError: LocalizedError {
+    var errorDescription: String? {
+        switch self {
+        case .missingCredentials:
+            return "No Groq credentials are configured."
+        case .audioTooLarge(let bytes):
+            return "Recording is too large to upload (\(bytes) bytes)."
+        case .http(let status, _):
+            return "Groq request failed (HTTP \(status))."
+        case .decoding:
+            return "Couldn't read Groq's transcription response."
+        case .network(let message):
+            return "Network error talking to Groq: \(message)"
+        case .emptyTranscript:
+            return "Nothing was recognized in the recording."
+        }
+    }
+}
+
 /// Supplies the transcription endpoint + authorization. Injected so the real Groq key NEVER lives
 /// in the app binary: in production this returns the Volar **proxy** base URL + a short-lived
 /// app/user token (the proxy holds the Groq key and gates by paid tier); for local dev it can be
@@ -50,6 +69,17 @@ protocol GroqCredentialProvider: Sendable {
 ///   `.missingCredentials`.
 struct EnvironmentGroqCredentialProvider: GroqCredentialProvider {
     static let groqDirectBaseURL = URL(string: "https://api.groq.com/openai/v1")!
+
+    /// True when a bearer token is configured (env `GROQ_PROXY_TOKEN`/`GROQ_API_KEY`, or
+    /// `volar.groqToken`) — lets the app fall back to on-device BEFORE recording (like WhisperKit's
+    /// readiness gate) instead of hard-erroring only at upload time. Reads the SAME sources as
+    /// `authorization()` below so the two can't disagree. Mirrors `ConfigParseCredentialProvider.isConfigured`.
+    static var isConfigured: Bool {
+        let env = ProcessInfo.processInfo.environment
+        let token = env["GROQ_PROXY_TOKEN"] ?? env["GROQ_API_KEY"]
+            ?? UserDefaults.standard.string(forKey: "volar.groqToken")
+        return !(token ?? "").isEmpty
+    }
 
     func baseURL() async throws -> URL {
         if let s = ProcessInfo.processInfo.environment["GROQ_BASE_URL"]

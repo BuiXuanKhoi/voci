@@ -10,20 +10,14 @@ private let focusTotalSeconds = 25 * 60
 /// state from `AppState` via the environment (frozen contracts, spec §4) instead of taking props:
 /// the app only ever has one `AppState` instance, injected at the scene root.
 ///
-/// Owns its own 1s countdown (see `ticker`/`tick()`) — per spec §4, `AppState.focusSecondsLeft` is
-/// plain stored state with no timer driving it; the backlog note "Focus session countdown... left
-/// for FocusOverlay.swift at Phase 2" is resolved here.
+/// FIX B: display-only — the 1s countdown itself is now owned by `AppState` (`focusTimer`/
+/// `focusTick()`, started from `startFocus()`), not this view. It used to own a `Timer.publish`
+/// ticker locally, which stopped firing the instant this overlay's window closed (e.g. the user
+/// switched away), freezing `focusSecondsLeft` and the menu-bar countdown, and never auto-ending
+/// the session. This view now just reads `appState.focusSecondsLeft` like any other stored value.
 struct FocusOverlay: View {
     @Environment(AppState.self) private var appState: AppState
     @FocusState private var isFocused: Bool
-
-    /// Stable 1s tick source. `@State` (not a plain `let`) is load-bearing: a `let` would mint a
-    /// NEW `Timer.publish` every time the parent re-creates this struct — which happens on every
-    /// `AppState` change — restarting the 1-second wait each time, so the countdown stalls
-    /// whenever anything else mutates state more often than once per second (e.g. live
-    /// transcript partials while capturing during a focus session). `@State` pins the first
-    /// publisher for the lifetime of the overlay's identity.
-    @State private var ticker = Timer.publish(every: 1, on: .main, in: .common).autoconnect()
 
     private var accent: Accent { appState.accent.accent }
 
@@ -45,7 +39,6 @@ struct FocusOverlay: View {
         .focusEffectDisabled()
         .focused($isFocused)
         .onAppear { isFocused = true }
-        .onReceive(ticker) { _ in tick() }
         .onKeyPress(.leftArrow) {
             goToPrevious()
             return .handled
@@ -201,21 +194,6 @@ struct FocusOverlay: View {
     }
 
     // MARK: - Behavior
-
-    /// 1s tick — decrements `appState.focusSecondsLeft` while the session is active and
-    /// unpaused, ending the session once it reaches zero (`endFocus()` also resets the counter
-    /// back to 25 min, matching `AppState`'s own reset-on-end behavior).
-    private func tick() {
-        guard appState.focusActive, !appState.focusPaused else { return }
-        guard appState.focusSecondsLeft > 0 else {
-            appState.endFocus()
-            return
-        }
-        appState.focusSecondsLeft -= 1
-        if appState.focusSecondsLeft <= 0 {
-            appState.endFocus()
-        }
-    }
 
     private func goToPrevious() {
         appState.focusIndex = max(0, appState.focusIndex - 1)

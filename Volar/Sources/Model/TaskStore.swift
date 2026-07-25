@@ -248,11 +248,38 @@ final class TaskStore {
     /// clear. Mirrors `delete`'s pattern: returns newly-eligible task ids (via
     /// `VolarCore.eligibilityDiff`) so the caller notifies the scheduler once instead of
     /// recomputing the diff a second time (self-review "performance").
+    ///
+    /// Behavior UNCHANGED from before FIX 1 — now implemented via `clearFirstExternal(on:now:matching:)`
+    /// with an always-true predicate, shared with `clearExternalCondition(withPrefix:on:now:)` below.
     @discardableResult
     func clearFirstExternalCondition(on id: UUID, now: Date = Date()) -> [UUID] {
+        clearFirstExternal(on: id, now: now, matching: { _ in true })
+    }
+
+    /// FIX 1 (security, DelegationTracker.markNeedsReview): like `clearFirstExternalCondition`,
+    /// but only matches the first unsatisfied `.external` condition whose description
+    /// `hasPrefix(prefix)`, instead of blindly taking the first unsatisfied `.external` condition
+    /// on the task regardless of which one it is. Without this, an inbound `volar://ai-done`
+    /// signal could satisfy a HUMAN-tracked external gate (e.g. "waiting on legal") that happens
+    /// to be first in the list, just because it was unsatisfied — this lets the caller (the AI
+    /// delegation tracker) target only the condition it actually owns
+    /// (`DelegationTracker.waitingPrefix`, "waiting on AI: "). A no-op (returns `[]`) for an
+    /// unknown id or a task with no matching unsatisfied condition.
+    @discardableResult
+    func clearExternalCondition(withPrefix prefix: String, on id: UUID, now: Date = Date()) -> [UUID] {
+        clearFirstExternal(on: id, now: now, matching: { $0.hasPrefix(prefix) })
+    }
+
+    /// Shared implementation for `clearFirstExternalCondition`/`clearExternalCondition(withPrefix:)`:
+    /// finds the first unsatisfied `.external` condition on `id` whose description satisfies
+    /// `match`, flips it to satisfied, saves, and returns newly-eligible task ids. A no-op
+    /// (returns `[]`, no save) if `id` is unknown or nothing matches.
+    private func clearFirstExternal(
+        on id: UUID, now: Date, matching match: (String) -> Bool
+    ) -> [UUID] {
         guard let model = fetchModel(id) else { return [] }
         guard let index = model.conditions.firstIndex(where: {
-            if case .external(_, let satisfied) = $0 { return !satisfied }
+            if case .external(let description, let satisfied) = $0 { return !satisfied && match(description) }
             return false
         }) else { return [] }
         let beforeSnapshot = fetchAllModels().map { $0.asTaskItem.snapshot() }
@@ -261,6 +288,27 @@ final class TaskStore {
         save()
         let afterSnapshot = fetchAllModels().map { $0.asTaskItem.snapshot() }
         return VolarCore.eligibilityDiff(before: beforeSnapshot, after: afterSnapshot, now: now)
+    }
+
+    /// FIX 7 (seam): sets `id` as the single "frog of the day" on the PERSISTED side, clearing the
+    /// flag on every other task (`nil` clears it everywhere, matching no task being frog). Mirrors
+    /// `AppState.setFrog`'s in-memory single-frog invariant (`Volar/Sources/App/AppState.swift`)
+    /// so the app-wiring agent's `store.setFrog(id)` call keeps the persisted store in sync with
+    /// that in-memory array. Only touches models whose `frog` value actually changes, then saves
+    /// once (or not at all if nothing changed) — same "don't churn the store" discipline as the
+    /// rest of this file's mutators.
+    func setFrog(_ id: UUID?) {
+        var changed = false
+        for model in fetchAllModels() {
+            let shouldBeFrog = model.id == id
+            if model.frog != shouldBeFrog {
+                model.frog = shouldBeFrog
+                changed = true
+            }
+        }
+        if changed {
+            save()
+        }
     }
 
     /// Constitution V / FR-044: appends one `ParseCorrection` row for a confirm-card chip edit

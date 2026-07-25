@@ -16,14 +16,8 @@ import SwiftUI
 struct TodayView: View {
     @Environment(AppState.self) private var appState: AppState
 
-    /// Local-only stand-in for the prototype's `useAmbientSound().playing` state. Real ambient
-    /// audio playback is owned by Phase-2C's `AmbientSound.swift`; the frozen `AppState` surface
-    /// has no ambient-sound toggle, so this button is a UI-only placeholder pending that wiring
-    /// (see deviations in the handoff notes).
-    @State private var ambientSoundPlaying = false
-
     /// NEW (retheme): "Later" drawer starts collapsed — deliberately toggled open, never a wall.
-    /// Pure presentation state, same convention as `ambientSoundPlaying`/`pulseTick` below.
+    /// Pure presentation state.
     @State private var laterExpanded = false
     /// NEW (retheme): "Completed" drawer, same collapsed-by-default convention as `laterExpanded`.
     @State private var completedExpanded = false
@@ -76,8 +70,11 @@ struct TodayView: View {
         .animation(VolarMotion.state, value: appState.reminderBanner)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                ToolButton(icon: ambientSoundPlaying ? .volume : .volumeOff, tint: ambientSoundPlaying) {
-                    ambientSoundPlaying.toggle()
+                // FIX E: used to only flip a local `@State` flag, never actually starting/stopping
+                // playback — `AppState.toggleAmbientSound()`/`ambientSound.isPlaying` (Phase-2C's
+                // real `AmbientSound.swift`) already exist; this just wires the button to them.
+                ToolButton(icon: appState.ambientSound.isPlaying ? .volume : .volumeOff, tint: appState.ambientSound.isPlaying) {
+                    appState.toggleAmbientSound()
                 }
                 ToolButton(icon: .waveform) {
                     appState.readDayAloud()
