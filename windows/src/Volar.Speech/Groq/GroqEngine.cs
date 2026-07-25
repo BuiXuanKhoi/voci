@@ -23,21 +23,50 @@ public sealed class GroqEngine : ISpeechEngine, IDisposable
     private readonly GroqModel _primaryModel;
     private readonly GroqModel _fallbackModel;
     private readonly IAudioCaptureService _capture;
+    private readonly IGroqCredentialProvider _credentialProvider;
 
     /// <summary>Guards the async upload against a stop/restart/cancel race — same role as
     /// `AppState.captureSession`/`GroqEngine.session` in the Swift original.</summary>
     private int _session;
 
+    /// <summary>
+    /// <see langword="true"/> when a Groq credential is available — new in Wave 3-B (A3:
+    /// Local&lt;-&gt;Cloud switch, macOS commit f88d5e5). Port of Swift's
+    /// <c>nonisolated static var GroqEngine.isConfigured: Bool { EnvironmentGroqCredentialProvider.isConfigured }</c>,
+    /// drives the pre-record fallback a future speech-engine-selection policy (ported from
+    /// <c>AppState.selectedEngine</c>, Wave 3-C) needs: choosing Groq before a credential exists
+    /// must degrade quietly to on-device instead of failing only at upload time.
+    /// </summary>
+    /// <remarks>
+    /// BEHAVIOUR NOTE for the self-review "parity"/"behaviour drift" points: Swift's
+    /// <c>GroqEngine.isConfigured</c> queries the ambient
+    /// <c>EnvironmentGroqCredentialProvider.isConfigured</c> STATIC directly — completely
+    /// independent of whatever credential provider the engine's OWN
+    /// <c>GroqTranscriptionClient</c> was actually constructed with (a pre-existing coupling
+    /// quirk in the Swift source, not introduced by this port). This port preserves that exact
+    /// shape rather than "fixing" it: <see cref="IsConfigured"/> reads a SEPARATE, independently
+    /// injected <see cref="IGroqCredentialProvider"/> (defaulting to a fresh
+    /// <see cref="EnvironmentGroqCredentialProvider"/>), not the credential provider hidden inside
+    /// <paramref name="client"/> — because <c>Volar.Speech.Groq.GroqTranscriptionClient</c> is not
+    /// in this wave's file-ownership list and could not be edited to expose its private provider.
+    /// A caller that constructs both with visibly DIFFERENT providers could see them disagree;
+    /// Wave 3-C's composition root should construct both from the SAME
+    /// <see cref="IGroqCredentialProvider"/> instance to avoid that (see this wave's handoff note).
+    /// </remarks>
+    public bool IsConfigured => _credentialProvider.IsConfigured;
+
     public GroqEngine(
         GroqTranscriptionClient client,
         GroqModel primaryModel = GroqModel.LargeV3,
         GroqModel fallbackModel = GroqModel.LargeV3Turbo,
-        IAudioCaptureService? captureService = null)
+        IAudioCaptureService? captureService = null,
+        IGroqCredentialProvider? credentialProvider = null)
     {
         _client = client;
         _primaryModel = primaryModel;
         _fallbackModel = fallbackModel;
         _capture = captureService ?? new AudioCaptureService();
+        _credentialProvider = credentialProvider ?? new EnvironmentGroqCredentialProvider();
         _capture.OnError += ex =>
         {
             if (IsRunning)

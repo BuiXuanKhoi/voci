@@ -2,20 +2,21 @@
 // scheduling + fire-time delivery (specs/002-workflow-command-center/contracts/phase4-contract.md
 // §A, constitution IV).
 //
-// PURITY / PERSISTENCE DESIGN NOTE: unlike the Swift original (which owns its own SwiftData
-// `ModelContainer`/`ModelContext` for `ReminderRecord`), this port is required to stay pure/no-I/O
-// (this task's brief: "PURE logic, no I/O, no WinUI") and must not reference Volar.Data (no EF
-// Core). Its entire `ReminderRecord` heap is therefore kept as a plain in-memory `List` for the
-// scheduler instance's lifetime — there is no durable store here at all. Constitution IV's "rebuild
-// everything from durable storage on launch/wake" requirement is satisfied one layer up in the
-// original design (SwiftData persists `ReminderRecord` across process restarts, so a fresh
-// `ModelContext` fetch on `init` already sees prior rows); this Windows port does NOT yet have that
-// layer. A Wave-3 persistence adapter needs to either (a) snapshot `FetchAllRecords()` to
-// `Volar.Data.Entities.ReminderRecordEntity` rows on every mutation and rehydrate them into a fresh
-// scheduler's in-memory list at app launch (before calling `RebuildFromStorage`), or (b) inject an
-// equivalent seam interface analogous to `IReminderTaskStore`. This is flagged as the single
-// biggest risk/gap for the lead to review — everything else in this file is a faithful port of the
-// Swift logic.
+// PERSISTENCE (Wave 3-B / A2): unlike the Swift original (which owns its own SwiftData
+// `ModelContainer`/`ModelContext` for `ReminderRecord`), this port stays pure/no-EF-Core-reference
+// (this project's own layering rule: Volar.Reminders -> Core + Domain only) by taking an injected
+// <see cref="IReminderRecordStore"/> seam instead of opening a database directly. `_records` is
+// kept as an in-memory `List` for the scheduler instance's lifetime, exactly as before — but it is
+// now a CACHE over that store, not the only copy: every mutation that touches `_records` also
+// write-throughs to `_recordStore` (see the `Persist*` helpers below), and the constructor calls
+// <see cref="Rehydrate"/> once to load any rows a previous process already persisted. Constitution
+// IV's "rebuild everything from durable storage on launch/wake" requirement is therefore satisfied
+// the same way the Swift original satisfies it (a fresh read on construction already sees prior
+// rows) without this project taking on an EF Core dependency itself —
+// <see cref="Volar.Data.ReminderRecordRepository"/> (referenced only in doc comments, never in
+// code, to keep this project EF-Core-free) is the real SQLite-backed implementation; the
+// constructor's default (<see cref="InMemoryReminderRecordStore"/>) has no durability at all, which
+// is exactly the pre-this-wave behavior every existing caller already depends on.
 //
 // TIME NOTE: every method that needs "now" takes it as an explicit `DateTimeOffset` parameter
 // rather than reading the system clock internally (`Date()` in Swift) — matches this project's own
@@ -60,20 +61,101 @@ public sealed class ReminderScheduler
     private readonly ReminderContextGate _gate;
     private readonly IReminderSettingsProvider _settings;
     private readonly TimeZoneInfo _timeZone;
+    private readonly IReminderRecordStore _recordStore;
     private readonly List<ReminderRecord> _records = new();
 
+    /// <param name="recordStore">Wave 3-B (A2) durability seam — see the class header. Defaults to
+    /// <see cref="InMemoryReminderRecordStore"/> (no durability, matching every pre-this-wave
+    /// caller's existing behavior) so this parameter is additive: no existing constructor call
+    /// site needs to change.</param>
     public ReminderScheduler(
         IReminderTaskStore store,
         IToastChannel channel,
         ReminderContextGate gate,
         IReminderSettingsProvider? settings = null,
-        TimeZoneInfo? timeZone = null)
+        TimeZoneInfo? timeZone = null,
+        IReminderRecordStore? recordStore = null)
     {
         _store = store ?? throw new ArgumentNullException(nameof(store));
         _channel = channel ?? throw new ArgumentNullException(nameof(channel));
         _gate = gate ?? throw new ArgumentNullException(nameof(gate));
         _settings = settings ?? new DefaultReminderSettingsProvider();
         _timeZone = timeZone ?? TimeZoneInfo.Utc;
+        _recordStore = recordStore ?? new InMemoryReminderRecordStore();
+        Rehydrate();
+    }
+
+    /// <summary>
+    /// Loads every durable row from <see cref="_recordStore"/> into the in-memory cache — the
+    /// actual fix for the restart bug this wave exists to close (see class header: the Swift
+    /// original gets this "for free" from a fresh SwiftData <c>ModelContext</c> fetch on
+    /// <c>init</c>; this port needs an explicit step because <see cref="_records"/> is a plain
+    /// in-memory cache, not a live query). Called once, at the end of the constructor — mirrors
+    /// the Swift <c>init</c>'s own ordering ("load here; the app shell calls
+    /// <see cref="RebuildFromStorage"/> separately, afterward"). Left <see langword="public"/> (not
+    /// just constructor-private) so a Wave-3-C caller can re-run it explicitly if it ever needs to
+    /// reload from a store mutated out-of-process, though nothing in this project requires that
+    /// today. A store failure degrades gracefully — starts/stays with an empty cache rather than
+    /// crashing app launch, matching this codebase's established "corrupt/unreadable durable state
+    /// starts empty, never throws" convention (e.g. the Wave-3-A JSON settings store).
+    /// </summary>
+    public void Rehydrate()
+    {
+        try
+        {
+            var rows = _recordStore.LoadAll();
+            _records.Clear();
+            _records.AddRange(rows);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Volar.Reminders.ReminderScheduler] rehydrate failed: {ex.Message}");
+        }
+    }
+
+    // MARK: - Write-through helpers (Wave 3-B / A2)
+    //
+    // Every one of this class's `_records` mutation sites below (Add/AddRange/Remove/in-place
+    // field assignment) is paired with exactly one of these three calls, so `_recordStore` can
+    // never drift out of sync with the in-memory cache. Mirrors the Swift original's `save()`
+    // error-handling philosophy verbatim ("log, never throw into the caller" — see that method's
+    // doc comment: `catch { print(...) }`): a persistence failure must not take down a live
+    // reminder-scheduling call the way an unhandled exception would.
+
+    private void PersistUpsert(ReminderRecord record)
+    {
+        try
+        {
+            _recordStore.Upsert(record);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Volar.Reminders.ReminderScheduler] save failed: {ex.Message}");
+        }
+    }
+
+    private void PersistUpsertRange(IEnumerable<ReminderRecord> records)
+    {
+        try
+        {
+            _recordStore.UpsertRange(records);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Volar.Reminders.ReminderScheduler] save failed: {ex.Message}");
+        }
+    }
+
+    private void PersistDelete(Guid id)
+    {
+        try
+        {
+            _recordStore.Delete(id);
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[Volar.Reminders.ReminderScheduler] save failed: {ex.Message}");
+        }
     }
 
     // MARK: - Contract §A
@@ -155,6 +237,7 @@ public sealed class ReminderScheduler
             if (record.State == "scheduled" && deliveredIds.Contains(record.Id))
             {
                 record.State = "delivered";
+                PersistUpsert(record); // FIX B write-through: durable state must match the cache.
             }
         }
     }
@@ -198,6 +281,7 @@ public sealed class ReminderScheduler
         }
         var records = ReminderRecord.Derive(taskId, deadline, reminderOverride, _settings.CurrentGlobalReminderPolicy);
         _records.AddRange(records);
+        PersistUpsertRange(records);
         RefillSystemRequests();
     }
 
@@ -223,6 +307,7 @@ public sealed class ReminderScheduler
         foreach (var record in records)
         {
             _records.Remove(record);
+            PersistDelete(record.Id);
         }
         RefillSystemRequests();
     }
@@ -281,11 +366,13 @@ public sealed class ReminderScheduler
             // unregistered and re-posts it with the new trigger time.
             _channel.CancelPending(new[] { existing.Id });
             existing.FireAt = date;
+            PersistUpsert(existing);
             RefillSystemRequests();
             return;
         }
         var newRecord = new ReminderRecord(taskId: taskId, fireAt: date, offsetKind: "resurface");
         _records.Add(newRecord);
+        PersistUpsert(newRecord);
         RefillSystemRequests();
     }
 
@@ -300,6 +387,7 @@ public sealed class ReminderScheduler
         {
             var record = new ReminderRecord(taskId: taskId, fireAt: now, offsetKind: "unblocked");
             _records.Add(record);
+            PersistUpsert(record);
             HandleFire(record.Id, now);
         }
     }
@@ -314,6 +402,7 @@ public sealed class ReminderScheduler
     {
         var record = new ReminderRecord(taskId: taskId, fireAt: now, offsetKind: "resurface");
         _records.Add(record);
+        PersistUpsert(record);
         HandleFire(record.Id, now);
     }
 
@@ -365,9 +454,11 @@ public sealed class ReminderScheduler
         if (evaluation is null)
         {
             _records.Remove(record);
+            PersistDelete(record.Id);
             return false;
         }
         record.State = evaluation.ShouldShow ? "delivered" : "satisfied";
+        PersistUpsert(record);
         if (evaluation.ShouldShow && evaluation.ShouldSpeak)
         {
             var timing = TimingPhrase(record.OffsetKind);
@@ -396,6 +487,7 @@ public sealed class ReminderScheduler
                     var taskId = record.TaskId;
                     _store.Toggle(taskId, now);
                     record.State = "satisfied";
+                    PersistUpsert(record);
                     // Mirrors the Swift original: `store.Toggle` can leave the task done/archived,
                     // OR reopen it in place (a recurring task resets to todo with a fresh deadline).
                     // Either way this record alone isn't the whole story — cancel the REST of this
@@ -421,16 +513,20 @@ public sealed class ReminderScheduler
                 }
             case ReminderAction.Snooze10:
                 Reschedule(record, now.AddMinutes(10));
+                PersistUpsert(record);
                 break;
             case ReminderAction.Tomorrow:
             case ReminderAction.RescheduleTomorrow:
                 Reschedule(record, TomorrowMorning(now, _timeZone));
+                PersistUpsert(record);
                 break;
             case ReminderAction.RescheduleTonight:
                 Reschedule(record, Tonight(now, _timeZone));
+                PersistUpsert(record);
                 break;
             case ReminderAction.RescheduleWeekend:
                 Reschedule(record, NextWeekend(now, _timeZone));
+                PersistUpsert(record);
                 break;
             default:
                 // Default tap / dismiss identifiers: no state change, no window — a
@@ -518,14 +614,17 @@ public sealed class ReminderScheduler
         if (evaluation is null)
         {
             _records.Remove(record);
+            PersistDelete(record.Id);
             return;
         }
         if (!evaluation.ShouldShow)
         {
             record.State = "satisfied";
+            PersistUpsert(record);
             return;
         }
         record.State = "delivered";
+        PersistUpsert(record);
         var delivery = BuildDelivery(record, evaluation.Task, evaluation.IsSensitive, evaluation.ShouldSpeak);
         _channel.DeliverNow(delivery);
     }
@@ -747,6 +846,7 @@ public sealed class ReminderScheduler
         foreach (var record in scheduled)
         {
             _records.Remove(record);
+            PersistDelete(record.Id);
         }
     }
 
@@ -763,6 +863,7 @@ public sealed class ReminderScheduler
         }
         var records = ReminderRecord.Derive(taskId, deadline, reminderOverride, _settings.CurrentGlobalReminderPolicy);
         _records.AddRange(records);
+        PersistUpsertRange(records);
     }
 
     private bool TryFindTask(Guid taskId, out TaskItem task)

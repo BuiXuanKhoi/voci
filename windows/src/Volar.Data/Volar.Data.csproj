@@ -11,6 +11,25 @@
   -->
   <ItemGroup>
     <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
+    <!--
+      Wave 3-B (A2, flagged for Opus review): the ONLY exception to this project's "Core only" rule
+      above. ReminderRecordRepository.cs implements Volar.Reminders.IReminderRecordStore — that
+      interface is fixed (by this wave's own design) to live in Volar.Reminders, so the concrete EF
+      Core store over Volar.Data.Entities.ReminderRecordEntity needs this reference to declare that
+      it satisfies the interface. No cycle results: Volar.Reminders itself stays Core+Domain-only
+      (never references Volar.Data), so Volar.Data -> Volar.Reminders -> {Volar.Core, Volar.Domain}
+      remains a DAG.
+    -->
+    <ProjectReference Include="..\Volar.Reminders\Volar.Reminders.csproj" />
+
+    <!--
+      Wave 3-B (Opus review): second sanctioned exception, same ports-and-adapters shape as the
+      Volar.Reminders one above. `ISettingsStore` is the port and lives in Volar.Domain;
+      JsonFileSettingsStore.cs is its file-backed adapter, so it must be able to declare
+      `: ISettingsStore` rather than merely being shape-compatible (A3 left it undeclared because it
+      could not edit this csproj). Volar.Domain -> Volar.Core only, so no cycle.
+    -->
+    <ProjectReference Include="..\Volar.Domain\Volar.Domain.csproj" />
   </ItemGroup>
 
   <ItemGroup>

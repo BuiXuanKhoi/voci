@@ -39,13 +39,18 @@ internal static class Fixtures
 
     /// <summary>Wires a fresh <see cref="ReminderScheduler"/> against fresh fakes, mirroring the
     /// Swift tests' <c>makeScheduler()</c> fixture.</summary>
+    /// <param name="recordStore">Wave 3-B (A2): defaults to a fresh <see cref="FakeReminderRecordStore"/>
+    /// (empty — no pre-existing rows) rather than the production
+    /// <see cref="InMemoryReminderRecordStore"/> default, so every existing test in this project
+    /// keeps behaving exactly as before (nothing to rehydrate) while persistence-focused tests can
+    /// still pass their own pre-seeded instance in and keep a reference to it for assertions.</param>
     public static (ReminderScheduler Scheduler, FakeReminderTaskStore Store, FakeToastChannel Channel) MakeScheduler(
-        TimeZoneInfo? timeZone = null, IReminderSettingsProvider? settings = null)
+        TimeZoneInfo? timeZone = null, IReminderSettingsProvider? settings = null, IReminderRecordStore? recordStore = null)
     {
         var store = new FakeReminderTaskStore();
         var channel = new FakeToastChannel();
         var gate = new ReminderContextGate();
-        var scheduler = new ReminderScheduler(store, channel, gate, settings, timeZone ?? TestTimeZone);
+        var scheduler = new ReminderScheduler(store, channel, gate, settings, timeZone ?? TestTimeZone, recordStore ?? new FakeReminderRecordStore());
         return (scheduler, store, channel);
     }
 }

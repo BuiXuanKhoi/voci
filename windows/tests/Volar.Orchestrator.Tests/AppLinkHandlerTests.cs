@@ -207,6 +207,32 @@ public class AppLinkHandlerTests
     }
 
     [Fact]
+    public void AiDone_Base64EncodedCwd_WithSpaceAndNonAsciiCharacter_RoundTripsForMatching()
+    {
+        // Simulates exactly what EditorConnector.HookCommand's PowerShell one-liner computes on
+        // Windows — [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path))
+        // — for a path containing a space and a non-ASCII character (Vietnamese "ô"), then confirms
+        // the receiving side (AppLinkHandler.DecodedCwd, unchanged by the Windows port since the
+        // wire format is identical to macOS's base64(UTF8(cwd))) decodes it back exactly and the
+        // cwd-prefix matching ladder still resolves correctly.
+        var (handler, store, delegation) = Build();
+        var t1 = Fixtures.MakeTask(id: Fixtures.FixedGuid(1), conditions: new Condition[] { Fixtures.WaitingOnAi("a") });
+        var t2 = Fixtures.MakeTask(id: Fixtures.FixedGuid(2), conditions: new Condition[] { Fixtures.WaitingOnAi("b") });
+        store.AddTask(t1);
+        store.AddTask(t2);
+        const string cwdWithSpaceAndDiacritic = @"C:\Users\anh Khôi\projects\volar café";
+        delegation.Delegate(t1.Id, "a", Fixtures.ReferenceNow, cwdWithSpaceAndDiacritic);
+        delegation.Delegate(t2.Id, "b", Fixtures.ReferenceNow, @"C:\Users\anh Khôi\projects\other");
+
+        var encodedCwd = Convert.ToBase64String(Encoding.UTF8.GetBytes(cwdWithSpaceAndDiacritic));
+        handler.Handle("volar://ai-done?cwd=" + Uri.EscapeDataString(encodedCwd));
+
+        Assert.False(DelegationTracker.IsWaitingOnAI(store.Get(t1.Id)!.Value.Conditions[0]));
+        Assert.True(DelegationTracker.IsWaitingOnAI(store.Get(t2.Id)!.Value.Conditions[0]));
+        Assert.Empty(handler.PendingDisambiguation);
+    }
+
+    [Fact]
     public void AiDone_MalformedBase64Cwd_FallsBackToRawValue_NeverCrashes()
     {
         var (handler, store, delegation) = Build();

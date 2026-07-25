@@ -53,16 +53,38 @@ public class EditorConnectorTests
     // MARK: - PreviewHookEntry
 
     [Fact]
-    public void PreviewHookEntry_MatchesContractByteForByte()
+    public void PreviewHookEntry_MatchesWindowsPowerShellCommandByteForByte()
     {
         var connector = new EditorConnector(new FakeEditorTransport());
 
         var preview = connector.PreviewHookEntry();
 
         Assert.Equal(
-            "{\"hooks\":[{\"type\":\"command\",\"command\":\"open \\\"volar://ai-done?cwd=$(printf %s \\\\\\\"$PWD\\\\\\\" | base64)\\\"\"}]}",
+            """
+            {"hooks":[{"type":"command","command":"powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command \"Start-Process ('volar://ai-done?cwd=' + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes((Get-Location).Path)))\""}]}
+            """,
             preview);
     }
+
+    [Fact]
+    public void PreviewHookEntry_EmittedCommandHasNoOpenOrBase64BinaryDependency()
+    {
+        // The whole point of this port: neither macOS's `open` nor `base64` exists on Windows, so
+        // the emitted command must not depend on either — it must be a self-contained PowerShell
+        // invocation instead.
+        var connector = new EditorConnector(new FakeEditorTransport());
+
+        var preview = connector.PreviewHookEntry();
+
+        Assert.DoesNotContain("open \"", preview, StringComparison.Ordinal);
+        Assert.DoesNotContain("| base64", preview, StringComparison.Ordinal);
+        Assert.Contains("powershell", preview, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("Start-Process", preview, StringComparison.Ordinal);
+        Assert.Contains("[Convert]::ToBase64String", preview, StringComparison.Ordinal);
+        // Still contains the marker substring the dedupe/removal logic keys on.
+        Assert.Contains("volar://", preview, StringComparison.Ordinal);
+    }
+
 
     // MARK: - Connect
 
@@ -317,5 +339,81 @@ public class EditorConnectorTests
 
         var backupPath = SettingsPath + $".volar-backup-{Now.ToUnixTimeMilliseconds()}";
         Assert.Equal(originalBytes, transport.GetFile(backupPath));
+    }
+
+    // MARK: - Real-home guard (Windows-only hardening — no App Sandbox to enforce this for us)
+
+    [Fact]
+    public void Connect_ClaudeDirOutsideUserProfile_ThrowsAndWritesNothing()
+    {
+        var transport = new FakeEditorTransport { HomeDirectory = @"C:\Users\fake" };
+        var connector = new EditorConnector(transport);
+        const string outsidePath = @"C:\Windows\System32\.claude";
+
+        Assert.Throws<EditorConnector.ConnectorException>(() => connector.Connect(outsidePath, Now));
+
+        Assert.False(transport.FileExists(System.IO.Path.Combine(outsidePath, "settings.json")));
+    }
+
+    [Fact]
+    public void Connect_ClaudeDirLooksLikeItsUnderProfileButTraversesOut_ThrowsAndWritesNothing()
+    {
+        // "C:\Users\fake\..\other\.claude" textually starts with the home directory but resolves
+        // (via `..`) to a sibling directory outside it — Path.GetFullPath collapses the traversal
+        // before the prefix check runs, so this must still be rejected.
+        var transport = new FakeEditorTransport { HomeDirectory = @"C:\Users\fake" };
+        var connector = new EditorConnector(transport);
+        const string traversalPath = @"C:\Users\fake\..\other\.claude";
+
+        Assert.Throws<EditorConnector.ConnectorException>(() => connector.Connect(traversalPath, Now));
+    }
+
+    [Fact]
+    public void Connect_HomeDirectoryUnavailable_ThrowsAndWritesNothing()
+    {
+        var transport = new FakeEditorTransport { HomeDirectory = null };
+        var connector = new EditorConnector(transport);
+
+        Assert.Throws<EditorConnector.ConnectorException>(() => connector.Connect(ClaudeDir, Now));
+    }
+
+    [Fact]
+    public void Connect_ClaudeDirEqualToUserProfileItself_IsAllowed()
+    {
+        // Boundary case: the claimed ".claude" dir IS the home directory itself, not a
+        // subdirectory of it — should still be treated as "within", not rejected.
+        var transport = new FakeEditorTransport { HomeDirectory = @"C:\Users\fake" };
+        var connector = new EditorConnector(transport);
+
+        var ex = Record.Exception(() => connector.Connect(@"C:\Users\fake", Now));
+
+        Assert.Null(ex);
+    }
+
+    [Fact]
+    public void Disconnect_ClaudeDirOutsideUserProfile_ThrowsAndWritesNothing()
+    {
+        var transport = new FakeEditorTransport { HomeDirectory = @"C:\Users\fake" };
+        transport.SetFile(@"C:\Windows\System32\.claude\settings.json", """{"hooks": {"Stop": [{"type": "command", "command": "volar://ai-done"}]}}""");
+        var connector = new EditorConnector(transport);
+        var originalBytes = transport.GetFile(@"C:\Windows\System32\.claude\settings.json");
+
+        Assert.Throws<EditorConnector.ConnectorException>(
+            () => connector.Disconnect(@"C:\Windows\System32\.claude", Now));
+
+        Assert.Equal(originalBytes, transport.GetFile(@"C:\Windows\System32\.claude\settings.json"));
+    }
+
+    [Fact]
+    public void Disconnect_HomeDirectoryUnavailable_ThrowsAndWritesNothing()
+    {
+        var transport = new FakeEditorTransport { HomeDirectory = null };
+        transport.SetFile(SettingsPath, """{"hooks": {"Stop": [{"type": "command", "command": "volar://ai-done"}]}}""");
+        var connector = new EditorConnector(transport);
+        var originalBytes = transport.GetFile(SettingsPath);
+
+        Assert.Throws<EditorConnector.ConnectorException>(() => connector.Disconnect(ClaudeDir, Now));
+
+        Assert.Equal(originalBytes, transport.GetFile(SettingsPath));
     }
 }

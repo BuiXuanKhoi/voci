@@ -16,6 +16,7 @@ public class GroqTranscriptionClientTests
     {
         public Task<Uri> GetBaseUrlAsync(CancellationToken cancellationToken = default) => Task.FromResult(new Uri(baseUrl));
         public Task<string?> GetAuthorizationAsync(CancellationToken cancellationToken = default) => Task.FromResult(authorization);
+        public bool IsConfigured => !string.IsNullOrEmpty(authorization);
     }
 
     [Fact]
@@ -119,6 +120,7 @@ public class GroqTranscriptionClientTests
     {
         public Task<Uri> GetBaseUrlAsync(CancellationToken cancellationToken = default) => Task.FromResult(new Uri("https://fake.test/v1"));
         public Task<string?> GetAuthorizationAsync(CancellationToken cancellationToken = default) => throw GroqTranscriptionException.MissingCredentials();
+        public bool IsConfigured => false;
     }
 
     [Fact]

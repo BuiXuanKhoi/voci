@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Port target: Volar/Sources/Speech/VoiceDone.swift. References Core + Domain per the Wave 3-B
+    (A1) design note even though VoiceDone.cs's own seam types (VoiceDoneIntent/VoiceMatch/
+    VoiceDoneTask) do not need either today — this keeps the project ready for a future caller
+    that maps Volar.Domain.TaskItem -> VoiceDoneTask without a churny csproj edit later. Otherwise
+    this project stays dependency-free like the Swift original: no NuGet packages, no I/O, no
+    logging, no async. Conventions copied from Volar.Reminders.csproj.
+  -->
+  <ItemGroup>
+    <ProjectReference Include="..\Volar.Domain\Volar.Domain.csproj" />
+    <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
+  </ItemGroup>
+
+</Project>
