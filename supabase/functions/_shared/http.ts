@@ -18,6 +18,7 @@ export function jsonResponse(status: number, body: unknown, extraHeaders?: Heade
  *  client's documented behavior is "any non-200/429/401 -> fallback", so extra 4xx/5xx reasons
  *  are safe to add without breaking the contract). */
 export type ApiErrorReason =
+  | "not_found"
   | "method_not_allowed"
   | "unsupported_media_type"
   | "payload_too_large"
@@ -74,4 +75,40 @@ export async function readBodyCapped(req: Request, maxBytes: number): Promise<st
     offset += chunk.byteLength;
   }
   return new TextDecoder().decode(merged);
+}
+
+/** Byte-accurate sibling of `readBodyCapped` for binary/multipart bodies (audio uploads), where
+ *  decoding through `TextDecoder` (as the text variant does) would corrupt non-UTF-8 bytes. Same
+ *  enforcement model: `Content-Length` is checked first as a fast-path hint, but the real bound is
+ *  the streaming byte counter below, so a missing/understated `Content-Length` under chunked
+ *  transfer-encoding still cannot smuggle an oversized body past this check — added for the `groq`
+ *  function's multipart passthrough (see supabase/functions/groq/index.ts). */
+export async function readBodyCappedBytes(req: Request, maxBytes: number): Promise<Uint8Array> {
+  const contentLength = req.headers.get("content-length");
+  if (contentLength && Number.parseInt(contentLength, 10) > maxBytes) {
+    throw new BodyTooLargeError();
+  }
+  if (!req.body) return new Uint8Array(0);
+
+  const reader = req.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => {});
+      throw new BodyTooLargeError();
+    }
+    chunks.push(value);
+  }
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return merged;
 }
