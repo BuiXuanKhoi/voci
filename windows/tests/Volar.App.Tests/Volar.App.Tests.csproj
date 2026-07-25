@@ -32,6 +32,14 @@
     <!-- Added by C1 for Adapters/** tests (OrchestratorTaskStoreAdapter/FileDelegationMetaStore
          need Volar.Orchestrator's IOrchestratorTaskStore/IDelegationMetaStore/DelegationTracker). -->
     <ProjectReference Include="..\..\src\Volar.Orchestrator\Volar.Orchestrator.csproj" />
+    <!-- Added by Wave 3-C stage-2 agent C3 for Capture/** tests: CaptureFlowService/
+         SpeechEngineService (and their tests) use Volar.Speech's engines/audio seam,
+         Volar.Parsing's IIntentParser/HeuristicIntentParser, and Volar.Voice's VoiceDone types.
+         Transitively available via the Volar.App reference already above; listed explicitly here
+         too for the same clarity reasons C1's Volar.Orchestrator line above already established. -->
+    <ProjectReference Include="..\..\src\Volar.Speech\Volar.Speech.csproj" />
+    <ProjectReference Include="..\..\src\Volar.Parsing\Volar.Parsing.csproj" />
+    <ProjectReference Include="..\..\src\Volar.Voice\Volar.Voice.csproj" />
   </ItemGroup>
 
 </Project>

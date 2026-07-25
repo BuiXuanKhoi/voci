@@ -208,6 +208,43 @@ this was macOS MAJOR bug #2 in the 2026-07-16 review), and `TasksChanged` firing
   pointer; receiving the activation in the already-running unpackaged process additionally requires
   `Microsoft.Windows.AppLifecycle.AppInstance` single-instance redirection. C5 owns that.
 
+## Opus review notes from stage 2 (binding on C5)
+
+- **The C3/C4 delegation seam does NOT line up — C5 must write the adapter.** C3 declares
+  `IDelegationHandoff.DelegateAsync(Guid taskId, string? label, int checkBackMinutes,
+  CancellationToken)` inside `CaptureFlowService.cs`; C4 exposes
+  `DelegationOrchestratorService.DelegateTaskAsync(Guid taskId, string? label = null,
+  int checkBackMinutes = 10)`. Neither agent could edit the other's file, so both did the right
+  thing and stopped at the boundary. C5 registers a two-line adapter implementing
+  `IDelegationHandoff` over `DelegationOrchestratorService` and injects it into `CaptureFlowService`.
+  **Until that adapter exists, a voice "giao cho Claude rồi" silently drops the hand-off** (C3 logs a
+  warning and continues, deliberately, rather than throwing) — so C5 owes a test that the wired graph
+  actually delegates.
+- **Two real C# traps C3 found and fixed — do not reintroduce them elsewhere:**
+  1. `T? Foo<T>(...)` on an *unconstrained* type parameter is a nullable-reference **annotation
+     only**. Instantiated with a value type (`T = DateTimeOffset`), `return default;` yields
+     `DateTimeOffset.MinValue`, not null — a dismissed deadline/estimate chip would have persisted
+     garbage instead of omitting the field. Fixed with `bool IsResolved<T>(..., out ...)` plus
+     concretely-typed wrappers. Any future generic "maybe value" helper in this codebase must not
+     repeat the pattern.
+  2. Swift's `onFinal` is a single-slot closure property; C#'s `ISpeechEngine.OnFinal` is an
+     `event` (`+=` accumulates). Every capture start must unsubscribe the previous handler pair
+     before subscribing — otherwise transcript N arrives N times.
+- **C4 deferred `reminderBanner`/`showReminderPreview`/`dismissBanner` and the `showBreakdown` flag
+  to Wave 4** (raising a `BreakdownRequested` event instead), following the precedent set for the
+  detail-sheet trio. Accepted — but that makes **three** groups of UI-selection state Wave 4 must
+  own; the Wave 4 contract has to name an owner for each or they fall through the cracks.
+- **Apple-only members correctly dropped** by C3 (`allowServerRecognition`, `recognitionLocaleID`,
+  `pendingServerConsent`, `useServerRecognition`, `setRecognitionLocale`, `openDictationSettings`):
+  both Windows engines auto-detect language and there is no OS dictation toggle to send a user to.
+  Wave 4's Settings view must therefore NOT render those rows — it is not a missing binding.
+- **Gate-method call contract from C4** (the shell owns the cadence, not the services):
+  `MaybeShowMorningFrog(now)` once/day, `MaybeShowTriage(now)` once/ISO-week,
+  `MaybeShowEveningSweep(now)` **only when the local hour >= 18** (the method itself does not check
+  the hour — that gate lived at Swift's call site), all three additionally requiring `hasOnboarded`,
+  which no service owns. `RefreshDelegationQueue()` on a 60s cadence.
+  `OfferRescheduleForOverdueTasks(now)` once at launch.
+
 ## Stage 3 (after stage 2): C5 — wiring and the shell
 
 Owns `CompositionRoot.cs`, `App.xaml.cs`, `MainWindow.xaml(.cs)`, `Services/HotkeyService.cs`,

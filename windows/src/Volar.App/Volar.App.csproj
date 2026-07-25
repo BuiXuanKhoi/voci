@@ -50,6 +50,11 @@
     <ProjectReference Include="..\Volar.Parsing\Volar.Parsing.csproj" />
     <ProjectReference Include="..\Volar.Reminders\Volar.Reminders.csproj" />
     <ProjectReference Include="..\Volar.Orchestrator\Volar.Orchestrator.csproj" />
+    <!-- Added by Wave 3-C stage-2 agent C3: CaptureFlowService.cs classifies voice-done/delegation
+         intent via Volar.Voice.VoiceDone. Not in C3's named file list, but required for the file it
+         WAS asked to write to compile — flagged in that agent's final report per this wave's
+         self-review convention. -->
+    <ProjectReference Include="..\Volar.Voice\Volar.Voice.csproj" />
   </ItemGroup>
 
   <ItemGroup>
