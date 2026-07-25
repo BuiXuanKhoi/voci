@@ -168,14 +168,25 @@ Volar.Windows.sln
 
 ---
 
+## 7b. Đóng gói (chốt 2026-07-20)
+
+**Unpackaged self-contained `.exe`** — KHÔNG dùng MSIX ở giai đoạn này.
+```
+dotnet publish src/Volar.App/Volar.App.csproj -c Release -r win-x64 --self-contained true
+```
+- Bundle .NET 10 runtime → double-click chạy, không cần cài .NET, không cần chứng chỉ.
+- WinUI 3 unpackaged cần bootstrap Windows App SDK (`Microsoft.WindowsAppSDK.Bootstrap`) — App.xaml phải gọi `Bootstrap.Initialize` trước khi tạo UI (khác app packaged). Ghi nhận cho Wave 3.
+- Đánh đổi so với MSIX (hoãn tới khi lên Microsoft Store): không có Start Menu entry / auto-update / package identity. Package identity thiếu → toast `AppNotificationBuilder` và đăng ký `volar://` phải xử lý theo đường unpackaged (registry thủ công) — đây là lý do concrete toast/registry adapter dồn vào Wave 3.
+
 ## 8. Trạng thái
 
 - [x] Tạo worktree + branch `window`
 - [x] Chốt tech stack
 - [x] Viết plan này
-- [ ] Wave 1 (4 agent)
-- [ ] Wave 2 (3 agent)
-- [ ] Wave 3 (2 agent, tuần tự)
-- [ ] Wave 4 (4 agent)
-- [ ] Wave 5
+- [x] Wave 1 (Core/Domain/Data/Speech — 368 test xanh, commit f2315aa)
+- [~] Wave 2 (Parsing/Reminders/Orchestrator — 3 agent Sonnet ĐANG CHẠY 2026-07-20)
+- [ ] Wave 3 (App shell + tách AppState + concrete adapter: toast/registry/transport)
+- [ ] Wave 4 (4 view)
+- [ ] Wave 5 (design system + wiring)
+- [ ] Đóng gói self-contained exe (§7b)
 - [ ] Build xanh trên máy Windows của anh Khôi

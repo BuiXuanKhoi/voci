@@ -1,0 +1,105 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    Volar.App — WinUI 3 desktop shell (W3-A). Unpackaged, self-contained-capable. Menu-bar-style
+    app: MainWindow ("Volar") hosts a placeholder Today view; a tray icon mirrors the mac
+    MenuBarMenuContent (Open Volar / New task Ctrl+Alt+M / Settings… / Preview reminder / Quit).
+    Closing MainWindow hides it rather than exiting — only Quit exits the process.
+
+    TFM OVERRIDE (same pattern as Volar.Speech's documented override): Directory.Build.props pins
+    the solution to plain "net10.0" for portability; this project needs the Windows App SDK /
+    WinUI 3 surface, so it overrides to the Windows-versioned TFM here.
+  -->
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
+    <RootNamespace>Volar.App</RootNamespace>
+    <!-- Product-facing binary name is "Volar" (see App.xaml.cs / MainWindow "Volar" title), even
+         though the project/assembly folder is Volar.App for solution-layout consistency with the
+         other Volar.* projects. -->
+    <AssemblyName>Volar</AssemblyName>
+    <ApplicationIcon />
+    <UseWinUI>true</UseWinUI>
+    <Nullable>enable</Nullable>
+
+    <!-- Unpackaged (no MSIX identity) — simplest path to a self-contained, xcopy-deployable .exe
+         for this toolchain-de-risking step. Packaging/MSIX is a later wave's concern. -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <EnableMsixTooling>false</EnableMsixTooling>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <Platforms>x64</Platforms>
+
+    <!-- WinUI's generated XAML resource/type code trips a couple of analyzer warnings under this
+         repo's solution-wide TreatWarningsAsErrors; narrowly suppressed here rather than disabling
+         warnings-as-errors for the whole project. CS8618: generated XamlMetadataProvider /
+         InitializeComponent partial members the WinUI SDK emits without nullable annotations.
+         CA1416: platform-guarded-API warnings the WinUI/Windows App SDK generated code itself
+         triggers (this project is unconditionally Windows-only via its TFM, so the guard is moot). -->
+    <NoWarn>$(NoWarn);CS8618;CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
+    <ProjectReference Include="..\Volar.Domain\Volar.Domain.csproj" />
+    <ProjectReference Include="..\Volar.Data\Volar.Data.csproj" />
+    <ProjectReference Include="..\Volar.Speech\Volar.Speech.csproj" />
+    <ProjectReference Include="..\Volar.Parsing\Volar.Parsing.csproj" />
+    <ProjectReference Include="..\Volar.Reminders\Volar.Reminders.csproj" />
+    <ProjectReference Include="..\Volar.Orchestrator\Volar.Orchestrator.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.8.260710003" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.4948" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.10" />
+    <PackageReference Include="Microsoft.Extensions.Hosting.Abstractions" Version="10.0.10" />
+    <!-- Tray icon: raw Win32 Shell_NotifyIcon P/Invoke (see TrayIconService.cs doc comment for why
+         H.NotifyIcon.WinUI was evaluated and set aside in favor of this). -->
+  </ItemGroup>
+
+  <ItemGroup>
+    <Manifest Include="$(ApplicationManifest)" />
+  </ItemGroup>
+
+  <!--
+    WORKAROUND: with EnableMsixTooling=false (unpackaged), the WindowsAppSDK build targets write
+    the app's own compiled XAML resource index ($(TargetName).pri — here "Volar.pri", generated
+    from App.xaml/MainWindow.xaml) into $(OutDir) on Build, but `dotnet publish` does not include
+    it in ResolvedFileToPublish, so it never reaches the publish folder. Without it, the exe
+    launches, initializes the Windows App SDK bootstrapper successfully, and then crashes inside
+    Microsoft.UI.Xaml.dll (NTSTATUS 0xC000027B) the moment it tries to load ANY XAML resource
+    (Application.Resources' XamlControlsResources, then MainWindow's InitializeComponent) — the
+    single most important requirement of this task ("the exe actually LAUNCHES") depended on
+    catching and fixing this. Confirmed root cause by diffing bin/ vs bin/publish/ file listings
+    (Volar.pri present in the former, absent from the latter) after Event Viewer's Application
+    Error record pointed at Microsoft.UI.Xaml.dll as the faulting module.
+
+    EXTENDED (Studio Dark theme port, 2026-07): the same gap applies to every *.xbf the XAML
+    compiler emits per-page (App.xbf, MainWindow.xbf, and — once Theme/Colors.xaml etc. were
+    added as merged ResourceDictionary Pages — Theme/Colors.xbf, Theme/Accents.xbf,
+    Theme/Typography.xbf, Theme/Metrics.xbf, Theme/Glass.xbf). `dotnet publish` on this
+    unpackaged project drops ALL of these loose .xbf files too, reproducing the exact same
+    0xC000027B crash the moment InitializeComponent tries to load App.xaml's merged
+    dictionaries. Confirmed the same way: `diff <(ls bin/.../win-x64) <(ls bin/.../win-x64/publish)`
+    showed App.xbf, MainWindow.xbf, and the whole Theme/ directory present in OutDir but absent
+    from PublishDir. Generalized the single-file .pri copy below into a recursive **/*.xbf copy
+    that preserves relative subfolder structure (so Theme/Colors.xbf lands at
+    publish/Theme/Colors.xbf, not publish/Colors.xbf).
+  -->
+  <Target Name="CopyProjectPriToPublishDir" AfterTargets="Publish">
+    <ItemGroup>
+      <_VolarPriFile Include="$(OutDir)$(TargetName).pri" Condition="Exists('$(OutDir)$(TargetName).pri')" />
+      <_VolarXbfFile Include="$(OutDir)**\*.xbf" Exclude="$(OutDir)publish\**\*.xbf" />
+    </ItemGroup>
+    <Copy SourceFiles="@(_VolarPriFile)" DestinationFolder="$(PublishDir)" SkipUnchangedFiles="true" />
+    <Copy
+      SourceFiles="@(_VolarXbfFile)"
+      DestinationFiles="@(_VolarXbfFile->'$(PublishDir)%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>

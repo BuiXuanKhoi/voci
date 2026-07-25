@@ -1,0 +1,113 @@
+<Window
+    x:Class="Volar.App.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <!-- Studio Dark: Mica system backdrop (window-level material closest to the Mac app's
+         vibrancy — see Theme/Glass.xaml header comment for the full GlassLevel mapping notes).
+         MicaBackdrop (not MicaAlt) since this is a single-region window, not a tabbed/segmented
+         shell. -->
+    <Window.SystemBackdrop>
+        <MicaBackdrop Kind="Base" />
+    </Window.SystemBackdrop>
+
+    <Grid Background="{StaticResource VolarBgBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <StackPanel
+            Grid.Row="0"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Spacing="20">
+
+            <!-- NOW spotlight demo: a single "NOW" chip using the reserved warm amber family +
+                 NowSpotlightBrush/NowRingBrush (Theme/Glass.xaml) — this is the "one lit thing"
+                 signature look. Exactly one such element should ever appear on a screen.
+                 NOTE: CornerRadius is a struct-typed property, and WinUI's XAML runtime does not
+                 implicitly convert a StaticResource'd x:Double (e.g. Theme/Metrics.xaml's
+                 VolarCornerRadiusGlass) into a CornerRadius the way a literal string like "12"
+                 gets converted via CornerRadiusHelper — attempting it crashes the native XAML
+                 parser at load time (0xC000027B) instead of raising a catchable XamlParseException.
+                 So these CornerRadius values are literal numbers mirroring
+                 Metrics.xaml's VolarCornerRadiusGlass (12) / VolarCornerRadiusSmall (6) by hand. -->
+            <Border
+                Width="220"
+                Height="64"
+                CornerRadius="12"
+                Background="{StaticResource NowSpotlightBrush}"
+                HorizontalAlignment="Center">
+                <Border
+                    CornerRadius="12"
+                    Background="{StaticResource VolarCardBrush}"
+                    BorderBrush="{StaticResource NowRingBrush}"
+                    BorderThickness="1">
+                    <StackPanel
+                        Orientation="Horizontal"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Spacing="8">
+                        <Ellipse
+                            Width="8"
+                            Height="8"
+                            Fill="{StaticResource VolarNowAccentBrush}" />
+                        <TextBlock
+                            Text="NOW"
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="13"
+                            FontWeight="SemiBold"
+                            Foreground="{StaticResource VolarNowAccentSoftBrush}" />
+                        <TextBlock
+                            Text="Draft the release notes"
+                            Style="{StaticResource VolarCaptionTextStyle}" />
+                    </StackPanel>
+                </Border>
+            </Border>
+
+            <TextBlock
+                x:Name="TitleText"
+                Text="Volar — Today (Wave 4 view goes here)"
+                Style="{StaticResource VolarTitleTextStyle}"
+                HorizontalAlignment="Center" />
+            <TextBlock
+                x:Name="StatusText"
+                Text="Shell OK. Wave 4 will replace this with the real Today view."
+                Style="{StaticResource VolarCaptionTextStyle}"
+                Foreground="{StaticResource VolarTextSecBrush}"
+                HorizontalAlignment="Center" />
+            <Button
+                x:Name="CaptureButton"
+                Content="New task (Ctrl+Alt+M)"
+                HorizontalAlignment="Center"
+                Padding="18,10"
+                CornerRadius="6"
+                Background="{StaticResource AccentSolidBrush}"
+                BorderThickness="0"
+                Foreground="{StaticResource VolarTextPriBrush}"
+                Click="CaptureButton_Click">
+                <Button.Resources>
+                    <!-- PointerOver/Pressed states pick up the cool accent's hover shade instead
+                         of the default WinUI ButtonBackgroundPointerOver. -->
+                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{StaticResource VolarIndigoHover}" />
+                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{StaticResource VolarIndigoSolid}" />
+                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="{StaticResource VolarTextPri}" />
+                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="{StaticResource VolarTextPri}" />
+                </Button.Resources>
+            </Button>
+        </StackPanel>
+
+        <TextBlock
+            Grid.Row="1"
+            x:Name="FooterText"
+            Text=""
+            Margin="12"
+            Style="{StaticResource VolarCaptionTextStyle}"
+            Foreground="{StaticResource VolarTextMutBrush}"
+            HorizontalAlignment="Center" />
+    </Grid>
+</Window>

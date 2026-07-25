@@ -1,0 +1,132 @@
+<!--
+  Colors.xaml — Studio Dark base palette, ported 1:1 by hex value from
+  Volar/Sources/Design/Theme.swift `enum VolarColor` (2026-07 "Studio Dark / One Lit Thing"
+  retheme). DO NOT pull values from design/tokens.jsx — that file is a stale older palette
+  Theme.swift explicitly superseded (bg #1C1C1E, red #FF6B6B). Theme.swift wins on every conflict.
+
+  Opacity -> ARGB alpha conversion used throughout this port: alpha = round(opacity * 255),
+  written as a 2-digit hex prefix on the RRGGBB tuple (e.g. white @0.04 -> 0x0A -> #0AFFFFFF).
+  See the per-token comments below for the exact math on each translucent token.
+
+  Key naming mirrors the Swift names 1:1: VolarColor.bg -> VolarBg, VolarColor.textPri ->
+  VolarTextPri, etc. Every Color also gets a "...Brush" SolidColorBrush for direct use in XAML.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============================================================
+         Ink / depth (foundations.html §01 "Color") — VolarColor.bg/surface/surfaceHi/card/border
+         ============================================================ -->
+
+    <!-- ink-0 — base bg, deepest. -->
+    <Color x:Key="VolarBg">#0B0D11</Color>
+    <!-- surface-1 — raised surface, one step up from bg. -->
+    <Color x:Key="VolarSurface">#15181E</Color>
+    <!-- surface-2 — raised surface, higher. -->
+    <Color x:Key="VolarSurfaceHi">#1B1F26</Color>
+
+    <!-- Color.white.opacity(0.04) -> alpha = round(0.04*255) = 10.2 -> 10 = 0x0A -->
+    <Color x:Key="VolarCard">#0AFFFFFF</Color>
+    <!-- Color.white.opacity(0.07) -> alpha = round(0.07*255) = 17.85 -> 18 = 0x12 -->
+    <Color x:Key="VolarCardHover">#12FFFFFF</Color>
+    <!-- hairline (CSS var): Color.white.opacity(0.07) -> alpha = 0x12 (same math as cardHover) -->
+    <Color x:Key="VolarBorder">#12FFFFFF</Color>
+    <!-- hairline-strong (CSS var): Color.white.opacity(0.11) -> alpha = round(0.11*255) = 28.05 -> 28 = 0x1C -->
+    <Color x:Key="VolarBorderHi">#1CFFFFFF</Color>
+
+    <!-- ============================================================
+         Text (foundations.html tx-1/2/3) — VolarColor.textPri/textSec/textMut
+         ============================================================ -->
+
+    <!-- tx-1 primary. Contrast vs bg ~15.6:1 (WCAG AAA body text). -->
+    <Color x:Key="VolarTextPri">#EAECEF</Color>
+    <!-- tx-2 secondary. Contrast vs bg ~7.6:1 (WCAG AA/AAA body text). -->
+    <Color x:Key="VolarTextSec">#9BA3AE</Color>
+    <!-- tx-3 tertiary/muted. Contrast vs bg ~3.3:1 — below body-text AA on purpose; tertiary/
+         de-emphasized labels only, never body copy. -->
+    <Color x:Key="VolarTextMut">#5D646E</Color>
+
+    <!-- ============================================================
+         Priority / status dots & badges. No red for status (anti-shame rule) and no amber
+         (amber is reserved exclusively for the NOW spotlight family below).
+         ============================================================ -->
+
+    <!-- High priority — muted clay/terracotta, deliberately not the signature amber. -->
+    <Color x:Key="VolarHigh">#B9705A</Color>
+    <!-- Medium priority — muted warm taupe. -->
+    <Color x:Key="VolarMed">#9C8C6B</Color>
+    <!-- Low priority: Color.white.opacity(0.30) -> alpha = round(0.30*255) = 76.5 -> 77 = 0x4D -->
+    <Color x:Key="VolarLow">#4DFFFFFF</Color>
+    <!-- Destructive action (e.g. Delete) — muted brick, distinct from the anti-shame status rule. -->
+    <Color x:Key="VolarDestruct">#C85C4C</Color>
+    <!-- sage (CSS var) — success. Muted, not neon. -->
+    <Color x:Key="VolarDone">#7FA88C</Color>
+
+    <!-- ============================================================
+         NEW: NOW / spotlight tokens (foundations.html §01, §03; menubar-now.html).
+         THE ONE RULE: this warm amber family is a spotlight for the single active/NOW task —
+         never the app-wide accent. See Accents.xaml for the cool default accent (indigo).
+         ============================================================ -->
+
+    <!-- amber (CSS var) — THE key light. -->
+    <Color x:Key="VolarNowAccent">#E8B25A</Color>
+    <!-- amber-soft — lighter warm, NOW title text / primary-button gradient top. -->
+    <Color x:Key="VolarNowAccentSoft">#F0C67E</Color>
+    <!-- amber-deep — darker warm, gradient bottom / pressed states. -->
+    <Color x:Key="VolarNowAccentDeep">#B9832F</Color>
+    <!-- amber-glow: 0xE8B25A @0.20 -> alpha = round(0.20*255) = 51 = 0x33 -->
+    <Color x:Key="VolarNowGlow">#33E8B25A</Color>
+    <!-- amber-glow-soft: 0xE8B25A @0.10 -> alpha = round(0.10*255) = 25.5 -> 26 = 0x1A -->
+    <Color x:Key="VolarNowGlowSoft">#1AE8B25A</Color>
+    <!-- amber-ring: 0xE8B25A @0.55 -> alpha = round(0.55*255) = 140.25 -> 140 = 0x8C -->
+    <Color x:Key="VolarNowRing">#8CE8B25A</Color>
+
+    <!-- ============================================================
+         NEW: instrument tokens (foundations.html §05 "Instrument readouts") — informational only,
+         sparing: WIP counter, timers, links, dependency dots. Never the NOW spotlight.
+         ============================================================ -->
+
+    <!-- cool (CSS var) — cool instrument accent. -->
+    <Color x:Key="VolarInstrument">#5B8DEF</Color>
+    <!-- cool-dim — dimmed cool, dashed dependency chips / secondary instrument marks. -->
+    <Color x:Key="VolarInstrumentDim">#40557F</Color>
+
+    <!-- reschedule (CSS var) — calm neutral "needs rescheduling" tone used INSTEAD of red for overdue
+         (anti-shame rule). -->
+    <Color x:Key="VolarReschedule">#8A8FA0</Color>
+
+    <!-- ============================================================
+         SolidColorBrush companions — one per Color above, same key + "Brush" suffix.
+         ============================================================ -->
+
+    <SolidColorBrush x:Key="VolarBgBrush" Color="{StaticResource VolarBg}" />
+    <SolidColorBrush x:Key="VolarSurfaceBrush" Color="{StaticResource VolarSurface}" />
+    <SolidColorBrush x:Key="VolarSurfaceHiBrush" Color="{StaticResource VolarSurfaceHi}" />
+    <SolidColorBrush x:Key="VolarCardBrush" Color="{StaticResource VolarCard}" />
+    <SolidColorBrush x:Key="VolarCardHoverBrush" Color="{StaticResource VolarCardHover}" />
+    <SolidColorBrush x:Key="VolarBorderBrush" Color="{StaticResource VolarBorder}" />
+    <SolidColorBrush x:Key="VolarBorderHiBrush" Color="{StaticResource VolarBorderHi}" />
+
+    <SolidColorBrush x:Key="VolarTextPriBrush" Color="{StaticResource VolarTextPri}" />
+    <SolidColorBrush x:Key="VolarTextSecBrush" Color="{StaticResource VolarTextSec}" />
+    <SolidColorBrush x:Key="VolarTextMutBrush" Color="{StaticResource VolarTextMut}" />
+
+    <SolidColorBrush x:Key="VolarHighBrush" Color="{StaticResource VolarHigh}" />
+    <SolidColorBrush x:Key="VolarMedBrush" Color="{StaticResource VolarMed}" />
+    <SolidColorBrush x:Key="VolarLowBrush" Color="{StaticResource VolarLow}" />
+    <SolidColorBrush x:Key="VolarDestructBrush" Color="{StaticResource VolarDestruct}" />
+    <SolidColorBrush x:Key="VolarDoneBrush" Color="{StaticResource VolarDone}" />
+
+    <SolidColorBrush x:Key="VolarNowAccentBrush" Color="{StaticResource VolarNowAccent}" />
+    <SolidColorBrush x:Key="VolarNowAccentSoftBrush" Color="{StaticResource VolarNowAccentSoft}" />
+    <SolidColorBrush x:Key="VolarNowAccentDeepBrush" Color="{StaticResource VolarNowAccentDeep}" />
+    <SolidColorBrush x:Key="VolarNowGlowBrush" Color="{StaticResource VolarNowGlow}" />
+    <SolidColorBrush x:Key="VolarNowGlowSoftBrush" Color="{StaticResource VolarNowGlowSoft}" />
+    <SolidColorBrush x:Key="VolarNowRingBrush" Color="{StaticResource VolarNowRing}" />
+
+    <SolidColorBrush x:Key="VolarInstrumentBrush" Color="{StaticResource VolarInstrument}" />
+    <SolidColorBrush x:Key="VolarInstrumentDimBrush" Color="{StaticResource VolarInstrumentDim}" />
+    <SolidColorBrush x:Key="VolarRescheduleBrush" Color="{StaticResource VolarReschedule}" />
+
+</ResourceDictionary>

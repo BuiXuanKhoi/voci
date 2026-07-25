@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
+    <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
     <ProjectReference Include="..\Volar.Domain\Volar.Domain.csproj" />
   </ItemGroup>
 

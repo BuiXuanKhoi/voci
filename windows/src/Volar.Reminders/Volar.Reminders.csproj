@@ -2,6 +2,14 @@
 
   <ItemGroup>
     <ProjectReference Include="..\Volar.Domain\Volar.Domain.csproj" />
+    <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
+  </ItemGroup>
+
+  <!-- Grants Volar.Reminders.Tests access to `internal` members (currently just the DST-risk
+       date-math helpers on ReminderScheduler — see that class's "Date helpers" section) without
+       widening the public API. -->
+  <ItemGroup>
+    <InternalsVisibleTo Include="Volar.Reminders.Tests" />
   </ItemGroup>
 
 </Project>

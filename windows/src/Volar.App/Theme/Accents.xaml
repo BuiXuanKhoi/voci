@@ -1,0 +1,92 @@
+<!--
+  Accents.xaml — the 4 selectable VolarAccent families, ported 1:1 from
+  Volar/Sources/Design/Theme.swift `enum VolarAccent` (.indigo/.teal/.amber/.magenta).
+
+  Each family has 4 roles: solid, hover, surface (solid @0.15), glow (solid @0.45).
+  Opacity -> alpha conversion: surface alpha = round(0.15*255) = 38.25 -> 38 = 0x26;
+  glow alpha = round(0.45*255) = 114.75 -> 115 = 0x73.
+
+  Default app-wide accent = INDIGO, which resolves to the cool instrument blue #5B8DEF
+  (VolarColor.instrument / `cool (CSS var)`) per Theme.swift's header note: the app-wide accent is
+  cool, NOT the warm NOW amber (`nowAccent` family in Colors.xaml) — that family is reserved
+  exclusively for the single active/NOW task spotlight. `.amber` here (the 4th selectable
+  accent family, #D9853D copper/burnt-orange) is intentionally a DIFFERENT hex from
+  VolarNowAccent (#E8B25A honey-gold) so a user who opts into it never produces a second
+  "amber thing" that competes with the NOW spotlight.
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============================================================
+         Indigo — cool instrument blue (cool (CSS var)). App-wide default accent.
+         ============================================================ -->
+    <Color x:Key="VolarIndigoSolid">#5B8DEF</Color>
+    <Color x:Key="VolarIndigoHover">#7FA5F5</Color>
+    <!-- #5B8DEF @0.15 -> alpha 0x26 -->
+    <Color x:Key="VolarIndigoSurface">#265B8DEF</Color>
+    <!-- #5B8DEF @0.45 -> alpha 0x73 -->
+    <Color x:Key="VolarIndigoGlow">#735B8DEF</Color>
+
+    <SolidColorBrush x:Key="VolarIndigoSolidBrush" Color="{StaticResource VolarIndigoSolid}" />
+    <SolidColorBrush x:Key="VolarIndigoHoverBrush" Color="{StaticResource VolarIndigoHover}" />
+    <SolidColorBrush x:Key="VolarIndigoSurfaceBrush" Color="{StaticResource VolarIndigoSurface}" />
+    <SolidColorBrush x:Key="VolarIndigoGlowBrush" Color="{StaticResource VolarIndigoGlow}" />
+
+    <!-- ============================================================
+         Teal
+         ============================================================ -->
+    <Color x:Key="VolarTealSolid">#3DBFAF</Color>
+    <Color x:Key="VolarTealHover">#63D6C7</Color>
+    <!-- #3DBFAF @0.15 -> alpha 0x26 -->
+    <Color x:Key="VolarTealSurface">#263DBFAF</Color>
+    <!-- #3DBFAF @0.45 -> alpha 0x73 -->
+    <Color x:Key="VolarTealGlow">#733DBFAF</Color>
+
+    <SolidColorBrush x:Key="VolarTealSolidBrush" Color="{StaticResource VolarTealSolid}" />
+    <SolidColorBrush x:Key="VolarTealHoverBrush" Color="{StaticResource VolarTealHover}" />
+    <SolidColorBrush x:Key="VolarTealSurfaceBrush" Color="{StaticResource VolarTealSurface}" />
+    <SolidColorBrush x:Key="VolarTealGlowBrush" Color="{StaticResource VolarTealGlow}" />
+
+    <!-- ============================================================
+         Amber (selectable accent family — copper/burnt-orange #D9853D, deliberately NOT
+         VolarNowAccent's honey-gold #E8B25A; see file header).
+         ============================================================ -->
+    <Color x:Key="VolarAccentAmberSolid">#D9853D</Color>
+    <Color x:Key="VolarAccentAmberHover">#E9A165</Color>
+    <!-- #D9853D @0.15 -> alpha 0x26 -->
+    <Color x:Key="VolarAccentAmberSurface">#26D9853D</Color>
+    <!-- #D9853D @0.45 -> alpha 0x73 -->
+    <Color x:Key="VolarAccentAmberGlow">#73D9853D</Color>
+
+    <SolidColorBrush x:Key="VolarAccentAmberSolidBrush" Color="{StaticResource VolarAccentAmberSolid}" />
+    <SolidColorBrush x:Key="VolarAccentAmberHoverBrush" Color="{StaticResource VolarAccentAmberHover}" />
+    <SolidColorBrush x:Key="VolarAccentAmberSurfaceBrush" Color="{StaticResource VolarAccentAmberSurface}" />
+    <SolidColorBrush x:Key="VolarAccentAmberGlowBrush" Color="{StaticResource VolarAccentAmberGlow}" />
+
+    <!-- ============================================================
+         Magenta
+         ============================================================ -->
+    <Color x:Key="VolarMagentaSolid">#D16BC0</Color>
+    <Color x:Key="VolarMagentaHover">#E38BD4</Color>
+    <!-- #D16BC0 @0.15 -> alpha 0x26 -->
+    <Color x:Key="VolarMagentaSurface">#26D16BC0</Color>
+    <!-- #D16BC0 @0.45 -> alpha 0x73 -->
+    <Color x:Key="VolarMagentaGlow">#73D16BC0</Color>
+
+    <SolidColorBrush x:Key="VolarMagentaSolidBrush" Color="{StaticResource VolarMagentaSolid}" />
+    <SolidColorBrush x:Key="VolarMagentaHoverBrush" Color="{StaticResource VolarMagentaHover}" />
+    <SolidColorBrush x:Key="VolarMagentaSurfaceBrush" Color="{StaticResource VolarMagentaSurface}" />
+    <SolidColorBrush x:Key="VolarMagentaGlowBrush" Color="{StaticResource VolarMagentaGlow}" />
+
+    <!-- ============================================================
+         Default app-wide accent — aliases to Indigo (cool instrument blue). Use these 4 keys
+         at general-purpose accent call sites (buttons, selection, capture affordance) so a
+         future "let the user pick an accent family" feature only needs to repoint these.
+         ============================================================ -->
+    <SolidColorBrush x:Key="AccentSolidBrush" Color="{StaticResource VolarIndigoSolid}" />
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="{StaticResource VolarIndigoHover}" />
+    <SolidColorBrush x:Key="AccentSurfaceBrush" Color="{StaticResource VolarIndigoSurface}" />
+    <SolidColorBrush x:Key="AccentGlowBrush" Color="{StaticResource VolarIndigoGlow}" />
+
+</ResourceDictionary>

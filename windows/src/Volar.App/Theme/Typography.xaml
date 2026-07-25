@@ -1,0 +1,78 @@
+<!--
+  Typography.xaml — font families + a small TextBlock type ramp, ported from
+  Volar/Sources/Design/Theme.swift's `Font.volar`/`Font.volarMono` helpers (the prototype's
+  `ui (CSS var)` and `mono (CSS var)` font stacks).
+
+  Font family mapping (Mac SF Pro / SF Mono -> Windows equivalents):
+    ui (CSS var)   (SF Pro, system UI text)      -> "Segoe UI Variable Text, Segoe UI"
+    mono (CSS var) (SF Mono, ui-monospace stack) -> "Cascadia Mono, Consolas"
+  The mono face is reserved for INSTRUMENT READOUTS only (counters/timers/estimates/step
+  counts) per foundations.html §02/§05 — never general UI copy. This mirrors Theme.swift's
+  `Font.volarMono` doc comment 1:1.
+
+  Tabular figures: Theme.swift's `View.volarTabularNumbers()` = SwiftUI `.monospacedDigit()`.
+  The WinUI equivalent is the `Typography.NumeralAlignment="Tabular"` attached property
+  (Microsoft.UI.Xaml.Documents.Typography), applied on VolarInstrumentMonoTextStyle below.
+
+  Text colors reference the brushes from Colors.xaml (VolarTextPriBrush/SecBrush/MutBrush) —
+  Colors.xaml must be merged before this dictionary (see App.xaml merge order).
+-->
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- ============================================================
+         Font families
+         ============================================================ -->
+    <FontFamily x:Key="VolarUiFontFamily">Segoe UI Variable Text, Segoe UI</FontFamily>
+    <FontFamily x:Key="VolarMonoFontFamily">Cascadia Mono, Consolas</FontFamily>
+
+    <!-- ============================================================
+         Type ramp — sizes/weights chosen to mirror the prototype's scale (title/headline/body/
+         caption) while staying in native WinUI TextBlock Style terms.
+         ============================================================ -->
+
+    <!-- Title — large headline copy, e.g. window/page titles. -->
+    <Style x:Key="VolarTitleTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource VolarUiFontFamily}" />
+        <Setter Property="FontSize" Value="24" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource VolarTextPriBrush}" />
+    </Style>
+
+    <!-- Headline — section headers. -->
+    <Style x:Key="VolarHeadlineTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource VolarUiFontFamily}" />
+        <Setter Property="FontSize" Value="17" />
+        <Setter Property="FontWeight" Value="SemiBold" />
+        <Setter Property="Foreground" Value="{StaticResource VolarTextPriBrush}" />
+    </Style>
+
+    <!-- Body — default UI copy. -->
+    <Style x:Key="VolarBodyTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource VolarUiFontFamily}" />
+        <Setter Property="FontSize" Value="14" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{StaticResource VolarTextPriBrush}" />
+    </Style>
+
+    <!-- Caption — secondary/de-emphasized copy. -->
+    <Style x:Key="VolarCaptionTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource VolarUiFontFamily}" />
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{StaticResource VolarTextSecBrush}" />
+    </Style>
+
+    <!-- InstrumentMono — reserved for instrument readouts (counters/timers/estimates), tabular
+         figures enabled so digits don't jitter as they change. -->
+    <Style x:Key="VolarInstrumentMonoTextStyle" TargetType="TextBlock">
+        <Setter Property="FontFamily" Value="{StaticResource VolarMonoFontFamily}" />
+        <Setter Property="FontSize" Value="13" />
+        <Setter Property="FontWeight" Value="Normal" />
+        <Setter Property="Foreground" Value="{StaticResource VolarTextSecBrush}" />
+        <Setter Property="Typography.NumeralAlignment" Value="Tabular" />
+        <Setter Property="Typography.NumeralStyle" Value="Normal" />
+    </Style>
+
+</ResourceDictionary>
