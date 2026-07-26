@@ -25,6 +25,7 @@ internal sealed class WiringTestEnvironment : IDisposable
             DatabasePath = Path.Combine(RootDirectory, "volar.db"),
             SettingsFilePath = Path.Combine(RootDirectory, "settings.json"),
             DelegationMetaFilePath = Path.Combine(RootDirectory, "delegation-meta.json"),
+            AccountFilePath = Path.Combine(RootDirectory, "account.dat"),
             SkipRegistryRegistration = true,
             // See CompositionRootOptions.ToastGateway's own doc comment: the real
             // WinAppSdkNotificationGateway requires the Windows App SDK bootstrapper, which only a

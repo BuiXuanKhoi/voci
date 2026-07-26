@@ -38,6 +38,7 @@
 // first resolve — consistent with "the parameterless default must behave exactly as production."
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
+using Volar.App.Services.Account;
 using Volar.App.Services.Adapters;
 using Volar.App.Services.State;
 using Volar.Data;
@@ -70,6 +71,15 @@ public sealed class CompositionRootOptions
     public string? SettingsFilePath { get; init; }
 
     public string? DelegationMetaFilePath { get; init; }
+
+    /// <summary>New for the account-auth feature (2026-07-26): the DPAPI-encrypted account-session
+    /// file <see cref="Account.DpapiTokenStore"/> reads/writes
+    /// (<see cref="Account.DpapiTokenStore.GetDefaultPath"/> by default —
+    /// <c>%LocalAppData%\Volar\account.dat</c>). Tests MUST supply this pointed at a disposable temp
+    /// location, same as <see cref="DatabasePath"/>/<see cref="SettingsFilePath"/>/
+    /// <see cref="DelegationMetaFilePath"/> above — otherwise a wiring test would read/write the
+    /// real signed-in user's account credentials.</summary>
+    public string? AccountFilePath { get; init; }
 
     /// <summary>When <see langword="true"/>, skips the one HKCU write this file makes
     /// (<see cref="UriSchemeRegistrar.EnsureRegistered"/>). Never set outside a test.</summary>
@@ -190,9 +200,36 @@ public static class CompositionRoot
         // per that method's own doc comment) — never throws.
         var delegationHandoffAdapter = new DelegationHandoffAdapter(delegationOrchestratorService); // IDelegationHandoff
 
+        // --- Volar.App/Services/Account (2026-07-26 account-auth contract) -------------------
+        // Dedicated HttpClient, constructed ONCE and reused for this service's whole lifetime (SEC:
+        // never `new HttpClient()` per call — socket exhaustion). Kept separate from CloudParser's/
+        // GroqTranscriptionClient's own HttpClient instances so a slow/misbehaving auth call can
+        // never contend with parse/speech traffic on the same connection pool's per-host limits.
+        var accountHttpClient = new HttpClient();
+        accountHttpClient.Timeout = System.Threading.Timeout.InfiniteTimeSpan; // every call below
+        // supplies its own bounded CancellationTokenSource (AccountService.SendWithTimeoutAsync) —
+        // an additional client-wide Timeout would just race that and complicate which one actually
+        // fired on a slow call.
+        var accountFilePath = options.AccountFilePath ?? DpapiTokenStore.GetDefaultPath();
+        Directory.CreateDirectory(Path.GetDirectoryName(accountFilePath)!);
+        var accountService = new AccountService(accountHttpClient, clock, new DpapiTokenStore(accountFilePath)); // IAccountService
+        if (accountService.State == AccountSessionState.SignedIn)
+        {
+            // Fire-and-forget: Task 2's "refresh on app launch" — never blocks Build() on a network
+            // round trip. AccountService.RefreshStatusAsync already swallows every failure into a
+            // "keep whatever was cached" no-op, so this can never surface as an unobserved-task
+            // exception.
+            _ = accountService.RefreshStatusAsync();
+        }
+
         // --- Volar.Parsing -------------------------------------------------------------------
         var cloudParseGate = new DefaultCloudParseGate(settingsStore); // ICloudParseGate
-        var parseCredentialProvider = new ConfigParseCredentialProvider(settingsStore); // IParseCredentialProvider
+        // ConfigParseCredentialProvider now lives in Volar.Parsing, which cannot reference
+        // Volar.App/AccountService directly (see that file's own header comment) — wired via plain
+        // delegates instead, method-group-converted off the real accountService instance above.
+        var parseCredentialProvider = new ConfigParseCredentialProvider(
+            getValidAccessToken: accountService.GetValidAccessTokenAsync,
+            isSignedIn: () => accountService.State == AccountSessionState.SignedIn); // IParseCredentialProvider
         // SLM stays default-OFF (wave3c-services.md, "Parsing" checklist) — enabled: false regardless
         // of whether a model file ever ends up at this path; IsAvailable short-circuits on the flag.
         var slmModelPath = Path.Combine(VolarLocalAppDataRoot(), "models", "slm", "phi4-mini.onnx");
@@ -217,10 +254,35 @@ public static class CompositionRoot
         // IGroqCredentialProvider instance (built from that one reader) is handed to both
         // GroqTranscriptionClient and GroqEngine below, which trivially guarantees agreement (same
         // object, not just same-shaped readers).
+        //
+        // Still constructed (kept resolvable via DI below, per CompositionRootWiringTests' required
+        // registration list) even though PRODUCTION Groq wiring now goes through
+        // AccountGroqCredentialProvider instead (2026-07-26 account-auth contract: Groq cloud speech
+        // is Pro-only, gated on the signed-in account, not a hand-configured env var/settings key).
         var settingsThenEnvironmentReader = new SettingsThenEnvironmentReader(settingsStore);
-        var groqCredentialProvider = new EnvironmentGroqCredentialProvider(settingsThenEnvironmentReader.AsFunc()); // IGroqCredentialProvider
+
+        // AccountGroqCredentialProvider lives in Volar.Speech, which carries ZERO project
+        // references (see that type's own header comment) — wired via plain delegates instead,
+        // exactly like ConfigParseCredentialProvider above. IsConfigured also opportunistically
+        // kicks a background status refresh when the cached snapshot is stale/missing, so it keeps
+        // improving in accuracy the longer the app runs without ever blocking this sync property.
+        var groqCredentialProvider = new AccountGroqCredentialProvider(
+            getValidAccessToken: accountService.GetValidAccessTokenAsync,
+            isConfigured: () =>
+            {
+                accountService.RefreshStatusIfStale();
+                var status = accountService.CachedStatus;
+                return status is { IsPro: true } && status.SpeechUsedToday < status.SpeechLimit;
+            }); // IGroqCredentialProvider
         var groqTranscriptionClient = new GroqTranscriptionClient(groqCredentialProvider);
         var groqEngine = new GroqEngine(groqTranscriptionClient, captureService: audioCapture, credentialProvider: groqCredentialProvider);
+
+        // Task 2 ("refresh ... after a cloud call"), speech side: GroqEngine already exposes both
+        // outcomes as public events, so a real post-call refresh (not just the staleness-driven one
+        // above) is wireable here without touching GroqEngine.cs itself. TimeSpan.Zero forces
+        // RefreshStatusIfStale to treat ANY cached snapshot as stale, i.e. always refresh now.
+        groqEngine.OnFinal += _ => accountService.RefreshStatusIfStale(TimeSpan.Zero);
+        groqEngine.OnError += _ => accountService.RefreshStatusIfStale(TimeSpan.Zero);
 
         var speechEngineService = new SpeechEngineService(whisperEngine, groqEngine, settingsStore); // ISpeechEngineProvider
 
@@ -294,6 +356,9 @@ public static class CompositionRoot
         services.AddSingleton(appLinkHandler);
         services.AddSingleton(delegationOrchestratorService);
         services.AddSingleton<IDelegationHandoff>(delegationHandoffAdapter);
+
+        services.AddSingleton<IAccountService>(accountService);
+        services.AddSingleton(accountService);
 
         services.AddSingleton<ICloudParseGate>(cloudParseGate);
         services.AddSingleton<IParseCredentialProvider>(parseCredentialProvider);

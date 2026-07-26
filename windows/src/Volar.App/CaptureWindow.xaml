@@ -1,0 +1,78 @@
+<!--
+  CaptureWindow.xaml — the floating, always-on-top capture surface (Wave 4 follow-up fix).
+
+  ROOT PLACEMENT (not Views/): this is a second top-level Window, like MainWindow — every existing
+  file under Views/ is a UserControl, never a Window. Placing a NEW Window-derived page under Views/
+  turned out to be a hard build-breaker, not just a style choice: the WindowsAppSDK 1.8 XAML markup
+  compiler's "local/temporary assembly" pass (the one MarkupCompilePass2 needs a LocalAssembly from —
+  see that pass's own WMC1509 warning when it's missing) failed to resolve a Window-derived type
+  declared in a subfolder when referenced from another file (MainWindow.xaml.cs's `new CaptureWindow`),
+  reproducibly, even with zero other compile errors anywhere — moving the IDENTICAL file to the
+  project root (matching MainWindow.xaml's own placement) fixed it outright. Confirmed via an isolated
+  probe file (a copy of this class under a throwaway name, once at the project root and once under
+  Views/, referenced from MainWindow.xaml.cs the same way): the root copy resolved cleanly on the
+  very first build, the Views/ copy did not, on this exact project/SDK version. Flagged here since it
+  cost significant diagnosis time and the next agent adding a Window (not a UserControl) should place
+  it at the project root from the start.
+
+  BUG THIS FIXES: CapturePopover used to be mounted inside MainWindow.xaml (CapturePopoverHost, a
+
+  BUG THIS FIXES: CapturePopover used to be mounted inside MainWindow.xaml (CapturePopoverHost, a
+  sibling of a full-window scrim Grid) — see this repo's MainWindow.xaml history. Volar is a tray
+  app (Services/TrayIconService.cs): MainWindow is hidden (not closed — OnAppWindowClosing cancels
+  and hides) for most of its life, and the global hotkey (Services/HotkeyService + App.xaml.cs's
+  WireHotkey) toggles CaptureFlowService directly, with no dependency on MainWindow's visibility.
+  So triggering capture while the main window was hidden produced no visible UI at all: the ONE
+  place CapturePopover was mounted was invisible right along with its host window. This is the
+  Windows-side twin of the same bug being fixed on macOS with a floating NSPanel.
+
+  THE FIX: a separate top-level Window, borderless and always-on-top, that hosts the SAME
+  CapturePopover control + the SAME CapturePopoverViewModel instance MainWindow used to own
+  (MainWindow.xaml.cs's ComposeCapturePopover now constructs THIS window instead of an in-window
+  scrim, and still owns the ViewModel — see that method's updated header). Created ONCE, shown/
+  hidden via CaptureFlowService.CaptureChanged (never recreated — see CaptureWindow.xaml.cs header
+  for the full lifecycle contract, and its OnAppWindowClosing for why a stray close can never tear
+  this window down or exit the process).
+
+  WHY NO SCRIM HERE: MainWindow's old CaptureScrimHost was a full-window Rectangle sized to
+  MainWindow's own client area, there so a background tap could cancel the capture (this file's own
+  git history: "a SIBLING Rectangle... mirrors SettingsView.xaml's own scrim shape"). This window's
+  client area IS the popover card (sized to fit it exactly, see PositionAndSize() in the code-
+  behind) — there is no surrounding chrome left over to paint a scrim onto, and clicks outside this
+  window's small bounds land on whatever app is under the cursor, not on Volar at all (this window
+  has no owner/parent relationship with MainWindow to intercept them through). Esc/Enter (below)
+  cover the two keyboard paths CapturePopoverViewModel exposes; deliberately not inventing a click-
+  outside-to-dismiss behavior the ViewModel doesn't already have a method for. Flagged in this
+  task's final report as a residual UX difference from the old in-window scrim, not silently
+  dropped.
+-->
+<Window
+    x:Class="Volar.App.CaptureWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:views="using:Volar.App.Views"
+    mc:Ignorable="d">
+
+    <!-- No SystemBackdrop element here (unlike MainWindow's MicaBackdrop): CaptureWindow.xaml.cs's
+         constructor explicitly sets SystemBackdrop = null and this Grid's Background = Transparent,
+         so the OS composites straight through to whatever is behind the window instead of painting
+         any backdrop material at the WINDOW level — CapturePopover's own GlassPanel (Level="Heavy",
+         see CapturePopover.xaml) already supplies the one translucent, rounded-corner acrylic
+         surface this design calls for. Stacking a second window-level Mica/Acrylic material behind
+         that would double-tint it and (worse) paint an opaque/blurred RECTANGLE outside
+         GlassPanel's own CornerRadius="18" corners, defeating the floating-card look entirely. -->
+    <Grid x:Name="RootGrid" Background="Transparent">
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="Escape" Invoked="OnEscapeAccelerator" />
+            <KeyboardAccelerator Key="Enter" Invoked="OnEnterAccelerator" />
+        </Grid.KeyboardAccelerators>
+
+        <views:CapturePopover
+            x:Name="Popover"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Top"
+            SizeChanged="OnPopoverSizeChanged" />
+    </Grid>
+</Window>

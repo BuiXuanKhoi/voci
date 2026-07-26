@@ -15,9 +15,14 @@
                                    no such self-binding (SettingsView.xaml/OnboardingView.xaml's own
                                    "HOSTING" comments say so) — MainWindow.xaml.cs toggles their
                                    Visibility imperatively.
-    4. Capture scrim + popover  — CapturePopover.xaml owns no scrim of its own (unlike the 5 modals
-                                   above); this file supplies one (frozen decision 5 + this task's own
-                                   digest: "host it over a scrim Grid; scrim click -> CancelAsync").
+    4. Capture popover           — NO LONGER hosted here (floating-capture-window follow-up fix):
+                                   CapturePopover now lives in its own always-on-top floating
+                                   CaptureWindow (constructed by MainWindow.xaml.cs's
+                                   ComposeCapturePopover, still the ONE owner of
+                                   CapturePopoverViewModel), so it is visible even while THIS window
+                                   is hidden — the normal state for a tray app between hotkey
+                                   presses, which is exactly when the old in-window mount point used
+                                   to go dark along with it.
     5. FocusOverlay              — self-hosting full-bleed backdrop, Visibility driven imperatively by
                                    FocusOverlay.xaml.cs's own Apply() (see that file's header).
     6. NotificationBanner        — top-trailing, self-positioned (HorizontalAlignment="Right"
@@ -40,7 +45,10 @@
 
   Keyboard accelerators (task 3): Escape/Enter declared on RootGrid so they work regardless of which
   overlay (if any) currently holds focus — see MainWindow.xaml.cs's OnEscapeAccelerator/
-  OnEnterAccelerator for the exact per-state routing table.
+  OnEnterAccelerator for the exact per-state routing table. Capture's own Esc/Enter (Cancel/Confirm)
+  are NO LONGER part of that table — CaptureWindow.xaml declares its own KeyboardAccelerators
+  now that the popover lives in its own top-level window (a KeyboardAccelerator is window-scoped in
+  WinUI, so this window's table genuinely cannot reach it anymore, nor would it need to).
 -->
 <Window
     x:Class="Volar.App.MainWindow"
@@ -89,27 +97,7 @@
         <views:SettingsView x:Name="SettingsHost" Visibility="Collapsed" />
         <views:OnboardingView x:Name="OnboardingHost" Visibility="Collapsed" />
 
-        <!-- 4. Capture scrim + CapturePopover — CapturePopover.xaml owns no scrim of its own (unlike
-             the 5 self-hosting modals above); supplied here per frozen decision 5. Positioned
-             top-center, below the toolbar row, mirroring where the hotkey/capture-button affordance
-             lives (Sidebar's capture button / TodayView's toolbar `+`) — Swift's PopoverView has no
-             direct Windows-window analog to port a position FROM (it anchors off a menu-bar-extra
-             popover on macOS), so this placement is Stage C's own design decision, flagged here and
-             in the final report rather than silently invented. -->
-        <Grid x:Name="CaptureScrimHost" Visibility="Collapsed">
-            <!-- A SIBLING Rectangle, not an ancestor, of CapturePopoverHost below — mirrors
-                 SettingsView.xaml's own scrim shape exactly (a Tapped'd background Rectangle plus a
-                 separately-positioned card as two siblings in the same Grid) so a tap that starts
-                 inside the popover card never bubbles up through this Rectangle's own Tapped handler;
-                 WinUI hit-tests to whichever element is topmost at the tap point, and since the card
-                 sits ON TOP of (not inside) this Rectangle, a tap under the card never reaches it. -->
-            <Rectangle Fill="#52000000" Tapped="OnCaptureScrimTapped" />
-            <views:CapturePopover
-                x:Name="CapturePopoverHost"
-                HorizontalAlignment="Center"
-                VerticalAlignment="Top"
-                Margin="0,64,0,0" />
-        </Grid>
+        <!-- 4. Capture popover — no longer mounted here; see the file header + CaptureWindow. -->
 
         <!-- 5. FocusOverlay — self-hosting full-bleed backdrop + own Visibility (FocusOverlay.xaml.cs
              Apply()). -->

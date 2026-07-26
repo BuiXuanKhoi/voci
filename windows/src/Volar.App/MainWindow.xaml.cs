@@ -128,6 +128,11 @@ public sealed partial class MainWindow : Window
         // the TaskDetailView overlay to" / "...TaskBreakdownView overlay to."
         _todayVm.OpenDetailRequested += id => _taskDetailVm?.Show(id);
         _todayVm.BreakdownRequested += id => ShowBreakdownFor(id);
+
+        // Settings entry point #2 (task 2): TodayView's new toolbar gear button. Routes through the
+        // SAME ShowSettings() the tray's "Settings…" item already calls (App.xaml.cs's WireTray) —
+        // not a second Settings-opening path, just a second caller of the existing one.
+        TodayHost.SettingsRequested += (_, _) => ShowSettings();
     }
 
     // MARK: TaskDetail
@@ -189,24 +194,46 @@ public sealed partial class MainWindow : Window
         _morningFrogVm?.Refresh();
     }
 
-    // MARK: Capture popover + scrim
+    // MARK: Capture popover — floating-capture-window fix. CapturePopover used to be mounted inline
+    // here (CapturePopoverHost + a CaptureScrimHost scrim, both removed from MainWindow.xaml) but
+    // that made it invisible whenever MainWindow itself was hidden — the normal state for this tray
+    // app (Services/TrayIconService.cs) between hotkey presses (App.xaml.cs's WireHotkey toggles
+    // CaptureFlowService directly, with no dependency on MainWindow's visibility at all). MainWindow
+    // stays the ONE place that constructs CapturePopoverViewModel (still wired to the same
+    // _captureFlow/_taskList this method always used) and now ALSO constructs a dedicated
+    // CaptureWindow to host it — see that class's own header for why a separate top-level
+    // window, not an in-window overlay, is the actual fix.
+
+    private CaptureWindow? _captureWindow;
 
     private void ComposeCapturePopover(Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue)
     {
         _captureVm = new CapturePopoverViewModel(_captureFlow, _taskList, dispatcherQueue);
-        CapturePopoverHost.ViewModel = _captureVm;
+
+        // Created ONCE here (MainWindow's own lifetime IS the app's lifetime — see OnAppWindowClosing
+        // below) and reused via Show/Hide for every capture from here on; never recreated per-capture
+        // (self-review item 3 — recreating a WinUI Window per show would leak the previous HWND and
+        // flicker).
+        _captureWindow = new CaptureWindow { ViewModel = _captureVm };
 
         // CaptureFlowService.CaptureChanged carries no thread guarantee (its own header: "may run on
         // whichever thread an ISpeechEngine.OnFinal/OnError callback happens to fire on") — marshal
-        // before touching the scrim's Visibility.
-        _captureFlow.CaptureChanged += () => dispatcherQueue.TryEnqueue(UpdateCaptureScrimVisibility);
-        UpdateCaptureScrimVisibility();
+        // before touching the capture window's visibility.
+        _captureFlow.CaptureChanged += () => dispatcherQueue.TryEnqueue(UpdateCaptureWindowVisibility);
+        UpdateCaptureWindowVisibility();
     }
 
-    private void UpdateCaptureScrimVisibility() =>
-        CaptureScrimHost.Visibility = _captureFlow.State == CaptureState.Idle ? Visibility.Collapsed : Visibility.Visible;
-
-    private void OnCaptureScrimTapped(object sender, TappedRoutedEventArgs e) => _ = _captureVm.CancelAsync();
+    private void UpdateCaptureWindowVisibility()
+    {
+        if (_captureFlow.State == CaptureState.Idle)
+        {
+            _captureWindow?.HideWindow();
+        }
+        else
+        {
+            _captureWindow?.ShowNearCursor();
+        }
+    }
 
     // MARK: FocusOverlay
 
@@ -350,36 +377,30 @@ public sealed partial class MainWindow : Window
     // MARK: Keyboard accelerators (task 3)
     // ------------------------------------------------------------------------------------------
 
-    /// <summary>Escape: routes to the capture popover's own state-table (CapturePopoverViewModel
-    /// .HandleEscape) while the capture scrim is visible; otherwise closes whichever modal overlay is
-    /// currently on top (mirrors Swift's sheet-dismiss — each sheet's own Escape/interactiveDismiss
-    /// behavior, collapsed into one dispatch table here since WinUI has no per-overlay "active sheet"
-    /// concept the way SwiftUI's `.sheet` stack does).</summary>
+    /// <summary>Escape: closes whichever modal overlay is currently on top (mirrors Swift's
+    /// sheet-dismiss — each sheet's own Escape/interactiveDismiss behavior, collapsed into one
+    /// dispatch table here since WinUI has no per-overlay "active sheet" concept the way SwiftUI's
+    /// `.sheet` stack does). Capture's own Escape (CapturePopoverViewModel.HandleEscape) is NO LONGER
+    /// routed through here — it moved to CaptureWindow's own KeyboardAccelerator now that the
+    /// popover lives in its own top-level window (see MainWindow.xaml's header + CaptureWindow's own
+    /// doc comments for why).</summary>
     private void OnEscapeAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (CaptureScrimHost.Visibility == Visibility.Visible)
-        {
-            args.Handled = true;
-            _captureVm.HandleEscape();
-            return;
-        }
         if (CloseTopmostModalOverlay())
         {
             args.Handled = true;
         }
     }
 
-    /// <summary>Enter: only meaningful while the capture popover is visible (every other overlay's
-    /// primary action is a plain Button a user reaches by Tab/click, not a global Enter shortcut —
-    /// mirrors PopoverView.swift's own concentration of `.keyboardShortcut(.defaultAction)` uses,
-    /// per CapturePopoverViewModel.HandlePrimaryEnter's own doc comment).</summary>
+    /// <summary>Enter: every remaining overlay's primary action is a plain Button a user reaches by
+    /// Tab/click, not a global Enter shortcut, so this is now a no-op — capture's own Enter
+    /// (CapturePopoverViewModel.HandlePrimaryEnter) moved to CaptureWindow's own
+    /// KeyboardAccelerator alongside its Escape handling (see OnEscapeAccelerator's doc comment).
+    /// Kept (not deleted) only because it is still declared as MainWindow.xaml's RootGrid
+    /// KeyboardAccelerator target — removing the C# handler without removing the XAML accelerator
+    /// would fail to compile.</summary>
     private void OnEnterAccelerator(KeyboardAccelerator sender, KeyboardAcceleratorInvokedEventArgs args)
     {
-        if (CaptureScrimHost.Visibility == Visibility.Visible)
-        {
-            args.Handled = true;
-            _captureVm.HandlePrimaryEnter();
-        }
     }
 
     /// <summary>Onboarding is deliberately excluded (Swift's `.interactiveDismissDisabled(true)` on

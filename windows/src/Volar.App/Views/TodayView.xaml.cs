@@ -40,6 +40,14 @@ public sealed partial class TodayView : UserControl
         Unloaded += OnUnloaded;
     }
 
+    /// <summary>Toolbar gear button (Windows-port addition — see TodayView.xaml's header). Plain
+    /// code-behind event rather than routing through <see cref="TodayViewModel"/>: opening Settings
+    /// is a shell/window-chrome concern MainWindow.xaml.cs already owns end-to-end (ShowSettings()),
+    /// not app state this view's own ViewModel needs to know about — mirrors how TrayIconService's
+    /// "Settings…" item is wired directly to MainWindow.ShowSettings() rather than through a
+    /// ViewModel command.</summary>
+    public event EventHandler? SettingsRequested;
+
     public TodayViewModel? ViewModel
     {
         get => _viewModel;
@@ -93,6 +101,8 @@ public sealed partial class TodayView : UserControl
     // ------------------------------------------------------------------------------------------
     // MARK: Toolbar
     // ------------------------------------------------------------------------------------------
+
+    private void OnSettingsClick(object sender, RoutedEventArgs e) => SettingsRequested?.Invoke(this, EventArgs.Empty);
 
     private void OnAmbientSoundClick(object sender, RoutedEventArgs e) => ViewModel?.ToggleAmbientSound();
 

@@ -73,13 +73,20 @@
                      RootBackground uses. -->
                 <Border x:Name="MainColumnOverlay" Grid.Row="0" Grid.RowSpan="3" IsHitTestVisible="False" />
 
-                <!-- Title-bar toolbar row (TodayView.swift:71-87, `.toolbar` primaryAction group). -->
+                <!-- Title-bar toolbar row (TodayView.swift:71-87, `.toolbar` primaryAction group).
+                     Settings gear (leftmost) is a Windows-port addition, not a port of anything in
+                     TodayView.swift: Settings was previously reachable ONLY from the tray menu
+                     (TrayIconService's "Settings…" item, MainWindow.ShowSettings()) — no path from
+                     the main window itself. Routes through that SAME ShowSettings() via the
+                     SettingsRequested event below (see TodayView.xaml.cs), not a second Settings
+                     surface. -->
                 <StackPanel
                     Grid.Row="0"
                     Orientation="Horizontal"
                     HorizontalAlignment="Right"
                     Spacing="4"
                     Padding="12,8">
+                    <controls:ToolButton IconName="Settings" Click="OnSettingsClick" />
                     <controls:ToolButton x:Name="AmbientSoundButton" IconName="Volume" Click="OnAmbientSoundClick" />
                     <controls:ToolButton IconName="Waveform" Click="OnReadDayAloudClick" />
                     <controls:ToolButton IconName="Search" />

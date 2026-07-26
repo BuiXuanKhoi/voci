@@ -17,6 +17,7 @@
 // `SFSpeechRecognizer.supportedLocales()`, a macOS-only API with no Windows target. Intentionally
 // not ported — not a residual.
 using Volar.App.Services;
+using Volar.App.Services.Account;
 using Volar.App.Services.State;
 using Volar.App.Theme;
 using Volar.Domain;
@@ -91,7 +92,18 @@ public sealed class SettingsViewModel : System.ComponentModel.INotifyPropertyCha
     private readonly GroqEngine _groq;
     private readonly WhisperModelManager? _whisperModelManager;
     private readonly ISettingsStore _settings;
-    private readonly ConfigParseCredentialProvider _parseCredentialProvider;
+    /// <summary>2026-07-26 account-auth contract: only used to answer
+    /// <see cref="IsCloudParseConfigured"/> (a signed-in check) — the REAL credential provider
+    /// CloudParser talks to is a separate <c>ConfigParseCredentialProvider</c> instance
+    /// CompositionRoot wires directly from the SAME underlying <c>AccountService</c> singleton (see
+    /// that file's own comment). Deliberately NOT a required constructor parameter: this class's
+    /// constructor signature is exercised by <c>MainWindow.xaml.cs</c> with a fixed positional
+    /// argument list this task's file-ownership scope does not include — resolved instead via the
+    /// app-wide <see cref="App.Services"/> static (same seam <c>SettingsView.xaml.cs</c> uses to
+    /// resolve <c>AccountViewModel</c>), which is <see langword="null"/> only in a headless test
+    /// host that never called <c>App.OnLaunched</c> — degrading to "always not configured" there,
+    /// which is itself a correct, harmless answer (never signed in in a test host).</summary>
+    private readonly IAccountService? _accountService;
     private readonly ReminderAndDeliverySettingsService _reminderSettings;
     private readonly ThemeState _theme;
     private readonly EditorConnector _editorConnector;
@@ -130,7 +142,7 @@ public sealed class SettingsViewModel : System.ComponentModel.INotifyPropertyCha
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _whisperModelManager = whisperModelManager;
         _dispatcherQueue = dispatcherQueue;
-        _parseCredentialProvider = new ConfigParseCredentialProvider(settings);
+        _accountService = TryResolveAccountService();
 
         // ThemeState is the ONLY exerciser of live accent/density switching (views-inventory.md
         // SS1.15 point 2) — subscribing here means the Accent-swatch row's live repaint (verified
@@ -141,6 +153,23 @@ public sealed class SettingsViewModel : System.ComponentModel.INotifyPropertyCha
 
         _claudeDirPath = _settings.GetString(ClaudeDirPathSettingsKey);
         ClaudeConnected = !string.IsNullOrEmpty(_claudeDirPath);
+    }
+
+    /// <summary>Best-effort DI lookup off the app-wide static (see <see cref="_accountService"/>'s
+    /// own doc comment for why this isn't a constructor parameter). Never throws — a headless test
+    /// host where <see cref="App.Services"/> is still its declared-default <see langword="null"/>
+    /// (or where <see cref="Volar.App.Services.Account.IAccountService"/> simply isn't registered)
+    /// resolves to <see langword="null"/> here, exactly like any other not-yet-signed-in state.</summary>
+    private static IAccountService? TryResolveAccountService()
+    {
+        try
+        {
+            return App.Services?.GetService(typeof(IAccountService)) as IAccountService;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
@@ -202,7 +231,11 @@ public sealed class SettingsViewModel : System.ComponentModel.INotifyPropertyCha
 
     public ParseEnginePreference ParseEnginePreference => ParseEnginePreferenceStore.Get(_settings);
 
-    public bool IsCloudParseConfigured => _parseCredentialProvider.IsConfigured;
+    /// <summary>2026-07-26 account-auth contract: cloud parsing now requires a signed-in account
+    /// rather than a hand-configured proxy URL/token — see <see cref="_accountService"/>'s own doc
+    /// comment for why this reads the account service directly instead of a
+    /// <c>ConfigParseCredentialProvider</c> instance.</summary>
+    public bool IsCloudParseConfigured => _accountService?.State == AccountSessionState.SignedIn;
 
     public bool ShowCloudParseNotConfiguredRow => ParseEnginePreference == ParseEnginePreference.Cloud && !IsCloudParseConfigured;
 

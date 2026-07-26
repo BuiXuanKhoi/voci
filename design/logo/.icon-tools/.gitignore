@@ -1,0 +1,5 @@
+# Throwaway local toolchain for render-win-icon.mjs (Task 3, app icon) — installed via
+# `npm install @resvg/resvg-js png-to-ico` in this directory, not committed. Re-run that install
+# after a fresh clone before running ../render-win-icon.mjs.
+node_modules/
+package-lock.json

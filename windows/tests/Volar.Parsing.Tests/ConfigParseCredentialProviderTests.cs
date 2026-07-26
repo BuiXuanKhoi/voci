@@ -1,84 +1,62 @@
-// ConfigParseCredentialProviderTests.cs — Wave 3-B (A3: Local<->Cloud switch, macOS commit
-// f88d5e5). Also covers the end-to-end "silent fallback" acceptance criterion: cloud selected +
-// unconfigured must degrade IntentRouter to the heuristic tier with no exception and no network
-// attempt.
-using Volar.Domain;
+// ConfigParseCredentialProviderTests.cs — REWRITTEN 2026-07-26 for the account-auth contract
+// (specs/002-workflow-command-center/contracts/account-auth.md): ConfigParseCredentialProvider no
+// longer reads an ISettingsStore-backed proxy URL/token; it wraps two plain delegates
+// (getValidAccessToken/isSignedIn) a caller supplies — in production, method-group conversions off
+// the real Volar.App.Services.Account.AccountService (see CompositionRoot.cs), here plain lambdas
+// over a tiny in-test fake session. Also covers the end-to-end "silent fallback" acceptance
+// criterion: cloud selected + signed out must degrade IntentRouter to the heuristic tier with no
+// exception and no network attempt.
 using Xunit;
 
 namespace Volar.Parsing.Tests;
 
 public class ConfigParseCredentialProviderTests
 {
+    // MARK: - IsConfigured / GetAuthHeaderAsync
+
     [Fact]
-    public void IsConfigured_False_WhenNeitherKeyIsSet()
+    public void IsConfigured_False_WhenSignedOut()
     {
-        var provider = new ConfigParseCredentialProvider(new InMemorySettingsStore());
+        var provider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>(null), () => false);
 
         Assert.False(provider.IsConfigured);
     }
 
     [Fact]
-    public void IsConfigured_False_WhenOnlyBaseUrlIsSet()
+    public void IsConfigured_True_WhenSignedIn()
     {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "https://example.supabase.co");
+        var provider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>("access-token"), () => true);
 
-        Assert.False(new ConfigParseCredentialProvider(settings).IsConfigured);
+        Assert.True(provider.IsConfigured);
     }
 
     [Fact]
-    public void IsConfigured_False_WhenOnlyTokenIsSet()
+    public async Task GetBaseUrlAsync_ReturnsTheFixedSupabaseProjectUrl_ByDefault()
     {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "a-token");
-
-        Assert.False(new ConfigParseCredentialProvider(settings).IsConfigured);
-    }
-
-    [Fact]
-    public void IsConfigured_False_WhenBaseUrlIsNotAValidAbsoluteUri()
-    {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "not a url");
-        settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "a-token");
-
-        Assert.False(new ConfigParseCredentialProvider(settings).IsConfigured);
-    }
-
-    [Fact]
-    public void IsConfigured_True_WhenBothAreSetValidly()
-    {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "https://example.supabase.co");
-        settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "a-token");
-
-        Assert.True(new ConfigParseCredentialProvider(settings).IsConfigured);
-    }
-
-    [Fact]
-    public async Task GetBaseUrlAsync_Throws_WhenUnconfigured()
-    {
-        var provider = new ConfigParseCredentialProvider(new InMemorySettingsStore());
-
-        await Assert.ThrowsAsync<ParseCredentialNotConfiguredException>(() => provider.GetBaseUrlAsync());
-    }
-
-    [Fact]
-    public async Task GetBaseUrlAsync_ReturnsTheConfiguredUri()
-    {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "https://example.supabase.co");
-        var provider = new ConfigParseCredentialProvider(settings);
+        var provider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>(null), () => false);
 
         var uri = await provider.GetBaseUrlAsync();
 
-        Assert.Equal("https://example.supabase.co", uri.ToString().TrimEnd('/'));
+        Assert.Equal(ConfigParseCredentialProvider.DefaultBaseUrl, uri);
     }
 
     [Fact]
-    public async Task GetAuthHeaderAsync_ReturnsNull_WhenTokenAbsent()
+    public async Task GetBaseUrlAsync_UsesInjectedOverride_WhenSupplied()
     {
-        var provider = new ConfigParseCredentialProvider(new InMemorySettingsStore());
+        var overrideUrl = new Uri("https://example.supabase.co");
+        var provider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>(null), () => false, overrideUrl);
+
+        var uri = await provider.GetBaseUrlAsync();
+
+        Assert.Equal(overrideUrl, uri);
+    }
+
+    [Fact]
+    public async Task GetAuthHeaderAsync_ReturnsNull_WhenNoAccessTokenAvailable()
+    {
+        // Signed out, or a refresh attempt just failed/was rejected — either way, the delegate
+        // returns null and this must never throw or fabricate a header.
+        var provider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>(null), () => false);
 
         var header = await provider.GetAuthHeaderAsync();
 
@@ -86,31 +64,43 @@ public class ConfigParseCredentialProviderTests
     }
 
     [Fact]
-    public async Task GetAuthHeaderAsync_ReturnsPaidJws_WhenTokenPresent()
+    public async Task GetAuthHeaderAsync_ReturnsPaidJws_WrappingTheAccessToken_WhenPresent()
     {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "a-token");
-        var provider = new ConfigParseCredentialProvider(settings);
+        var provider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>("account-access-token"), () => true);
 
         var header = await provider.GetAuthHeaderAsync();
 
         var paidJws = Assert.IsType<ParseAuthHeader.PaidJws>(header);
-        Assert.Equal("a-token", paidJws.Jws);
+        Assert.Equal("account-access-token", paidJws.Jws);
+    }
+
+    [Fact]
+    public async Task GetAuthHeaderAsync_ForwardsTheCancellationToken_ToTheDelegate()
+    {
+        CancellationToken? observed = null;
+        var provider = new ConfigParseCredentialProvider(
+            ct => { observed = ct; return Task.FromResult<string?>("token"); },
+            () => true);
+        using var cts = new CancellationTokenSource();
+
+        await provider.GetAuthHeaderAsync(cts.Token);
+
+        Assert.Equal(cts.Token, observed);
     }
 
     // MARK: - Silent fallback acceptance criterion (end-to-end through IntentRouter)
 
     [Fact]
-    public async Task Router_FallsBackSilentlyToHeuristic_WhenCloudSelectedButUnconfigured_NoNetworkAttempt()
+    public async Task Router_FallsBackSilentlyToHeuristic_WhenCloudSelectedButSignedOut_NoNetworkAttempt()
     {
-        var settings = new InMemorySettingsStore();
+        var settings = new Volar.Domain.InMemorySettingsStore();
         ParseEnginePreferenceStore.Set(settings, ParseEnginePreference.Cloud); // user picked Cloud...
-        // ...but never configured a proxy URL/token -> ConfigParseCredentialProvider.IsConfigured
-        // is false. CloudParser must never even attempt a request (GetBaseUrlAsync throws before
-        // any HttpClient.SendAsync call happens), so the RecordingHttpMessageHandler below must see
-        // zero requests.
+        // ...but is signed out -> ConfigParseCredentialProvider.GetAuthHeaderAsync returns null.
+        // CloudParser must never even attempt a request, so the RecordingHttpMessageHandler below
+        // must see zero requests.
         var handler = new RecordingHttpMessageHandler();
-        var cloud = new CloudParser(new ConfigParseCredentialProvider(settings), new HttpClient(handler));
+        var credentialProvider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>(null), () => false);
+        var cloud = new CloudParser(credentialProvider, new HttpClient(handler));
         var gate = new DefaultCloudParseGate(settings, isNetworkAvailable: () => true);
         var heuristic = new FakeIntentParser
         {
@@ -127,11 +117,9 @@ public class ConfigParseCredentialProviderTests
     }
 
     [Fact]
-    public async Task Router_AttemptsCloud_WhenConfigured_AndOptedIn()
+    public async Task Router_AttemptsCloud_WhenSignedIn_AndOptedIn()
     {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "https://example.supabase.co");
-        settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "a-token");
+        var settings = new Volar.Domain.InMemorySettingsStore();
         ParseEnginePreferenceStore.Set(settings, ParseEnginePreference.Cloud);
 
         var handler = new RecordingHttpMessageHandler
@@ -141,7 +129,8 @@ public class ConfigParseCredentialProviderTests
                 Content = new StringContent("[]"),
             },
         };
-        var cloud = new CloudParser(new ConfigParseCredentialProvider(settings), new HttpClient(handler));
+        var credentialProvider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>("token"), () => true);
+        var cloud = new CloudParser(credentialProvider, new HttpClient(handler));
         var gate = new DefaultCloudParseGate(settings, isNetworkAvailable: () => true);
         var heuristic = new FakeIntentParser
         {
@@ -151,19 +140,18 @@ public class ConfigParseCredentialProviderTests
 
         await router.ParseAsync("nói gì đó", DateTimeOffset.UtcNow, Array.Empty<string>());
 
-        Assert.Equal(1, handler.CallCount); // configured + opted-in -> Cloud IS attempted this time
+        Assert.Equal(1, handler.CallCount); // signed in + opted-in -> Cloud IS attempted this time
     }
 
     [Fact]
-    public async Task Router_DoesNotAttemptCloud_WhenNotOptedIn_EvenIfConfigured()
+    public async Task Router_DoesNotAttemptCloud_WhenNotOptedIn_EvenIfSignedIn()
     {
-        var settings = new InMemorySettingsStore();
-        settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "https://example.supabase.co");
-        settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "a-token");
+        var settings = new Volar.Domain.InMemorySettingsStore();
         // Deliberately NOT calling ParseEnginePreferenceStore.Set(...) -> consent absent -> gate closed.
 
         var handler = new RecordingHttpMessageHandler();
-        var cloud = new CloudParser(new ConfigParseCredentialProvider(settings), new HttpClient(handler));
+        var credentialProvider = new ConfigParseCredentialProvider(_ => Task.FromResult<string?>("token"), () => true);
+        var cloud = new CloudParser(credentialProvider, new HttpClient(handler));
         var gate = new DefaultCloudParseGate(settings, isNetworkAvailable: () => true);
         var heuristic = new FakeIntentParser
         {

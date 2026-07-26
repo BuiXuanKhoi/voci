@@ -130,6 +130,9 @@ public sealed class CompositionRootWiringTests
             typeof(DelegationOrchestratorService),
             typeof(IDelegationHandoff),
 
+            typeof(Volar.App.Services.Account.IAccountService),
+            typeof(Volar.App.Services.Account.AccountService),
+
             typeof(ICloudParseGate),
             typeof(IParseCredentialProvider),
             typeof(ISlmParser),

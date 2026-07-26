@@ -19,7 +19,10 @@
          though the project/assembly folder is Volar.App for solution-layout consistency with the
          other Volar.* projects. -->
     <AssemblyName>Volar</AssemblyName>
-    <ApplicationIcon />
+    <!-- Task 3 (app icon): rendered from design/logo/app-icon.svg via design/logo/render-win-icon.mjs
+         (rerun that script to regenerate Assets/Volar.ico after any logo change — the .ico is
+         committed as a binary artifact, not built from the .svg at compile time). -->
+    <ApplicationIcon>Assets\Volar.ico</ApplicationIcon>
     <UseWinUI>true</UseWinUI>
     <Nullable>enable</Nullable>
 

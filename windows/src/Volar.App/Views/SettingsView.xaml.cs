@@ -5,6 +5,7 @@
 // window handle, so this code-behind exposes <see cref="OwnerWindowHandle"/> for whoever mounts
 // this view (Stage C) to set once, mirroring the same seam every Wave-4 view needing a picker uses.
 using System.ComponentModel;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml;
@@ -13,6 +14,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Microsoft.UI.Xaml.Shapes;
+using Volar.App.Services.Account;
 using Volar.App.Services.State;
 using Volar.App.ViewModels;
 using Volar.Reminders;
@@ -31,12 +33,14 @@ public sealed partial class SettingsView : UserControl
         Notifications,
         Appearance,
         Integrations,
+        Account,
         About,
     }
 
     private sealed record TabDef(Tab Tab, string Label, Controls.VolarIconName Icon, Func<FrameworkElement> Builder);
 
     private SettingsViewModel? _viewModel;
+    private AccountViewModel? _accountViewModel;
     private Tab _selectedTab = Tab.General;
     private readonly List<(Tab Tab, Button Button)> _tabButtons = new();
     private DispatcherQueueTimer? _receiptTimer;
@@ -67,6 +71,22 @@ public sealed partial class SettingsView : UserControl
         _viewModel = viewModel ?? throw new ArgumentNullException(nameof(viewModel));
         _viewModel.PropertyChanged += OnViewModelPropertyChanged;
 
+        // Account tab (2026-07-26 account-auth contract): resolved off the app-wide DI container
+        // rather than threaded through SettingsViewModel's own constructor — MainWindow.xaml.cs
+        // constructs SettingsViewModel with a fixed positional argument list outside this task's
+        // file-ownership scope, so App.Services (already the seam every other Wave-3-C service is
+        // resolved through post-construction, e.g. App.xaml.cs's WireHotkey/WireTray) is used here
+        // instead. Constructed once per Attach() call (mirrors _viewModel's own one-per-Attach
+        // lifetime) and reuses THIS view's own DispatcherQueue for UI-thread marshaling, same as
+        // every other Wave-4 VM.
+        if (_accountViewModel is not null)
+        {
+            _accountViewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        }
+        var accountService = Volar.App.App.Services.GetRequiredService<IAccountService>();
+        _accountViewModel = new AccountViewModel(accountService, DispatcherQueue);
+        _accountViewModel.PropertyChanged += OnViewModelPropertyChanged;
+
         _tabs = new[]
         {
             new TabDef(Tab.General, "General", Controls.VolarIconName.Settings, BuildGeneralTab),
@@ -74,6 +94,10 @@ public sealed partial class SettingsView : UserControl
             new TabDef(Tab.Notifications, "Notifications", Controls.VolarIconName.Bell, BuildNotificationsTab),
             new TabDef(Tab.Appearance, "Appearance", Controls.VolarIconName.Sparkle, BuildAppearanceTab),
             new TabDef(Tab.Integrations, "Integrations", Controls.VolarIconName.Bolt, BuildIntegrationsTab),
+            // VolarIconName has no dedicated "account/person" case (frozen 28-case 1:1 port of the
+            // Swift enum, views-inventory.md — adding a new case is out of this task's scope) —
+            // Flag reused as the closest available stand-in; purely cosmetic.
+            new TabDef(Tab.Account, "Account", Controls.VolarIconName.Flag, BuildAccountTab),
             new TabDef(Tab.About, "About", Controls.VolarIconName.Project, BuildAboutTab),
         };
         BuildTabStrip();
@@ -93,6 +117,10 @@ public sealed partial class SettingsView : UserControl
         if (_viewModel is not null)
         {
             _viewModel.PropertyChanged -= OnViewModelPropertyChanged;
+        }
+        if (_accountViewModel is not null)
+        {
+            _accountViewModel.PropertyChanged -= OnViewModelPropertyChanged;
         }
     }
 
@@ -730,6 +758,188 @@ public sealed partial class SettingsView : UserControl
             _viewModel?.ConnectClaudeCode(folder.Path);
         }
     }
+
+    // ============================================================================================
+    // MARK: - Account tab (new, 2026-07-26 account-auth contract — no macOS equivalent existed
+    // before this; the whole tab is new surface, not a port). Cloud parse/Groq speech gating and
+    // the actual auth network calls all live in AccountViewModel/AccountService — this method and
+    // its helpers are pure layout, following the same programmatic-row pattern every other tab in
+    // this file uses.
+    // ============================================================================================
+
+    private FrameworkElement BuildAccountTab()
+    {
+        var vm = _accountViewModel!;
+        var appResources = Application.Current.Resources;
+        var stack = new StackPanel { Spacing = 16 };
+
+        stack.Children.Add(vm.IsSignedIn ? BuildSignedInAccountCard(vm, appResources) : BuildSignedOutAccountCard(vm, appResources));
+
+        return new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled };
+    }
+
+    private FrameworkElement BuildSignedOutAccountCard(AccountViewModel vm, ResourceDictionary appResources)
+    {
+        var card = new StackPanel { Spacing = 12 };
+
+        card.Children.Add(new TextBlock
+        {
+            Text = "Sign in",
+            FontSize = 13.5,
+            FontWeight = FontWeights.Medium,
+            Foreground = (Brush)appResources["VolarTextPriBrush"],
+        });
+        card.Children.Add(new TextBlock
+        {
+            Text = "Sign in with your email to unlock Cloud AI parsing and Groq cloud transcription. Volar's core capture, tasks, and reminders never require an account.",
+            FontSize = 12,
+            Foreground = (Brush)appResources["VolarTextSecBrush"],
+            TextWrapping = TextWrapping.Wrap,
+        });
+
+        var emailBox = new TextBox
+        {
+            PlaceholderText = "you@example.com",
+            Width = 260,
+            IsEnabled = !vm.Busy && !vm.CodeSent,
+            Text = vm.EmailInput,
+        };
+        emailBox.TextChanged += (_, _) => vm.EmailInput = emailBox.Text;
+        card.Children.Add(BuildRow("Email", null, emailBox));
+
+        if (!vm.CodeSent)
+        {
+            card.Children.Add(BuildPillButton(vm.Busy ? "Sending…" : "Send code", solid: true, async (_, _) => await vm.SendCodeAsync()));
+        }
+        else
+        {
+            var codeBox = new TextBox
+            {
+                PlaceholderText = "6-digit code",
+                Width = 160,
+                IsEnabled = !vm.Busy,
+                Text = vm.CodeInput,
+            };
+            codeBox.TextChanged += (_, _) => vm.CodeInput = codeBox.Text;
+            card.Children.Add(BuildRow("Code", "Check your email for a 6-digit code.", codeBox));
+
+            var buttonsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            buttonsRow.Children.Add(BuildPillButton(vm.Busy ? "Verifying…" : "Verify", solid: true, async (_, _) => await vm.VerifyCodeAsync()));
+            buttonsRow.Children.Add(BuildPillButton("Resend code", solid: false, async (_, _) => await vm.SendCodeAsync()));
+            card.Children.Add(buttonsRow);
+        }
+
+        if (vm.ErrorMessage is { } error)
+        {
+            card.Children.Add(new TextBlock { Text = error, FontSize = 11.5, Foreground = (Brush)appResources["VolarRescheduleBrush"], TextWrapping = TextWrapping.Wrap });
+        }
+
+        card.Children.Add(new TextBlock
+        {
+            Text = AccountViewModel.AppleSignInLimitationNote,
+            FontSize = 11,
+            Foreground = (Brush)appResources["VolarTextMutBrush"],
+            TextWrapping = TextWrapping.Wrap,
+        });
+
+        return WrapInCard(card, appResources);
+    }
+
+    private FrameworkElement BuildSignedInAccountCard(AccountViewModel vm, ResourceDictionary appResources)
+    {
+        var card = new StackPanel { Spacing = 12 };
+
+        var header = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10, VerticalAlignment = VerticalAlignment.Center };
+        header.Children.Add(new TextBlock
+        {
+            Text = vm.Email ?? "Signed in",
+            FontSize = 13.5,
+            FontWeight = FontWeights.Medium,
+            Foreground = (Brush)appResources["VolarTextPriBrush"],
+        });
+        header.Children.Add(new Border
+        {
+            Padding = new Thickness(8, 2, 8, 2),
+            CornerRadius = new CornerRadius(999), // Capsule — same convention as BuildPill's badge.
+            Background = vm.IsPro ? (Brush)appResources["AccentSurfaceBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x1F, 255, 255, 255)),
+            Child = new TextBlock
+            {
+                Text = vm.TierLabel,
+                FontSize = 11,
+                FontWeight = FontWeights.Medium,
+                Foreground = vm.IsPro ? (Brush)appResources["AccentSolidBrush"] : (Brush)appResources["VolarTextSecBrush"],
+            },
+        });
+        card.Children.Add(header);
+
+        card.Children.Add(new TextBlock { Text = vm.QuotaLine, FontSize = 12, Foreground = (Brush)appResources["VolarTextSecBrush"] });
+
+        if (vm.CanUpgrade)
+        {
+            card.Children.Add(BuildRow("Upgrade to Pro", AccountViewModel.UpgradeHint, BuildStatusText("Mac app only")));
+        }
+
+        var buttonsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+        buttonsRow.Children.Add(BuildPillButton(vm.Busy ? "Signing out…" : "Sign out", solid: false, async (_, _) => await vm.SignOutAsync()));
+        card.Children.Add(buttonsRow);
+
+        if (vm.ErrorMessage is { } error)
+        {
+            card.Children.Add(new TextBlock { Text = error, FontSize = 11.5, Foreground = (Brush)appResources["VolarRescheduleBrush"], TextWrapping = TextWrapping.Wrap });
+        }
+
+        card.Children.Add(new Rectangle { Height = 0.5, Fill = (Brush)appResources["VolarBorderBrush"], Margin = new Thickness(0, 4, 0, 4) });
+
+        if (!vm.DeleteConfirmationPending)
+        {
+            var deleteRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            deleteRow.Children.Add(BuildDestructiveButton("Delete account", (_, _) => vm.RequestDeleteAccount()));
+            card.Children.Add(BuildRow("Delete account", "Permanently deletes your Volar account and cloud usage history. This cannot be undone.", deleteRow));
+        }
+        else
+        {
+            card.Children.Add(new TextBlock
+            {
+                Text = "Are you sure? This permanently deletes your account and cannot be undone.",
+                FontSize = 12,
+                FontWeight = FontWeights.Medium,
+                Foreground = (Brush)appResources["VolarRescheduleBrush"],
+                TextWrapping = TextWrapping.Wrap,
+            });
+            var confirmRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+            confirmRow.Children.Add(BuildDestructiveButton(vm.Busy ? "Deleting…" : "Yes, delete permanently", async (_, _) => await vm.ConfirmDeleteAccountAsync()));
+            confirmRow.Children.Add(BuildPillButton("Cancel", solid: false, (_, _) => vm.CancelDeleteAccount()));
+            card.Children.Add(confirmRow);
+        }
+
+        return WrapInCard(card, appResources);
+    }
+
+    private static Button BuildDestructiveButton(string text, RoutedEventHandler onClick)
+    {
+        var button = new Button
+        {
+            Content = new TextBlock { Text = text, FontSize = 12.5, FontWeight = FontWeights.Medium, Foreground = new SolidColorBrush(Microsoft.UI.Colors.White) },
+            Padding = new Thickness(14, 0, 14, 0),
+            Height = 30,
+            CornerRadius = new CornerRadius(8),
+            BorderThickness = new Thickness(0),
+            Background = (Brush)Application.Current.Resources["VolarRescheduleBrush"],
+        };
+        SuppressStockButtonChrome(button);
+        button.Click += onClick;
+        return button;
+    }
+
+    private static Border WrapInCard(FrameworkElement content, ResourceDictionary appResources) => new()
+    {
+        Padding = new Thickness(16),
+        CornerRadius = new CornerRadius(11), // one-off literal, same recurring 11 as every other card border in this file.
+        BorderThickness = new Thickness(0.5),
+        Background = (Brush)appResources["VolarCardBrush"],
+        BorderBrush = (Brush)appResources["VolarGlassBorderBrush"],
+        Child = content,
+    };
 
     // ============================================================================================
     // MARK: - About tab (SettingsView.swift:708-749)

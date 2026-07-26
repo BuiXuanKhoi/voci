@@ -169,19 +169,28 @@ public sealed class SettingsViewModelTests
         Assert.True(fixture.Settings.GetBool(ParseEnginePreferenceStore.CloudParseConsentKey, false));
     }
 
+    // 2026-07-26 account-auth contract: cloud parsing now gates on a signed-in account, not a
+    // hand-configured proxy URL/token — ConfigParseCredentialProvider.BaseUrlSettingsKey/
+    // TokenSettingsKey no longer exist. SettingsViewModel resolves IAccountService via the app-wide
+    // Volar.App.App.Services static (see that field's own doc comment) rather than a constructor
+    // parameter, and this headless test host never calls App.OnLaunched, so App.Services stays its
+    // declared-default null — IsCloudParseConfigured therefore always reads "not configured" here,
+    // which is itself the CORRECT answer (a test host is never signed in). A real signed-in-state
+    // test lives in ViewModels/AccountViewModelTests.cs / Services/Account/AccountServiceTests.cs
+    // instead, against IAccountService directly, without needing the whole SettingsViewModel/
+    // App.Services indirection.
     [Fact]
-    public void ShowCloudParseNotConfiguredRow_TrueOnlyWhenCloudSelectedAndCredentialMissing()
+    public void ShowCloudParseNotConfiguredRow_TrueWhenCloudSelected_NoAccountServiceResolvable()
     {
         var fixture = new Fixture();
         var vm = fixture.BuildViewModel();
 
-        vm.SetParseEngine(ParseEnginePreference.Cloud);
-        Assert.True(vm.ShowCloudParseNotConfiguredRow);
+        Assert.False(vm.IsCloudParseConfigured);
 
-        fixture.Settings.SetString(ConfigParseCredentialProvider.BaseUrlSettingsKey, "https://example.invalid");
-        fixture.Settings.SetString(ConfigParseCredentialProvider.TokenSettingsKey, "token");
-        Assert.False(vm.ShowCloudParseNotConfiguredRow);
-        Assert.True(vm.IsCloudParseConfigured);
+        vm.SetParseEngine(ParseEnginePreference.Cloud);
+
+        Assert.True(vm.ShowCloudParseNotConfiguredRow);
+        Assert.False(vm.IsCloudParseConfigured);
     }
 
     [Fact]

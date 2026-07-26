@@ -121,3 +121,83 @@ public sealed class EnvironmentGroqCredentialProvider : IGroqCredentialProvider
 
     public bool IsConfigured => !string.IsNullOrEmpty(ResolveToken());
 }
+
+// MARK: - AccountGroqCredentialProvider (2026-07-26 account-auth contract)
+
+/// <summary>
+/// Production Groq credential provider under the account-auth contract
+/// (specs/002-workflow-command-center/contracts/account-auth.md): cloud speech is Pro-only, gated
+/// on a signed-in account whose cached tier/quota say "pro" with remaining daily speech quota.
+/// Replaces <see cref="EnvironmentGroqCredentialProvider"/> in production wiring
+/// (<c>Volar.App.Services.CompositionRoot</c>) — that type is left in place unchanged (still used
+/// by anything that constructs it directly, e.g. existing tests/dev-token flows), this is an
+/// ADDITIONAL implementation, not a replacement of it.
+/// </summary>
+/// <remarks>
+/// LAYERING: <c>Volar.Speech.csproj</c> carries ZERO project references (this project's own
+/// long-standing "project-reference-free" design goal — see
+/// <see cref="EnvironmentGroqCredentialProvider"/>'s own header comment above), so this type cannot
+/// hold a direct reference to <c>Volar.App.Services.Account.IAccountService</c> (adding a reference
+/// is a csproj change outside this task's scope regardless). It takes two plain delegates instead —
+/// <c>Volar.App.Services.CompositionRoot</c> is the one place that can see both sides and supplies
+/// them as simple lambdas/method-group conversions over the real
+/// <c>Volar.App.Services.Account.AccountService</c> instance.
+/// </remarks>
+public sealed class AccountGroqCredentialProvider : IGroqCredentialProvider
+{
+    /// <summary>Supabase edge-function base for the Groq proxy (contract §3:
+    /// <c>POST /functions/v1/groq/audio/transcriptions</c>). TRAILING SLASH is required — this
+    /// class's own <see cref="GetBaseUrlAsync"/> return value is combined via
+    /// <c>new Uri(baseUrl, "audio/transcriptions")</c> inside <see cref="GroqTranscriptionClient"/>,
+    /// and without the trailing slash that combine would REPLACE the last path segment
+    /// ("/groq") instead of appending under it.</summary>
+    public static readonly Uri ProxyBaseUrl = new("https://nuzrpipwacravfgsiacv.supabase.co/functions/v1/groq/");
+
+    private readonly Func<CancellationToken, Task<string?>> _getValidAccessToken;
+    private readonly Func<bool> _isConfigured;
+    private readonly Uri _baseUrl;
+
+    /// <param name="getValidAccessToken">Typically
+    /// <c>Volar.App.Services.Account.AccountService.GetValidAccessTokenAsync</c> as a method-group
+    /// conversion.</param>
+    /// <param name="isConfigured">
+    /// Fail-closed pre-record gate, checked by <c>SpeechEngineService.SelectedEngine</c> BEFORE a
+    /// recording even starts: must return <see langword="true"/> ONLY when there is POSITIVE, cached
+    /// evidence the signed-in account is Pro tier with remaining daily speech quota (e.g.
+    /// <c>() =&gt; accountService.CachedStatus is { IsPro: true, SpeechUsedToday: var used,
+    /// SpeechLimit: var limit } &amp;&amp; used &lt; limit</c>). Absent/stale/unknown status (never
+    /// fetched yet, fetch failed, or free tier) must all resolve to <see langword="false"/> — this
+    /// is what makes a free user's speech-engine selection degrade SILENTLY to Whisper on-device
+    /// before a recording ever starts, rather than failing only at upload time with a 403. A genuine
+    /// race (tier/quota changes mid-recording, after this gate already passed) is the one scenario
+    /// this cannot prevent from this file alone — see this feature's final report, "failure modes."
+    /// </param>
+    public AccountGroqCredentialProvider(
+        Func<CancellationToken, Task<string?>> getValidAccessToken,
+        Func<bool> isConfigured,
+        Uri? baseUrl = null)
+    {
+        _getValidAccessToken = getValidAccessToken ?? throw new ArgumentNullException(nameof(getValidAccessToken));
+        _isConfigured = isConfigured ?? throw new ArgumentNullException(nameof(isConfigured));
+        _baseUrl = baseUrl ?? ProxyBaseUrl;
+    }
+
+    public Task<Uri> GetBaseUrlAsync(CancellationToken cancellationToken = default) => Task.FromResult(_baseUrl);
+
+    public bool IsConfigured => _isConfigured();
+
+    public async Task<string?> GetAuthorizationAsync(CancellationToken cancellationToken = default)
+    {
+        var token = await _getValidAccessToken(cancellationToken).ConfigureAwait(false);
+        if (token is null)
+        {
+            // Mirrors EnvironmentGroqCredentialProvider's own contract: GetAuthorizationAsync throws
+            // MissingCredentials when no credential is available. In practice SpeechEngineService
+            // never reaches this call with Groq selected unless IsConfigured was already true
+            // moments earlier (see IsConfigured's own remarks) — this only fires on a genuine race
+            // (session expired/signed-out between the pre-record check and upload time).
+            throw GroqTranscriptionException.MissingCredentials();
+        }
+        return $"Bearer {token}";
+    }
+}
