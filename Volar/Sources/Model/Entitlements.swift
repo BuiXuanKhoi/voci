@@ -99,7 +99,17 @@ actor Entitlements {
     /// unrecorded on ours, with no future redelivery to retry the link.
     @discardableResult
     func purchase(_ which: VolarProduct) async throws -> SubscriptionLinkResponse {
-        guard let product = product(which) ?? (try? await Product.products(for: [which.rawValue]))?.first else {
+        // Deliberately NOT folded into a `product(which) ?? <fetch>`: `??` takes its right-hand
+        // side as a non-`async` `@autoclosure`, so no `await` can appear there. The cold path also
+        // goes through `loadProducts()` rather than a one-off `Product.products(for: [id])` so the
+        // result lands in `products` — a retry (or the Account tab reading `product(_:)`) doesn't
+        // hit the network a second time.
+        var resolved = product(which)
+        if resolved == nil {
+            await loadProducts()
+            resolved = product(which)
+        }
+        guard let product = resolved else {
             throw EntitlementError.productNotFound
         }
         let result: Product.PurchaseResult
