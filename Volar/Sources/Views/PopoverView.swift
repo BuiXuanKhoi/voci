@@ -703,7 +703,7 @@ struct PopoverView: View {
         .background(accent.solid)
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
-                .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .shadow(color: accent.glow, radius: 10, x: 0, y: 4)
@@ -815,7 +815,7 @@ struct PopoverView: View {
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
                     .stroke(
-                        appState.captureState == .saving ? accent.surface : Color.white.opacity(0.18),
+                        appState.captureState == .saving ? accent.surface : VolarColor.veil(0.18),
                         lineWidth: 0.5
                     )
             )
@@ -874,7 +874,7 @@ struct PopoverView: View {
                 .background(accent.solid)
                 .overlay(
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                        .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
                 )
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .keyboardShortcut(.defaultAction)
@@ -903,7 +903,7 @@ struct PopoverView: View {
             .background(accent.solid)
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                    .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
             )
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .keyboardShortcut(.defaultAction)
@@ -951,7 +951,7 @@ struct PopoverView: View {
             .background(accent.solid)
             .overlay(
                 RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(Color.white.opacity(0.18), lineWidth: 0.5)
+                    .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
             )
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .keyboardShortcut(.defaultAction)

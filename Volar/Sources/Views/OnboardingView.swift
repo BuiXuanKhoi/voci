@@ -41,7 +41,7 @@ struct OnboardingView: View {
         HStack(spacing: 6) {
             ForEach(1...3, id: \.self) { i in
                 Capsule()
-                    .fill(i == step ? accentColors.solid : Color.white.opacity(0.15))
+                    .fill(i == step ? accentColors.solid : VolarColor.veil(0.15))
                     .frame(width: i == step ? 18 : 6, height: 6)
                     .animation(VolarMotion.hover, value: step)
             }
@@ -249,7 +249,7 @@ struct OnboardingView: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
             .frame(maxWidth: 460, alignment: .leading)
-            .background(Color.white.opacity(0.04))
+            .background(VolarColor.veil(0.04))
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             .volarHairline(cornerRadius: 12)
             .padding(.bottom, 22)

@@ -68,11 +68,11 @@ struct NotificationView: View {
                 .frame(height: 28)
         }
         .buttonStyle(.plain)
-        .background(solid ? accentColors.surface : Color.white.opacity(0.08))
+        .background(solid ? accentColors.surface : VolarColor.veil(0.08))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(solid ? accentColors.solid.opacity(0.27) : Color.white.opacity(0.06), lineWidth: 0.5)
+                .stroke(solid ? accentColors.solid.opacity(0.27) : VolarColor.veil(0.06), lineWidth: 0.5)
         )
     }
 }

@@ -435,7 +435,7 @@ struct TodayView: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
-            .background(Color.white.opacity(0.08))
+            .background(VolarColor.veil(0.08))
             .clipShape(Circle())
 
             Button {
@@ -445,7 +445,7 @@ struct TodayView: View {
                     .frame(width: 22, height: 22)
             }
             .buttonStyle(.plain)
-            .background(Color.white.opacity(0.08))
+            .background(VolarColor.veil(0.08))
             .clipShape(Circle())
         }
         .font(.system(size: 11.5))
@@ -560,7 +560,7 @@ private struct SettingsToolButton: View {
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(SettingsToolButtonStyle())
-        .background(isHovering ? Color.white.opacity(0.08) : .clear)
+        .background(isHovering ? VolarColor.veil(0.08) : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
@@ -702,7 +702,7 @@ private struct NextPeekRow: View {
                 Text(task.title)
                     .font(.system(size: 14.5))
                     .foregroundStyle(task.done ? VolarColor.textMut : VolarColor.textSec)
-                    .strikethrough(task.done, pattern: .solid, color: Color.white.opacity(0.25))
+                    .strikethrough(task.done, pattern: .solid, color: VolarColor.veil(0.25))
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -739,7 +739,7 @@ private struct NextPeekRow: View {
             appState.toggleDone(task.id)
         } label: {
             Circle()
-                .strokeBorder(task.done ? VolarColor.textSec : Color.white.opacity(0.28), lineWidth: 1.5)
+                .strokeBorder(task.done ? VolarColor.textSec : VolarColor.veil(0.28), lineWidth: 1.5)
                 .background(Circle().fill(task.done ? VolarColor.textSec : .clear))
                 .frame(width: 15, height: 15)
                 .overlay {

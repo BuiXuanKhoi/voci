@@ -159,7 +159,7 @@ struct TaskDetailView: View {
                     .frame(height: 34)
             }
             .buttonStyle(.plain)
-            .background(Color.white.opacity(0.06))
+            .background(VolarColor.veil(0.06))
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .volarHairline(cornerRadius: 9)
 

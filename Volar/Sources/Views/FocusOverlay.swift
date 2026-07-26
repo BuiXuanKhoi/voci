@@ -102,7 +102,7 @@ struct FocusOverlay: View {
         let frac = min(max(Double(appState.focusSecondsLeft) / Double(focusTotalSeconds), 0), 1)
         return ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 1)
-                .fill(Color.white.opacity(0.10))
+                .fill(VolarColor.veil(0.10))
                 .frame(width: total, height: 2)
             RoundedRectangle(cornerRadius: 1)
                 .fill(timerColor)
@@ -256,9 +256,9 @@ private struct FocusRoundBtn: View {
                 .frame(width: 30, height: 30)
         }
         .buttonStyle(.plain)
-        .background(isHovering && !disabled ? Color.white.opacity(0.12) : Color.white.opacity(0.06))
+        .background(isHovering && !disabled ? VolarColor.veil(0.12) : VolarColor.veil(0.06))
         .clipShape(Circle())
-        .overlay(Circle().stroke(Color.white.opacity(0.10), lineWidth: 0.5))
+        .overlay(Circle().stroke(VolarColor.veil(0.10), lineWidth: 0.5))
         .opacity(disabled ? 0.3 : 1)
         .disabled(disabled)
         .help(title)

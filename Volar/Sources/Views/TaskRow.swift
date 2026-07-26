@@ -105,7 +105,7 @@ struct TaskRow: View {
             appState.toggleDone(task.id)
         } label: {
             Circle()
-                .strokeBorder(task.done ? accentColors.solid : Color.white.opacity(0.28), lineWidth: 1.5)
+                .strokeBorder(task.done ? accentColors.solid : VolarColor.veil(0.28), lineWidth: 1.5)
                 .background(Circle().fill(task.done ? accentColors.solid : .clear))
                 .frame(width: 17, height: 17)
                 .overlay {
@@ -132,7 +132,7 @@ struct TaskRow: View {
                 Text(task.title)
                     .font(.system(size: 13, weight: task.done ? .regular : .medium))
                     .tracking(-0.065)
-                    .strikethrough(task.done, pattern: .solid, color: Color.white.opacity(0.25))
+                    .strikethrough(task.done, pattern: .solid, color: VolarColor.veil(0.25))
                     .foregroundStyle(task.done ? VolarColor.textMut : VolarColor.textPri)
                     .lineLimit(1)
                     .truncationMode(.tail)

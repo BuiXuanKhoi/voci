@@ -144,7 +144,7 @@ struct MorningFrogView: View {
         return HStack(spacing: 10) {
             ZStack {
                 Circle()
-                    .stroke(selected ? accentColors.solid : Color.white.opacity(0.28), lineWidth: 1.5)
+                    .stroke(selected ? accentColors.solid : VolarColor.veil(0.28), lineWidth: 1.5)
                     .background(Circle().fill(selected ? accentColors.solid : Color.clear))
                     .frame(width: 14, height: 14)
                 if selected {

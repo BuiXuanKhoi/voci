@@ -57,6 +57,14 @@ enum VolarColor {
     /// `--hairline-strong` — the board's stronger edge, `rgba(148,178,224,.18)`.
     static let borderHi = Color(volar: 0x94B2E0, opacity: 0.18)
 
+    /// One-off translucent film at an arbitrary strength, for the ~40 places across the views that
+    /// need a fill/stroke between two named tokens (hover tints, chip backgrounds, progress-track
+    /// fills). Those all used `Color.white.opacity(x)` before Twilight; over night-blue ink a white
+    /// film desaturates the surface to grey, so they take the SAME cool base as `border`/`card` and
+    /// keep their original alpha. Prefer a named token when one fits — this exists so a view never
+    /// has to reach back for `Color.white` and reintroduce the grey.
+    static func veil(_ opacity: Double) -> Color { Color(volar: 0x94B2E0, opacity: opacity) }
+
     // --- Text (foundations.html --tx-1/2/3) ---
     /// `--tx-1` primary. Contrast vs `bg` (#07090E) ≈ 16.9:1 — passes WCAG AAA for body text.
     static let textPri = Color(volar: 0xEDF2F9)

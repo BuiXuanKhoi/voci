@@ -264,7 +264,7 @@ struct SettingsView: View {
                         .foregroundStyle(VolarColor.textPri)
                         .padding(.horizontal, 12)
                         .frame(height: 26)
-                        .background(Color.white.opacity(0.06))
+                        .background(VolarColor.veil(0.06))
                         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
                         .volarHairline(cornerRadius: 7)
                 }
@@ -438,7 +438,7 @@ struct SettingsView: View {
                             .fill(candidate.accent.solid)
                             .frame(width: 22, height: 22)
                             .overlay(
-                                Circle().stroke(selected ? Color.white : Color.white.opacity(0.2), lineWidth: 0.5)
+                                Circle().stroke(selected ? Color.white : VolarColor.veil(0.2), lineWidth: 0.5)
                             )
                             .overlay(
                                 Circle().stroke(candidate.accent.solid, lineWidth: selected ? 1.5 : 0)
@@ -659,7 +659,7 @@ struct SettingsView: View {
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(solid ? Color.white.opacity(0.18) : VolarColor.borderHi, lineWidth: 0.5)
+                .stroke(solid ? VolarColor.veil(0.18) : VolarColor.borderHi, lineWidth: 0.5)
         )
     }
 
@@ -956,7 +956,7 @@ struct SettingsView: View {
                     .foregroundStyle(VolarColor.textSec)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
-                    .background(Color.white.opacity(0.06))
+                    .background(VolarColor.veil(0.06))
                     .clipShape(Capsule())
             }
             .padding(.top, 4)
@@ -1009,7 +1009,7 @@ private struct VolarToggle: View {
 
     var body: some View {
         RoundedRectangle(cornerRadius: 12, style: .continuous)
-            .fill(isOn ? accentColors.solid : Color.white.opacity(0.12))
+            .fill(isOn ? accentColors.solid : VolarColor.veil(0.12))
             .frame(width: 38, height: 22)
             .overlay(alignment: isOn ? .trailing : .leading) {
                 Circle()
@@ -1081,7 +1081,7 @@ private struct CustomImageThumbnail: View {
                     .resizable()
                     .aspectRatio(contentMode: .fill)
             } else {
-                Color.white.opacity(0.06)
+                VolarColor.veil(0.06)
             }
         }
         .onAppear { reload() }

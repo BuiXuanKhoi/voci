@@ -18,8 +18,16 @@
 	<string>Volar</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
-	<key>LSUIElement</key>
-	<true/>
+	<!--
+	  LSUIElement was REMOVED 2026-07-26 (anh Khôi chốt). It used to be `true`, making Volar a pure
+	  menu-bar agent: no Dock icon, no app menu, and no window at launch. Two problems with that:
+	  (1) App Review opens the app, sees nothing happen, and rejects it as "app does not launch" —
+	  the single most common rejection for menu-bar apps; (2) with no app menu, ⌘Q / ⌘W / ⌘, never
+	  worked properly and a closed window could only be reopened from the menu bar.
+
+	  Volar is now an ordinary app — Dock icon, app menu, Cmd-Tab — that ALSO keeps its MenuBarExtra.
+	  Do NOT re-add this key without also re-reading `docs/app-store-submission-guide.md` §5.2.
+	-->
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>

@@ -193,7 +193,7 @@ private struct TriageRow: View {
                 .frame(height: 28)
         }
         .buttonStyle(.plain)
-        .background(Color.white.opacity(0.06))
+        .background(VolarColor.veil(0.06))
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .volarHairline(cornerRadius: 8)
         .accessibilityLabel("\(label) — \(item.title)")

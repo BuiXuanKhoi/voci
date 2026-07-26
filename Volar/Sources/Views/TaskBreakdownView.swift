@@ -118,7 +118,7 @@ struct TaskBreakdownView: View {
                 .foregroundStyle(VolarColor.textSec)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 2)
-                .background(Color.white.opacity(0.04))
+                .background(VolarColor.veil(0.04))
                 .clipShape(Capsule())
                 .overlay(Capsule().stroke(VolarColor.border, lineWidth: 0.5))
         }
@@ -164,7 +164,7 @@ struct TaskBreakdownView: View {
                         .frame(height: 34)
                 }
                 .buttonStyle(.plain)
-                .background(Color.white.opacity(0.06))
+                .background(VolarColor.veil(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .volarHairline(cornerRadius: 9)
 
@@ -178,7 +178,7 @@ struct TaskBreakdownView: View {
                         .frame(height: 34)
                 }
                 .buttonStyle(.plain)
-                .background(Color.white.opacity(0.06))
+                .background(VolarColor.veil(0.06))
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .volarHairline(cornerRadius: 9)
 

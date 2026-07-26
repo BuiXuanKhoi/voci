@@ -118,7 +118,7 @@ struct Sidebar: View {
                 .lineSpacing(2)
         }
         .padding(10)
-        .background(Color.white.opacity(0.03))
+        .background(VolarColor.veil(0.03))
         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -180,7 +180,7 @@ private struct SidebarItem: View {
             .padding(.vertical, 6)
         }
         .buttonStyle(.plain)
-        .background(active ? accentColors.surface : (isHovering ? Color.white.opacity(0.04) : .clear))
+        .background(active ? accentColors.surface : (isHovering ? VolarColor.veil(0.04) : .clear))
         .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)

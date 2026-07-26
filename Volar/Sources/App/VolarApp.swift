@@ -33,15 +33,14 @@ struct VolarApp: App {
     }
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuBarMenuContent()
-                .environment(appState)
-        } label: {
-            MenuBarLabel()
-                .environment(appState)
-        }
-        .menuBarExtraStyle(.window)
-
+        // SCENE ORDER IS LOAD-BEARING (changed 2026-07-26 together with dropping LSUIElement from
+        // Info.plist): `Window` is declared FIRST so SwiftUI treats it as the primary scene and
+        // opens it at launch. Previously `MenuBarExtra` came first, which — combined with
+        // LSUIElement — is what made the app launch with no visible window at all. `MenuBarExtra`
+        // now sits below the `Window` scene; it still works exactly the same, it just isn't the
+        // scene SwiftUI opens on launch. Moving it back above `Window` would silently restore the
+        // old no-window-at-launch behavior. // UNVERIFIED: not built on a Mac yet — confirm at
+        // Cổng 1 that the window actually appears on a cold launch.
         Window("Volar", id: "main") {
             TodayView()
                 .environment(appState)
@@ -50,10 +49,10 @@ struct VolarApp: App {
                     // Starts the global ⌃⌥M toggle-capture hotkey (degrades gracefully without
                     // Accessibility permission — see AppState.activateServices).
                     // F1/F2 fix: ALSO called from `AppDelegate.applicationDidFinishLaunching` below
-                    // — this is an LSUIElement menu-bar app that normally launches with this window
-                    // closed, so relying solely on this `.task` would leave the hotkey/rebuild/
-                    // overdue-scan/delegation-timer never started until the user happens to open the
-                    // window. The double call is intentional and safe: `hotkey.start` tears down any
+                    // — the window opens at launch as of 2026-07-26, but the user can still close it
+                    // (⌘W) and leave Volar running from the menu bar, so relying solely on this
+                    // `.task` would leave the hotkey/rebuild/overdue-scan/delegation-timer dead for
+                    // the rest of that session. The double call is intentional and safe: `hotkey.start` tears down any
                     // existing registration first, `startDelegationTimer` invalidates any existing
                     // timer first, and `rebuildFromStorage`/the overdue scan are both idempotent.
                     appState.activateServices()
@@ -101,9 +100,11 @@ struct VolarApp: App {
                 }
                 // F1/F2 integration fix: the three window-independent observers that used to live
                 // here (`.volarTasksDidChange` refresh, `.onOpenURL`, and sleep/wake recovery) were
-                // moved to `AppDelegate` below — this `Window` scene is normally CLOSED (Volar is
-                // an `LSUIElement` menu-bar app), so `.onReceive`/`.onOpenURL` attached to it were
-                // torn down along with the window and silently stopped firing. `AppDelegate` is
+                // moved to `AppDelegate` below — this `Window` scene can be CLOSED by the user at
+                // any time (⌘W leaves Volar alive in the menu bar), so `.onReceive`/`.onOpenURL`
+                // attached to it were torn down along with the window and silently stopped firing.
+                // Still true after the 2026-07-26 switch to opening this window at launch: "opens at
+                // launch" is not "always open". `AppDelegate` is
                 // app-lifetime (registered via `@NSApplicationDelegateAdaptor` above) and shares
                 // this exact `appState` instance (wired in `init()` above), so those three concerns
                 // now fire whether or not this window is open. What's left on this scene — sheets,
@@ -176,6 +177,16 @@ struct VolarApp: App {
                 }
         }
 
+        // Declared AFTER `Window` on purpose — see the scene-order note at the top of `body`.
+        MenuBarExtra {
+            MenuBarMenuContent()
+                .environment(appState)
+        } label: {
+            MenuBarLabel()
+                .environment(appState)
+        }
+        .menuBarExtraStyle(.window)
+
         Settings {
             SettingsView()
                 .environment(appState)
@@ -214,16 +225,21 @@ private struct MenuBarMenuContent: View {
     }
 }
 
-/// Handles app-lifecycle setup an `LSUIElement` menu-bar app needs at launch. The global ⌃⌥M
-/// hotkey is started from `AppState.activateServices()` (called from the main window's `.task`
-/// above) rather than here, since `AppState` — and its `HotkeyManager` — don't exist yet at
-/// `NSApplicationDelegate` construction time.
+/// Handles app-lifecycle setup at launch. The global ⌃⌥M hotkey is started from
+/// `AppState.activateServices()` (called from the main window's `.task` above) rather than here,
+/// since `AppState` — and its `HotkeyManager` — don't exist yet at `NSApplicationDelegate`
+/// construction time.
 ///
-/// F1/F2 integration fix: this is also now the home for the three concerns that must survive the
-/// main `Window("Volar")` scene being closed — Volar is normally a menu-bar-only app, so anything
-/// attached to that scene (`.onReceive`/`.onOpenURL`) is torn down while it's closed. `AppDelegate`
-/// itself is app-lifetime (owned by `@NSApplicationDelegateAdaptor` for the whole run), so
-/// observers registered here keep firing regardless of window state.
+/// F1/F2 integration fix: this is also the home for the three concerns that must survive the main
+/// `Window("Volar")` scene being closed. As of 2026-07-26 that window opens at launch (LSUIElement
+/// dropped from Info.plist, `Window` declared first in `body`), but the user can still close it with
+/// ⌘W and leave Volar running from the menu bar — at which point anything attached to that scene
+/// (`.onReceive`/`.onOpenURL`) is torn down. `AppDelegate` itself is app-lifetime (owned by
+/// `@NSApplicationDelegateAdaptor` for the whole run), so observers registered here keep firing
+/// regardless of window state.
+///
+/// It also owns the two window-presentation entry points that having a Dock icon requires:
+/// `showMainWindow()` (launch) and `applicationShouldHandleReopen` (Dock icon click).
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     /// Set once, in `VolarApp.init()`, right after the single `AppState` instance is constructed
@@ -245,9 +261,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var capturePanelController: CapturePanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // F1/F2 fix (MAJOR, liveness): this is an LSUIElement menu-bar app — `activateServices()`
-        // used to be reachable ONLY from the main `Window`'s `.task` above, which never runs while
-        // the app launches with that window closed (the normal case for a menu-bar-only app). That
+        // F1/F2 fix (MAJOR, liveness): `activateServices()` used to be reachable ONLY from the main
+        // `Window`'s `.task` above, which never ran while the app launched with that window closed
+        // (the normal case back when this was an LSUIElement menu-bar-only app). That
         // left the global ⌃⌥M hotkey, `rebuildFromStorage()`, the FR-016 overdue scan, and the
         // delegation timer all dead until the user happened to open the window. Calling it here too
         // — right after `appState` is guaranteed assigned (`VolarApp.init()` sets it before this
@@ -283,8 +299,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // Feature 002 gap fix: starts the `captureState` -> floating-panel mirroring described on
         // `observeCaptureState()` below. Same "window-independent" motivation as the observers
         // just above — this is what makes ⌃⌥M capture visible even while `Window("Volar")` is
-        // closed, the normal state for this `LSUIElement` menu-bar app.
+        // closed (still reachable via ⌘W even though the window now opens at launch).
         observeCaptureState()
+
+        // 2026-07-26: guarantee the main window is actually on screen at launch. Dropping
+        // LSUIElement + declaring `Window` as the first scene in `VolarApp.body` SHOULD be enough
+        // on its own — but that is a SwiftUI-internal ordering behavior we cannot verify from
+        // Windows, and "app opens and nothing appears" is exactly the App Review rejection this
+        // change exists to prevent. So this is a deliberate belt-and-braces second path: if SwiftUI
+        // already opened and fronted the window, `showMainWindow()` is a no-op re-front; if it
+        // didn't, this is what puts it on screen.
+        //
+        // Deferred one run-loop turn: SwiftUI may not have materialized the scene's NSWindow yet
+        // at `applicationDidFinishLaunching` time, so looking for it synchronously here can find
+        // nothing at all.
+        Task { @MainActor in
+            self.showMainWindow()
+        }
+    }
+
+    /// Brings Volar's main document-style window to the front, activating the app if needed.
+    ///
+    /// Window lookup is by exclusion rather than by identifier: SwiftUI does not expose a stable,
+    /// documented `NSWindow.identifier` for a `Window(id:)` scene, so matching on `"main"` would be
+    /// relying on an implementation detail that can change between OS releases. Instead we skip the
+    /// two window kinds this app is known to also own — `NSPanel` (the floating `CapturePanel`, and
+    /// the `MenuBarExtra` dropdown, both panels) and anything that cannot become the main window
+    /// (the status-bar item's backing window) — and take the first real window that's left.
+    ///
+    /// No-ops safely if nothing matches, rather than force-unwrapping: a missing window here should
+    /// degrade to "menu bar still works", never to a crash on launch.
+    // UNVERIFIED: written on Windows without an AppKit toolchain. Confirm on Mac that a cold launch
+    // shows the window exactly once (not two windows, no flicker) — see docs/app-store-submission-guide.md Cổng 1.
+    private func showMainWindow() {
+        let mainWindow = NSApp.windows.first { window in
+            !(window is NSPanel) && window.canBecomeMain
+        }
+        guard let mainWindow else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        mainWindow.makeKeyAndOrderFront(nil)
+    }
+
+    /// Now that Volar has a Dock icon (LSUIElement removed 2026-07-26), clicking that icon while no
+    /// window is open must bring the window back — otherwise the click appears to do nothing and the
+    /// app reads as broken. AppKit only asks this delegate; without implementing it, a SwiftUI
+    /// `Window` scene the user closed with ⌘W stays closed forever and the menu bar is the only way
+    /// back in.
+    ///
+    /// Returning `true` lets AppKit perform its own default reopen handling (unminiaturize/restore)
+    /// as well; `showMainWindow()` covers the case where the window exists but is merely hidden
+    /// behind other apps.
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        if !hasVisibleWindows {
+            showMainWindow()
+        }
+        return true
     }
 
     /// Drives `CapturePanelController` purely off `appState.captureState`, without touching

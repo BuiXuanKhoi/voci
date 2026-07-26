@@ -287,7 +287,7 @@ private struct CustomImageLayer: View {
                     Text("Choose an image in Settings → Appearance")
                         .font(.system(size: 12, design: .monospaced))
                         .tracking(0.48)
-                        .foregroundStyle(Color.white.opacity(0.28))
+                        .foregroundStyle(VolarColor.veil(0.28))
                 }
             }
         }

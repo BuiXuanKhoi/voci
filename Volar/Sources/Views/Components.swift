@@ -28,11 +28,11 @@ struct KeyBadge: View {
             .foregroundStyle(accent ? accentColors.solid : VolarColor.textSec)
             .padding(.horizontal, 5)
             .frame(minWidth: 18, minHeight: 18)
-            .background(accent ? accentColors.surface : Color.white.opacity(0.08))
+            .background(accent ? accentColors.surface : VolarColor.veil(0.08))
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(accent ? accentColors.solid.opacity(0.33) : Color.white.opacity(0.10), lineWidth: 0.5)
+                    .stroke(accent ? accentColors.solid.opacity(0.33) : VolarColor.veil(0.10), lineWidth: 0.5)
             )
     }
 }
@@ -52,7 +52,7 @@ struct PriorityBadge: View {
         case .medium:
             return (VolarColor.med, VolarColor.med.opacity(0.14), VolarColor.med, "Medium")
         case .low:
-            return (VolarColor.low, Color.white.opacity(0.05), VolarColor.textSec, "Low")
+            return (VolarColor.low, VolarColor.veil(0.05), VolarColor.textSec, "Low")
         }
     }
 
@@ -157,7 +157,7 @@ struct ToolButton: View {
     private var background: Color {
         if accent { return isHovering ? accentColors.hover : accentColors.solid }
         if tint { return accentColors.surface }
-        return isHovering ? Color.white.opacity(0.08) : .clear
+        return isHovering ? VolarColor.veil(0.08) : .clear
     }
 
     var body: some View {
