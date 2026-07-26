@@ -349,7 +349,7 @@ public sealed partial class SettingsView : UserControl
         {
             stack.Children.Add(BuildRow(
                 "Groq status",
-                "Add a Groq token (env GROQ_API_KEY / GROQ_PROXY_TOKEN, or a saved setting) to enable cloud transcription. Until then Volar uses the on-device engine.",
+                "Groq cloud transcription is a Pro feature — sign in and upgrade in the Account tab to enable it. Until then Volar uses the on-device engine.",
                 BuildStatusText("Not configured — using on-device")));
         }
 
@@ -362,7 +362,7 @@ public sealed partial class SettingsView : UserControl
         {
             stack.Children.Add(BuildRow(
                 "Cloud parsing status",
-                "Add a parse-proxy base URL + token to enable cloud parsing. Until then Volar quietly uses on-device parsing.",
+                "Sign in (Account tab) to enable cloud parsing — every signed-in account gets a daily quota, free or Pro. Until you sign in, Volar quietly uses on-device parsing.",
                 BuildStatusText("Not configured — using on-device")));
         }
 
