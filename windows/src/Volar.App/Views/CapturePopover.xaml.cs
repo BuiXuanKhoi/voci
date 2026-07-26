@@ -501,17 +501,34 @@ public sealed partial class CapturePopover : UserControl
 
         var titleRow = new Grid();
         titleRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-        var titleText = new TextBlock
+        // Windows-only addition (not a Swift port — PopoverView.swift renders this read-only): the
+        // parsed title is editable before Save (anh Khôi's bug report #2). A TextBox standing in for
+        // the old TextBlock, chrome-suppressed via SuppressStockTextBoxChrome so it is visually
+        // indistinguishable from the read-only label it replaces — same "override the per-state
+        // theme resources on this one control instance" trick SuppressStockButtonChrome already uses
+        // for plain buttons elsewhere in this wave (OnboardingView.xaml.cs/SettingsView.xaml.cs/
+        // Segmented.xaml.cs). TextChanged pushes every keystroke into
+        // CapturePopoverViewModel.UpdateDraftTitle -> CaptureFlowService.UpdateDraftTitle, which
+        // deliberately does NOT raise CaptureChanged (see that method's own doc comment) — this
+        // file's own header already documents Render() as a full clear-and-rebuild on every VM
+        // PropertyChanged, which is fine for discrete chip taps but would steal focus/caret out of
+        // this exact TextBox on every single keystroke if title edits routed through the same
+        // notification path.
+        var titleBox = new TextBox
         {
-            Text = draft.Task.Title,
+            Text = draft.EffectiveTitle,
             FontSize = 13.5,
             FontWeight = FontWeights.Medium,
             TextWrapping = TextWrapping.Wrap,
-            MaxLines = 3,
+            AcceptsReturn = false,
+            Padding = new Thickness(0),
+            MinWidth = 0,
             Foreground = isPrimary ? (Brush)resources["VolarNowAccentSoftBrush"] : (Brush)resources["VolarTextPriBrush"],
         };
-        Grid.SetColumn(titleText, 0);
-        titleRow.Children.Add(titleText);
+        SuppressStockTextBoxChrome(titleBox);
+        titleBox.TextChanged += (_, _) => vm.UpdateDraftTitle(draft.Id, titleBox.Text);
+        Grid.SetColumn(titleBox, 0);
+        titleRow.Children.Add(titleBox);
 
         if (showRemove)
         {
@@ -538,6 +555,29 @@ public sealed partial class CapturePopover : UserControl
         }
 
         return root;
+    }
+
+    /// <summary>Same per-instance theme-resource-override trick as this codebase's existing
+    /// SuppressStockButtonChrome (OnboardingView.xaml.cs/SettingsView.xaml.cs/Segmented.xaml.cs),
+    /// applied to the stock TextBox control template's own named brushes instead of Button's —
+    /// makes <paramref name="textBox"/> render with no fill and no border in every visual state
+    /// (Normal/PointerOver/Focused/Disabled), including the colored focus-underline the stock
+    /// template draws via TextControlBorderBrushFocused, so the editable title TextBox is visually
+    /// identical to the read-only TextBlock it replaces.</summary>
+    private static void SuppressStockTextBoxChrome(TextBox textBox)
+    {
+        var transparent = new SolidColorBrush(Colors.Transparent);
+        textBox.Background = transparent;
+        textBox.BorderThickness = new Thickness(0);
+        textBox.Resources["TextControlBackground"] = transparent;
+        textBox.Resources["TextControlBackgroundPointerOver"] = transparent;
+        textBox.Resources["TextControlBackgroundFocused"] = transparent;
+        textBox.Resources["TextControlBackgroundDisabled"] = transparent;
+        textBox.Resources["TextControlBorderBrush"] = transparent;
+        textBox.Resources["TextControlBorderBrushPointerOver"] = transparent;
+        textBox.Resources["TextControlBorderBrushFocused"] = transparent;
+        textBox.Resources["TextControlBorderBrushDisabled"] = transparent;
+        textBox.UseSystemFocusVisuals = false;
     }
 
     private static Button BuildIconButton(VolarIconName icon, double size, Brush color) => new()

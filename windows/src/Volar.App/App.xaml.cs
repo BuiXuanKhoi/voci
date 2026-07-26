@@ -191,7 +191,7 @@ public partial class App : Application
         {
             // HotkeyManager.OnToggle fires on a thread-pool thread (see that type's own doc
             // comment) — marshal back to the UI thread before touching any service state.
-            _mainWindow?.DispatcherQueue.TryEnqueue(() => _ = SafeToggleCaptureAsync(captureFlow));
+            _mainWindow?.DispatcherQueue.TryEnqueue(() => _ = SafeHandleHotkeyAsync(captureFlow));
         };
         _hotkey.TryStart();
     }
@@ -204,7 +204,7 @@ public partial class App : Application
             onNewTask: () => _mainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 _mainWindow!.ShowAndActivate();
-                _ = SafeToggleCaptureAsync(captureFlow);
+                _ = SafeHandleHotkeyAsync(captureFlow);
             }),
             onSettings: () => _mainWindow?.DispatcherQueue.TryEnqueue(() => _mainWindow!.ShowSettings()),
             onPreviewReminder: () => _mainWindow?.DispatcherQueue.TryEnqueue(() => _mainWindow!.ShowReminderPreview()),
@@ -288,15 +288,21 @@ public partial class App : Application
         }
     }
 
-    private static async Task SafeToggleCaptureAsync(CaptureFlowService captureFlow)
+    /// <summary>Renamed from SafeToggleCaptureAsync: both the hotkey and the tray's "New task" item
+    /// now route through <see cref="CaptureFlowService.HandleHotkeyAsync"/> (the per-state dispatch
+    /// that fixed anh Khôi's "hotkey during Parsed starts a new capture instead of saving" bug)
+    /// rather than the plain <see cref="CaptureFlowService.ToggleCaptureAsync"/> two-branch toggle —
+    /// that method itself is unchanged and still used elsewhere (kept as a public API/existing test
+    /// surface).</summary>
+    private static async Task SafeHandleHotkeyAsync(CaptureFlowService captureFlow)
     {
         try
         {
-            await captureFlow.ToggleCaptureAsync().ConfigureAwait(true);
+            await captureFlow.HandleHotkeyAsync().ConfigureAwait(true);
         }
         catch (Exception ex)
         {
-            Debug.WriteLine($"[Volar.App.App] ToggleCaptureAsync failed: {ex.GetType().Name}");
+            Debug.WriteLine($"[Volar.App.App] HandleHotkeyAsync failed: {ex.GetType().Name}");
         }
     }
 

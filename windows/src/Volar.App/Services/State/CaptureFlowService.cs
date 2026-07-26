@@ -121,6 +121,18 @@ public sealed class ConfirmDraft
     /// re-surfaces within this confirm session.</summary>
     public bool ConflictDismissed { get; set; }
 
+    /// <summary>Windows-only addition (not a Swift port — PopoverView.swift renders the parsed title
+    /// read-only): the confirm card's title field is editable before save. <see langword="null"/>
+    /// until the user actually types something; set via <see cref="CaptureFlowService.UpdateDraftTitle"/>,
+    /// never assigned directly by the View.</summary>
+    public string? EditedTitle { get; set; }
+
+    /// <summary>What actually gets saved (<see cref="CaptureFlowService.Materialize"/> reads this,
+    /// never <see cref="Task"/>'s own <c>Title</c> directly). A blank/whitespace-only edit silently
+    /// falls back to the originally-parsed title rather than saving an empty task title or blocking
+    /// Save — matches this feature's frozen design ("KHÔNG disable nút Save, KHÔNG báo lỗi").</summary>
+    public string EffectiveTitle => string.IsNullOrWhiteSpace(EditedTitle) ? Task.Title : EditedTitle.Trim();
+
     public ConfirmDraft(ParsedTask task)
     {
         Task = task;
@@ -331,6 +343,50 @@ public sealed partial class CaptureFlowService
     /// ("wires the hotkey to `CaptureFlowService.ToggleCaptureAsync()`") — C5 depends on this exact
     /// name.</summary>
     public Task ToggleCaptureAsync() => State == CaptureState.Recording ? StopCaptureAsync() : StartCaptureAsync();
+
+    /// <summary>
+    /// Windows-only addition (not a Swift port — macOS's hotkey is press-and-hold, this port's is a
+    /// press-to-toggle keystroke, so it needs its own per-state dispatch instead of Swift's plain
+    /// press/release pair). The global hotkey (and the tray's "New task" item, which shares this
+    /// exact table) must act like "the one obvious action for whatever the capture card is currently
+    /// showing" rather than <see cref="ToggleCaptureAsync"/>'s blunt Recording/else split — that
+    /// split is what let a hotkey press during <see cref="CaptureState.Parsed"/> start a brand-new
+    /// capture instead of saving the one already confirmed on screen (the bug this method fixes).
+    /// <list type="bullet">
+    /// <item><see cref="CaptureState.Recording"/> -&gt; <see cref="StopCaptureAsync"/> (unchanged
+    /// from <see cref="ToggleCaptureAsync"/>).</item>
+    /// <item><see cref="CaptureState.Parsed"/> -&gt; <see cref="ConfirmSaveAsync"/> — the hotkey now
+    /// means the same thing Enter already means on the confirm card.</item>
+    /// <item><see cref="CaptureState.Parsing"/>/<see cref="CaptureState.Saving"/> -&gt; no-op — a
+    /// background operation is already in flight; a second press must not spawn a competing
+    /// capture out from under it.</item>
+    /// <item>Everything else (<see cref="CaptureState.Idle"/>/<see cref="CaptureState.Done"/>/
+    /// <see cref="CaptureState.Error"/>) -&gt; <see cref="StartCaptureAsync"/>, same as
+    /// <see cref="ToggleCaptureAsync"/>'s "else" branch.</item>
+    /// </list>
+    /// Guarded FIRST, before the state switch: while a voice-done/no-match/cloud-consent card is
+    /// showing (all three render while <see cref="State"/> reads <see cref="CaptureState.Parsed"/>
+    /// or <see cref="CaptureState.Error"/> — see <see cref="PresentVoiceDoneConfirm"/>/
+    /// <see cref="PresentDelegationConfirm"/>/<see cref="ProceedToCaptureAsync"/>), the hotkey is a
+    /// no-op. Those cards are each a yes/no question the user must answer explicitly — mirrors
+    /// <see cref="CapturePopoverViewModel.HandleEscape"/>/<see cref="CapturePopoverViewModel.HandlePrimaryEnter"/>'s
+    /// own discipline of never letting a keyboard shortcut silently decide FOR the user while one of
+    /// these is on screen.
+    /// </summary>
+    public Task HandleHotkeyAsync()
+    {
+        if (VoiceDoneConfirmState is not null || VoiceDoneNoMatchTranscript is not null || PendingCloudConsent)
+        {
+            return Task.CompletedTask;
+        }
+        return State switch
+        {
+            CaptureState.Recording => StopCaptureAsync(),
+            CaptureState.Parsed => ConfirmSaveAsync(),
+            CaptureState.Parsing or CaptureState.Saving => Task.CompletedTask,
+            _ => StartCaptureAsync(),
+        };
+    }
 
     /// <summary>Port of `startCapture()` (682-731), minus every Apple-only branch (server-fallback
     /// wiring, per-engine locale). Sets `.Recording` and picks/records the engine SYNCHRONOUSLY
@@ -1056,6 +1112,40 @@ public sealed partial class CaptureFlowService
         RaiseChanged();
     }
 
+    /// <summary>Windows-only addition (not a Swift port — see <see cref="ConfirmDraft.EditedTitle"/>'s
+    /// own doc comment): the confirm card's title <c>TextBox</c> calls this on every keystroke.
+    /// Written through <see cref="ConfirmDraft.EditedTitle"/> rather than <see cref="ParsedTask.Title"/>
+    /// itself, matching the file header's "never mutated in place" contract for the router-parsed
+    /// <see cref="ParsedTask"/> layered underneath every draft.
+    /// <para>
+    /// DELIBERATELY does NOT call <see cref="RaiseChanged"/>, unlike every other chip mutator in this
+    /// section (self-decided deviation from the DismissAttribute template this otherwise mirrors —
+    /// flagged here rather than silently applied). <see cref="Views.CapturePopover"/>'s own Render()
+    /// clears and rebuilds its ENTIRE child tree (including constructing a brand-new title
+    /// <c>TextBox</c> instance) on every <see cref="CaptureChanged"/>/PropertyChanged notification —
+    /// documented in that file's own header as acceptable because the popover "only re-renders on
+    /// discrete user-driven state transitions (never per-frame, never per-keystroke)". Raising
+    /// <see cref="CaptureChanged"/> here would violate exactly that assumption: a full-tree rebuild on
+    /// every keystroke would tear down and recreate the very <c>TextBox</c> the user is typing into,
+    /// stealing focus and caret position after each character and making the field practically
+    /// unusable. The typed text still lands on <see cref="ConfirmDraft.EditedTitle"/> immediately
+    /// (the <c>TextBox</c> owns its own on-screen text regardless), so <see cref="ConfirmSaveAsync"/>
+    /// / <see cref="Materialize"/> and any render triggered by a LATER, unrelated state change (chip
+    /// tap, Save, Cancel) both see the edit correctly — only the eagerly-recomputed summary label
+    /// (<see cref="Volar.App.ViewModels.CapturePopoverViewModel.TranscriptText"/>'s "+N more" line)
+    /// stays one keystroke stale until the next real re-render, an accepted tradeoff for keeping the
+    /// title field itself usable.
+    /// </para>
+    /// </summary>
+    public void UpdateDraftTitle(Guid draftId, string title)
+    {
+        if (FindDraft(draftId) is not ConfirmDraft draft)
+        {
+            return;
+        }
+        draft.EditedTitle = title;
+    }
+
     /// <summary>Port of `acceptUncertainAttribute(_:forDraft:)` (1263-1267).</summary>
     public void AcceptUncertainAttribute(ChipKind kind, Guid draftId)
     {
@@ -1321,7 +1411,7 @@ public sealed partial class CaptureFlowService
 
         return new TaskItem(
             id: Guid.NewGuid(),
-            title: task.Title,
+            title: draft.EffectiveTitle,
             priority: UiPriority(priorityInt),
             when: When.Now,
             createdAt: now,

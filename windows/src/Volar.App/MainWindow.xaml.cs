@@ -125,7 +125,12 @@ public sealed partial class MainWindow : Window
 
     private void ComposeTodayAndSidebar(Microsoft.UI.Dispatching.DispatcherQueue dispatcherQueue, ITimeProvider clock)
     {
-        _todayVm = new TodayViewModel(_taskList, _focusSession, _captureFlow, _delegation, _theme, clock, dispatcherQueue);
+        // TimeZoneInfo.Local passed explicitly even though it is also the parameter's default: every
+        // other date-aware service is wired with it by name in CompositionRoot (ReminderScheduler,
+        // TaskListService, HeuristicIntentParser, CaptureFlowService, TriageAndSweepService), and
+        // Upcoming's "after today" boundary is a local calendar day like all of those. Leaving it to
+        // the default reads as "this screen has no timezone opinion", which is the opposite of true.
+        _todayVm = new TodayViewModel(_taskList, _focusSession, _captureFlow, _delegation, _theme, clock, dispatcherQueue, TimeZoneInfo.Local);
         TodayHost.ViewModel = _todayVm;
 
         // Seams TodayView.xaml.cs's own header names explicitly: "the ONE seam Stage C needs to wire

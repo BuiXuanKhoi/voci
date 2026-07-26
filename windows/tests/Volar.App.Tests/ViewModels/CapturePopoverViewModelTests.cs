@@ -167,6 +167,53 @@ public sealed class CapturePopoverViewModelTests
     }
 
     // ============================================================================================
+    // MARK: Confirm-card title editing (anh Khôi's bug report #2: the parsed title must be
+    // editable before Save) — CapturePopover.xaml.cs's title TextBox calls UpdateDraftTitle directly
+    // (bypassing PropertyChanged/Refresh() by design, see CaptureFlowService.UpdateDraftTitle's own
+    // doc comment), so TranscriptText is asserted via a direct read rather than a PropertyChanged
+    // subscription.
+    // ============================================================================================
+
+    [Fact]
+    public async Task UpdateDraftTitle_ChangesTranscriptTextToTheEditedTitle()
+    {
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Buy milk", "buy milk") } };
+        var fixture = await RecordAndParseAsync(parser, "buy milk");
+
+        var draft = fixture.ViewModel.ConfirmDrafts[0];
+        fixture.ViewModel.UpdateDraftTitle(draft.Id, "Buy oat milk");
+
+        Assert.Equal("Buy oat milk", fixture.ViewModel.TranscriptText);
+    }
+
+    [Fact]
+    public async Task UpdateDraftTitle_BlankEdit_TranscriptTextFallsBackToTheOriginalTitle()
+    {
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Buy milk", "buy milk") } };
+        var fixture = await RecordAndParseAsync(parser, "buy milk");
+
+        var draft = fixture.ViewModel.ConfirmDrafts[0];
+        fixture.ViewModel.UpdateDraftTitle(draft.Id, "   ");
+
+        Assert.Equal("Buy milk", fixture.ViewModel.TranscriptText);
+    }
+
+    [Fact]
+    public async Task UpdateDraftTitle_ThenSave_SavedTaskCarriesTheEditedTitle()
+    {
+        var taskList = new FakeTaskListService();
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Buy milk", "buy milk") } };
+        var fixture = await RecordAndParseAsync(parser, "buy milk", taskList);
+
+        var draft = fixture.ViewModel.ConfirmDrafts[0];
+        fixture.ViewModel.UpdateDraftTitle(draft.Id, "Buy oat milk");
+
+        await fixture.ViewModel.ConfirmSaveAsync();
+        await WaitUntilAsync(() => taskList.AddedTasks.Count == 1);
+        Assert.Equal("Buy oat milk", taskList.AddedTasks[0].Title);
+    }
+
+    // ============================================================================================
     // MARK: Chip / condition / conflict command wiring (end-to-end through ConfirmSaveAsync's
     // materialization, so these prove the VM's methods reach the SAME resolution logic the confirm
     // card's Save button relies on — not just that a flag toggled)

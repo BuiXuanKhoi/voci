@@ -220,7 +220,7 @@ public sealed class CapturePopoverViewModel : INotifyPropertyChanged, IDisposabl
             }
             var first = ConfirmDrafts[0];
             var extra = ConfirmDrafts.Count - 1;
-            return extra > 0 ? $"{first.Task.Title}  +{extra} more" : first.Task.Title;
+            return extra > 0 ? $"{first.EffectiveTitle}  +{extra} more" : first.EffectiveTitle;
         }
     }
 
@@ -263,6 +263,15 @@ public sealed class CapturePopoverViewModel : INotifyPropertyChanged, IDisposabl
     {
         _captureFlow.DismissAttribute(kind, draftId);
         Refresh();
+    }
+
+    /// <summary>Windows-only addition — passthrough for the confirm card's now-editable title
+    /// <c>TextBox</c>. Deliberately does NOT call <see cref="Refresh"/> after the write — see
+    /// <see cref="Services.State.CaptureFlowService.UpdateDraftTitle"/>'s own doc comment for why a
+    /// per-keystroke PropertyChanged would break the very TextBox this call is servicing.</summary>
+    public void UpdateDraftTitle(Guid draftId, string title)
+    {
+        _captureFlow.UpdateDraftTitle(draftId, title);
     }
 
     public void AcceptUncertainAttribute(ChipKind kind, Guid draftId)

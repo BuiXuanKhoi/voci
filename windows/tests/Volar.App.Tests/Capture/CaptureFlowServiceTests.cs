@@ -3,6 +3,7 @@
 // clear-external/delegate/no-match), delegation-intent classification, confirm-card chip
 // interactions, ConfirmSaveAsync (both no-repository and real-repository paths), and the
 // cloud-parse consent gate.
+using Volar.App.Services;
 using Volar.App.Services.State;
 using Volar.App.Tests.State;
 using Volar.Core;
@@ -68,6 +69,283 @@ public sealed class CaptureFlowServiceTests
         // CaptureFlowService directly instead of going through this helper).
         service.SetParseEngine(Volar.Parsing.ParseEnginePreference.OnDevice);
         return new Fixture(service, resolvedTaskList, resolvedParser, resolvedEngine);
+    }
+
+    /// <summary>Controllable <see cref="Volar.Parsing.IIntentParser"/> that never completes
+    /// <see cref="ParseAsync"/> until <see cref="Release"/> is called — the ONLY way (given every
+    /// other fake in this file resolves its Tasks synchronously) to reliably freeze
+    /// <see cref="CaptureFlowService"/> in <see cref="CaptureState.Parsing"/> long enough for a test
+    /// to call <see cref="CaptureFlowService.HandleHotkeyAsync"/> against it.</summary>
+    private sealed class SlowIntentParser : Volar.Parsing.IIntentParser
+    {
+        private readonly TaskCompletionSource<IReadOnlyList<ParsedTask>> _gate = new();
+
+        public Task<IReadOnlyList<ParsedTask>> ParseAsync(
+            string transcript, DateTimeOffset now, IReadOnlyList<string> openTaskTitles, CancellationToken cancellationToken = default) =>
+            _gate.Task;
+
+        public Task<IReadOnlyList<string>> BreakdownAsync(string title, string? notes, CancellationToken cancellationToken = default) =>
+            Task.FromResult<IReadOnlyList<string>>(Array.Empty<string>());
+
+        public void Release(IReadOnlyList<ParsedTask> result) => _gate.TrySetResult(result);
+    }
+
+    /// <summary>Controllable <see cref="ITaskListService"/> whose <see cref="AddAsync"/> never
+    /// completes until <see cref="ReleaseAdd"/> is called — freezes <see cref="CaptureFlowService"/>
+    /// in <see cref="CaptureState.Saving"/> (the no-repository <see cref="CaptureFlowService.ConfirmSaveAsync"/>
+    /// path awaits exactly this call per item) long enough to exercise
+    /// <see cref="CaptureFlowService.HandleHotkeyAsync"/>'s Saving no-op branch. Every other member
+    /// is the same trivial passthrough <see cref="FakeTaskListService"/> already uses.</summary>
+    private sealed class SlowAddTaskListService : ITaskListService
+    {
+        private readonly TaskCompletionSource _addGate = new();
+        public List<TaskItem> BackingTasks { get; } = new();
+        public IReadOnlyList<TaskItem> Tasks => BackingTasks;
+        public IReadOnlyList<TaskItem> NowTasks => BackingTasks;
+        public IReadOnlyList<TaskItem> LaterTasks => Array.Empty<TaskItem>();
+        public IReadOnlyList<TaskItem> DoneTasks => Array.Empty<TaskItem>();
+        public IReadOnlyList<TaskItem> OpenTasks => BackingTasks;
+        public TaskItem? FrogTask => null;
+        public TaskItem? ActiveTask => null;
+        public event Action? TasksChanged;
+        public Task RefreshAsync() { TasksChanged?.Invoke(); return Task.CompletedTask; }
+        public async Task AddAsync(TaskItem task)
+        {
+            await _addGate.Task.ConfigureAwait(false);
+            BackingTasks.Insert(0, task);
+        }
+        public Task ToggleDoneAsync(Guid id) => Task.CompletedTask;
+        public Task DeleteAsync(Guid id) => Task.CompletedTask;
+        public Task SetFrogAsync(Guid id) => Task.CompletedTask;
+        public void ReleaseAdd() => _addGate.TrySetResult();
+    }
+
+    // ============================================================================================
+    // MARK: HandleHotkeyAsync — per-state dispatch (anh Khôi's bug report #1: the hotkey must act
+    // like Enter/Save while a confirm card is showing, not blindly start a new capture)
+    // ============================================================================================
+
+    [Fact]
+    public async Task HandleHotkey_WhenIdle_StartsCapture()
+    {
+        var (service, _, _, engine) = CreateService();
+        Assert.Equal(CaptureState.Idle, service.State);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.Equal(CaptureState.Recording, service.State);
+        Assert.Equal(1, engine.StartCallCount);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhenRecording_StopsCapture()
+    {
+        var (service, _, _, engine) = CreateService();
+        await service.StartCaptureAsync();
+        Assert.Equal(CaptureState.Recording, service.State);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.Equal(CaptureState.Parsing, service.State);
+        Assert.Equal(1, engine.StopCallCount);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhenParsing_IsANoOp()
+    {
+        var slowParser = new SlowIntentParser();
+        var provider = new FakeSpeechEngineProvider();
+        var engine = (FakeSpeechEngine)provider.SelectedEngine;
+        var service = new CaptureFlowService(
+            new FakeTaskListService(), new RecordingEligibilityService(), slowParser, provider,
+            new FixedTimeProvider(Now), new InMemorySettingsStore(), timeZone: TimeZoneInfo.Utc);
+        service.SetParseEngine(Volar.Parsing.ParseEnginePreference.OnDevice);
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("task");
+        await WaitUntilAsync(() => service.State == CaptureState.Parsing);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.Equal(CaptureState.Parsing, service.State);
+        Assert.Equal(1, engine.StartCallCount); // no competing capture spawned
+
+        // Let the frozen parse resolve so the fire-and-forget continuation doesn't outlive the test.
+        slowParser.Release(Array.Empty<ParsedTask>());
+        await WaitUntilAsync(() => service.State != CaptureState.Parsing);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhenParsed_ConfirmsSave()
+    {
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Buy milk", "buy milk") } };
+        var (service, taskList, _, engine) = CreateService(parser: parser);
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("buy milk");
+        await WaitUntilAsync(() => service.State == CaptureState.Parsed);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.Equal(CaptureState.Done, service.State);
+        Assert.Single(taskList.AddedTasks);
+        Assert.Equal("Buy milk", taskList.AddedTasks[0].Title);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhenSaving_IsANoOp()
+    {
+        var slowTaskList = new SlowAddTaskListService();
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Task", "task") } };
+        var provider = new FakeSpeechEngineProvider();
+        var engine = (FakeSpeechEngine)provider.SelectedEngine;
+        var service = new CaptureFlowService(
+            slowTaskList, new RecordingEligibilityService(), parser, provider,
+            new FixedTimeProvider(Now), new InMemorySettingsStore(), timeZone: TimeZoneInfo.Utc);
+        service.SetParseEngine(Volar.Parsing.ParseEnginePreference.OnDevice);
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("task");
+        await WaitUntilAsync(() => service.State == CaptureState.Parsed);
+
+        var saveTask = service.ConfirmSaveAsync();
+        await WaitUntilAsync(() => service.State == CaptureState.Saving);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.Equal(CaptureState.Saving, service.State);
+        Assert.Empty(slowTaskList.BackingTasks); // AddAsync still gated -- nothing landed yet
+
+        slowTaskList.ReleaseAdd();
+        await saveTask;
+        Assert.Equal(CaptureState.Done, service.State);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhenPlainError_StartsNewCapture()
+    {
+        var engine = new FakeSpeechEngine { AuthorizationResult = false };
+        var (service, _, _, _) = CreateService(engine: engine);
+
+        await service.StartCaptureAsync();
+        Assert.Equal(CaptureState.Error, service.State);
+        Assert.False(service.PendingCloudConsent);
+
+        engine.AuthorizationResult = true;
+        await service.HandleHotkeyAsync();
+
+        Assert.Equal(CaptureState.Recording, service.State);
+        Assert.Equal(1, engine.StartCallCount);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhileVoiceDoneConfirmShowing_IsANoOp()
+    {
+        var openTaskId = Guid.NewGuid();
+        var taskList = new FakeTaskListService();
+        taskList.BackingTasks.Add(CaptureTestData.OpenTask("Buy milk", openTaskId));
+        var (service, _, _, engine) = CreateService(taskList: taskList);
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("buy milk xong");
+        await WaitUntilAsync(() => service.VoiceDoneConfirmState is not null);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.NotNull(service.VoiceDoneConfirmState);
+        Assert.Equal(CaptureState.Parsed, service.State);
+        Assert.Equal(1, engine.StartCallCount); // guarded -- no new capture spawned
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhileVoiceDoneNoMatchShowing_IsANoOp()
+    {
+        var (service, _, _, engine) = CreateService();
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("xong");
+        await WaitUntilAsync(() => service.VoiceDoneNoMatchTranscript is not null);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.NotNull(service.VoiceDoneNoMatchTranscript);
+        Assert.Equal(1, engine.StartCallCount);
+    }
+
+    [Fact]
+    public async Task HandleHotkey_WhilePendingCloudConsent_IsANoOp()
+    {
+        var settings = new InMemorySettingsStore();
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Task", "some task") } };
+        var taskList = new FakeTaskListService();
+        var provider = new FakeSpeechEngineProvider();
+        var engine = (FakeSpeechEngine)provider.SelectedEngine;
+        var service = new CaptureFlowService(
+            taskList, new RecordingEligibilityService(), parser, provider,
+            new FixedTimeProvider(Now), settings, timeZone: TimeZoneInfo.Utc);
+        // Deliberately DO NOT call SetParseEngine -- exercises the "never asked" consent gate.
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("some task");
+        await WaitUntilAsync(() => service.PendingCloudConsent);
+
+        await service.HandleHotkeyAsync();
+
+        Assert.True(service.PendingCloudConsent);
+        Assert.Empty(parser.ParseCalls);
+        Assert.Equal(1, engine.StartCallCount);
+    }
+
+    // ============================================================================================
+    // MARK: Confirm-card title editing (anh Khôi's bug report #2: the parsed title must be
+    // editable before Save)
+    // ============================================================================================
+
+    [Fact]
+    public async Task UpdateDraftTitle_ThenSave_UsesTheEditedTitle()
+    {
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Buy milk", "buy milk") } };
+        var (service, taskList, _, engine) = CreateService(parser: parser);
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("buy milk");
+        await WaitUntilAsync(() => service.ConfirmDrafts.Count > 0);
+
+        var draftId = service.ConfirmDrafts[0].Id;
+        service.UpdateDraftTitle(draftId, "Buy oat milk");
+        Assert.Equal("Buy oat milk", service.ConfirmDrafts[0].EffectiveTitle);
+
+        await service.ConfirmSaveAsync();
+
+        Assert.Single(taskList.AddedTasks);
+        Assert.Equal("Buy oat milk", taskList.AddedTasks[0].Title);
+    }
+
+    [Fact]
+    public async Task UpdateDraftTitle_BlankOrWhitespace_FallsBackToTheOriginalTitle()
+    {
+        var parser = new FakeIntentParser { Result = new[] { CaptureTestData.SimpleTask("Buy milk", "buy milk") } };
+        var (service, taskList, _, engine) = CreateService(parser: parser);
+
+        await service.StartCaptureAsync();
+        await service.StopCaptureAsync();
+        engine.RaiseFinal("buy milk");
+        await WaitUntilAsync(() => service.ConfirmDrafts.Count > 0);
+
+        var draftId = service.ConfirmDrafts[0].Id;
+        service.UpdateDraftTitle(draftId, "   ");
+        Assert.Equal("Buy milk", service.ConfirmDrafts[0].EffectiveTitle);
+
+        await service.ConfirmSaveAsync();
+
+        Assert.Single(taskList.AddedTasks);
+        Assert.Equal("Buy milk", taskList.AddedTasks[0].Title);
     }
 
     // ============================================================================================
