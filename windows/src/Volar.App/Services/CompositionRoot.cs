@@ -177,15 +177,17 @@ public static class CompositionRoot
         var appLinkHandler = new AppLinkHandler(orchestratorTaskStoreAdapter, delegationTracker);
         var delegationOrchestratorService = new DelegationOrchestratorService(
             taskListService, eligibility, clock, delegationTracker, appLinkHandler, reminderScheduler);
-        // NOTE (flagged, not silently skipped): AppLinkHandler.OnCapture — the volar://capture?text=
-        // app-link hook into the capture pipeline — is left unwired. CaptureFlowService.cs (C3)
-        // exposes no PUBLIC entry point that accepts a bare transcript string outside its own
-        // mic-driven pipeline (ProceedToCaptureAsync is private, reachable only via the engine
-        // OnFinal callback or the voice-done no-match escape hatch); wiring OnCapture would require
-        // either editing C3's file (out of scope) or reaching into its private surface. Left for
-        // Wave 4 in the final report's leftovers list. AppLinkHandler.Handle degrades gracefully
-        // without it (logs "capture link received before the capture pipeline hook was wired —
-        // dropped", per that method's own doc comment) — never throws.
+        // RESOLVED in Wave 4, Stage C: AppLinkHandler.OnCapture — the volar://capture?text= app-link
+        // hook into the capture pipeline — was left unwired here (see git history for the original
+        // NOTE) because CaptureFlowService.cs (C3) exposed no PUBLIC entry point for a bare
+        // transcript string outside its own mic-driven pipeline. Wave 4 added exactly that seam
+        // (CaptureFlowService.HandleExternalCaptureAsync) and wires `delegationOrchestratorService
+        // .AppLinkHandler.OnCapture` to it from MainWindow.xaml.cs's WireAppLinkCapture() (Stage C
+        // owns MainWindow.xaml.cs, not this file, per the wave's file-ownership split) rather than
+        // here, since the capture service isn't constructed yet at this point in Build(). Until
+        // MainWindow.ComposeShell() runs, AppLinkHandler.Handle still degrades gracefully without a
+        // hook (logs "capture link received before the capture pipeline hook was wired — dropped",
+        // per that method's own doc comment) — never throws.
         var delegationHandoffAdapter = new DelegationHandoffAdapter(delegationOrchestratorService); // IDelegationHandoff
 
         // --- Volar.Parsing -------------------------------------------------------------------

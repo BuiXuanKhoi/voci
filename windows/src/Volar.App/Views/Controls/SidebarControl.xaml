@@ -183,7 +183,7 @@
                         Foreground="{StaticResource VolarTextPriBrush}" />
                 </StackPanel>
                 <TextBlock
-                    Text="Audio is parsed locally. Nothing leaves your Mac."
+                    Text="Audio is parsed locally. Nothing leaves your PC."
                     FontSize="11"
                     TextWrapping="Wrap"
                     Foreground="{StaticResource VolarTextSecBrush}" />

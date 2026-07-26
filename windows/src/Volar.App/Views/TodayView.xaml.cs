@@ -14,6 +14,7 @@
 // not TodayViewModel, so the VM stays a plain INPC class with no XAML/dispatcher type baked in beyond
 // the DispatcherQueue? seam UiDispatch already established.
 using System.ComponentModel;
+using Microsoft.UI;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -25,6 +26,10 @@ namespace Volar.App.Views;
 
 public sealed partial class TodayView : UserControl
 {
+    // Ambient-active MainColumn.Background swap target (see UpdateVisual) — lets the AmbientBackground
+    // layer MainWindow mounts behind this view show through instead of the opaque VolarBgBrush base.
+    private static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
+
     private TodayViewModel? _viewModel;
     private DispatcherQueueTimer? _focusTimer;
 
@@ -231,6 +236,18 @@ public sealed partial class TodayView : UserControl
     {
         var appResources = Application.Current.Resources;
         var vm = ViewModel;
+
+        // mainColumn.background(mainBackground) (TodayView.swift:144, 150-166): ambient active ->
+        // MainColumn itself must go transparent so the AmbientBackground layer MainWindow mounts
+        // behind this view can show through — MainColumnOverlay (below) already supplies the correct
+        // single dim layer (Color.black.opacity(0.30), swift:153) on top of it. Deliberately NOT
+        // MainColumnAmbientDimBrush here too: that brush is already applied to MainColumnOverlay just
+        // below, and stacking it on both layers would double the dim (~0.51 effective alpha instead
+        // of the intended 0.30). Non-ambient case unchanged: opaque VolarBgBrush base under the
+        // radial-gradient MainColumnDepthBrush overlay, matching swift's ZStack{VolarColor.bg; ...}.
+        MainColumn.Background = vm?.IsAmbientBackgroundActive == true
+            ? TransparentBrush
+            : (Brush)appResources["VolarBgBrush"];
 
         MainColumnOverlay.Background = vm?.IsAmbientBackgroundActive == true
             ? (Brush)Resources["MainColumnAmbientDimBrush"]

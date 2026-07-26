@@ -25,15 +25,12 @@
     xmlns:controls="using:Volar.App.Views.Controls"
     HorizontalAlignment="Left"
     VerticalAlignment="Top">
-    <UserControl.KeyboardAccelerators>
-        <!-- Popover-root-level dispatch (wave4-contract.md Stage B/B2 brief): do NOT port Swift's
-             invisible-button FIX-D hack (PopoverView.swift 134-145) — Escape/Enter route through
-             CapturePopoverViewModel.HandleEscape()/HandlePrimaryEnter(), which already encode the
-             exact per-state table PopoverView.swift's various `.keyboardShortcut(...)` attachments
-             describe (see that method's own doc comments for the full citation). -->
-        <KeyboardAccelerator Key="Escape" Invoked="OnEscapeAccelerator" />
-        <KeyboardAccelerator Key="Enter" Invoked="OnEnterAccelerator" />
-    </UserControl.KeyboardAccelerators>
+    <!-- No popover-local KeyboardAccelerators here: KeyboardAccelerators are window-scope in WinUI,
+         so a Popover-local Escape/Enter accelerator would double-fire alongside MainWindow.xaml.cs's
+         root-level OnEscapeAccelerator/OnEnterAccelerator (~line 358), which already dispatches to
+         CapturePopoverViewModel.HandleEscape()/HandlePrimaryEnter() while the capture scrim is
+         visible, with args.Handled = true. Keyboard dispatch for this popover is owned entirely by
+         MainWindow's root accelerators. -->
 
     <controls:GlassPanel x:Name="RootGlass" Level="Heavy" CornerRadius="18" Width="380">
         <Border Padding="14,14,14,12">

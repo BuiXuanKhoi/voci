@@ -129,22 +129,32 @@ public sealed class FocusSessionServiceTests
         // can't distinguish "the loop actually counted all the way down" from "someone called
         // EndFocus() immediately." This test instead first observes a genuine MID-countdown value
         // (proving real decrementing happened) before separately confirming the session ends on its
-        // own. Windows' default timer resolution (~15ms) would make a real `Task.Delay(1ms)` take
-        // several real seconds across 1500 ticks, so this injects `Task.Run` (thread-pool queuing,
-        // no OS timer involved) as a delay stand-in that still genuinely yields between iterations —
-        // unlike an already-completed `Task`, which would run the entire 1500-iteration loop
-        // synchronously inline and never give this test a chance to observe an intermediate tick.
+        // own.
+        //
+        // The delay stand-in is a manually-released gate rather than an instant `Task.Run(() => {})`.
+        // An instantly-completing delay races the poll below: on an idle machine the thread pool can
+        // spin through all 1500 ticks — including the final `EndFocus()`, which resets
+        // FocusSecondsLeft back to DefaultFocusSeconds — before the FIRST `Poll.WaitUntil` ever
+        // samples FocusSecondsLeft, so the mid-countdown value this test needs to observe is already
+        // gone (only reproduces the failure on a quiet machine; a loaded one incidentally paces the
+        // ticks slowly enough to hide it). The gate makes tick pacing deterministic instead: the tick
+        // loop blocks on `gate.WaitAsync` between iterations, so releasing exactly one permit lets
+        // exactly one decrement happen and then re-blocks the loop — the decremented value cannot be
+        // overwritten by a later tick until this test releases more permits itself.
         var taskList = new FakeTaskListService();
-        var service = new FocusSessionService(
-            taskList, new VoicePlayback(), delay: (_, ct) => Task.Run(() => { }, ct));
+        var gate = new SemaphoreSlim(0);
+        Func<TimeSpan, CancellationToken, Task> delay = (_, ct) => gate.WaitAsync(ct);
+        var service = new FocusSessionService(taskList, new VoicePlayback(), delay: delay);
 
         service.StartFocus();
+        gate.Release(1); // let exactly one tick run, then the loop re-blocks on the gate.
 
         Poll.WaitUntil(
-            () => service.FocusSecondsLeft < FocusSessionService.DefaultFocusSeconds,
+            () => service.FocusSecondsLeft == FocusSessionService.DefaultFocusSeconds - 1,
             TimeSpan.FromSeconds(10));
-        Assert.True(service.FocusSecondsLeft < FocusSessionService.DefaultFocusSeconds);
+        Assert.Equal(FocusSessionService.DefaultFocusSeconds - 1, service.FocusSecondsLeft);
 
+        gate.Release(int.MaxValue / 2); // enough permits for every remaining tick to run to completion.
         Poll.WaitUntil(() => !service.FocusActive, TimeSpan.FromSeconds(10));
         Assert.False(service.FocusPaused);
     }

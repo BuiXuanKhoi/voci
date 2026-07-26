@@ -42,6 +42,7 @@ public partial class App : Application
     private TrayIconService? _tray;
     private HotkeyService? _hotkey;
     private DispatcherQueueTimer? _delegationTimer;
+    private DispatcherQueueTimer? _trayStateTimer;
 
     public App()
     {
@@ -79,6 +80,7 @@ public partial class App : Application
 
         WireHotkey();
         WireTray();
+        WireTrayStateUpdates();
 
         _mainWindow.ShowAndActivate();
 
@@ -204,8 +206,8 @@ public partial class App : Application
                 _mainWindow!.ShowAndActivate();
                 _ = SafeToggleCaptureAsync(captureFlow);
             }),
-            onSettings: () => _mainWindow?.DispatcherQueue.TryEnqueue(_mainWindow.ShowAndActivate),
-            onPreviewReminder: () => _mainWindow?.DispatcherQueue.TryEnqueue(_mainWindow.ShowAndActivate),
+            onSettings: () => _mainWindow?.DispatcherQueue.TryEnqueue(() => _mainWindow!.ShowSettings()),
+            onPreviewReminder: () => _mainWindow?.DispatcherQueue.TryEnqueue(() => _mainWindow!.ShowReminderPreview()),
             onQuit: () =>
             {
                 _hotkey?.Stop();
@@ -215,6 +217,75 @@ public partial class App : Application
             });
         _tray.SystemResumedOrUnlocked += OnSystemResumedOrUnlocked;
         _tray.Initialize();
+    }
+
+    /// <summary>Wave 4 Stage C, tasks 4/6: tray icon-state + tooltip wiring (frozen decision 4 —
+    /// "MenuBarLabel analog = tray icon state swap + dynamic tooltip"). <see cref="TrayIconService.UpdateState"/>
+    /// is deliberately passive (its own doc comment: "Stage C is expected to wire..."); this is that
+    /// wiring. Two triggers feed the SAME <see cref="UpdateTrayState"/>: <see cref="CaptureFlowService.CaptureChanged"/>
+    /// for immediate Idle/Listening icon swaps (infrequent, user-action-driven — no throttle needed),
+    /// and a 1s <see cref="DispatcherQueueTimer"/> for the continuously-changing focus countdown
+    /// tooltip (the timer's own 1s interval IS the "≤1/s" throttle the contract asks for — a second
+    /// explicit throttle on top would be redundant). Kept in App (not TodayView's own private focus
+    /// timer) per this task's digest: "keep it in App."</summary>
+    private void WireTrayStateUpdates()
+    {
+        var captureFlow = Services.GetRequiredService<CaptureFlowService>();
+        captureFlow.CaptureChanged += () => _mainWindow?.DispatcherQueue.TryEnqueue(UpdateTrayState);
+
+        var window = _mainWindow;
+        if (window is not null)
+        {
+            _trayStateTimer = window.DispatcherQueue.CreateTimer();
+            _trayStateTimer.Interval = TimeSpan.FromSeconds(1);
+            _trayStateTimer.IsRepeating = true;
+            _trayStateTimer.Tick += (_, _) => UpdateTrayState();
+            _trayStateTimer.Start();
+        }
+
+        UpdateTrayState(); // paint the correct initial state immediately, don't wait a full second.
+    }
+
+    /// <summary>Priority mirrors MenuBarLabel.swift's own 3-state switch: focus-lock beats
+    /// listening beats idle (a focus session and a capture cannot both be true at once in this app's
+    /// state machine, but if they somehow were, the focus countdown is the more actionable thing to
+    /// surface in a tooltip).</summary>
+    private void UpdateTrayState()
+    {
+        try
+        {
+            var focus = Services.GetRequiredService<FocusSessionService>();
+            var captureFlow = Services.GetRequiredService<CaptureFlowService>();
+
+            if (focus.FocusActive)
+            {
+                var taskList = Services.GetRequiredService<ITaskListService>();
+                var openTasks = taskList.OpenTasks;
+                var title = "Focus";
+                if (openTasks.Count > 0)
+                {
+                    var index = Math.Max(0, Math.Min(focus.FocusIndex, openTasks.Count - 1));
+                    title = openTasks[index].Title;
+                }
+                var secondsLeft = Math.Max(focus.FocusSecondsLeft, 0);
+                var clockText = string.Create(
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    $"{secondsLeft / 60}:{(secondsLeft % 60).ToString("D2", System.Globalization.CultureInfo.InvariantCulture)}");
+                _tray?.UpdateState(TrayState.Focus, $"{title} · {clockText} left");
+            }
+            else if (captureFlow.State == CaptureState.Recording)
+            {
+                _tray?.UpdateState(TrayState.Listening, "Volar — Listening…");
+            }
+            else
+            {
+                _tray?.UpdateState(TrayState.Idle, "Volar");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Volar.App.App] UpdateTrayState failed: {ex.GetType().Name}");
+        }
     }
 
     private static async Task SafeToggleCaptureAsync(CaptureFlowService captureFlow)
@@ -294,6 +365,10 @@ public partial class App : Application
             reminderSettings.OfferRescheduleForOverdueTasks(clock.Now);
 
             RunGateCadence(triageAndSweep, settings, clock);
+            // Item 7 (Wave 4 addition): none of the 3 Maybe-show gate methods above raise a change
+            // event of their own (each gate VM's own "GATE TIMING" doc comment flags this) — refresh
+            // the VMs now so a gate that just flipped true actually reaches the overlay.
+            _mainWindow?.RefreshGateViewModels();
 
             // Mirrors `startDelegationTimer()`: call once immediately, then arm the repeating timer.
             delegationOrchestrator.RefreshDelegationQueue(clock.Now);
@@ -327,6 +402,29 @@ public partial class App : Application
         if (localHour >= 18)
         {
             triageAndSweep.MaybeShowEveningSweep(now);
+        }
+    }
+
+    /// <summary>Called by <see cref="MainWindow.OnOnboardingFinished"/> the instant
+    /// <see cref="Volar.App.ViewModels.OnboardingViewModel.Complete"/> persists <c>hasOnboardedV1</c>
+    /// (mirrors Swift's own framing: the gate cadence is skipped pre-onboarding — <see cref="RunGateCadence"/>
+    /// early-returns on that same flag — so completing onboarding is the FIRST moment this session the
+    /// cadence can ever run). Re-runs the exact same cadence <see cref="RunStartupSequenceAsync"/> ran
+    /// at launch (now unblocked, since the flag it early-returns on was just set true) and refreshes
+    /// the gate VMs the same way.</summary>
+    internal void RunGateCadenceForOnboardingComplete()
+    {
+        try
+        {
+            var triageAndSweep = Services.GetRequiredService<TriageAndSweepService>();
+            var settings = Services.GetRequiredService<ISettingsStore>();
+            var clock = Services.GetRequiredService<ITimeProvider>();
+            RunGateCadence(triageAndSweep, settings, clock);
+            _mainWindow?.RefreshGateViewModels();
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Volar.App.App] RunGateCadenceForOnboardingComplete failed: {ex.GetType().Name}");
         }
     }
 

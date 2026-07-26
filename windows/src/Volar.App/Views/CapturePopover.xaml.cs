@@ -80,17 +80,12 @@ public sealed partial class CapturePopover : UserControl
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e) =>
         DispatcherQueue.TryEnqueue(Render);
 
-    private void OnEscapeAccelerator(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        _viewModel?.HandleEscape();
-    }
-
-    private void OnEnterAccelerator(Microsoft.UI.Xaml.Input.KeyboardAccelerator sender, Microsoft.UI.Xaml.Input.KeyboardAcceleratorInvokedEventArgs args)
-    {
-        args.Handled = true;
-        _viewModel?.HandlePrimaryEnter();
-    }
+    // No popover-local Escape/Enter KeyboardAccelerator handlers here: KeyboardAccelerators are
+    // window-scope in WinUI, so registering them on this UserControl too would double-fire alongside
+    // MainWindow.xaml.cs's root-level OnEscapeAccelerator/OnEnterAccelerator (~line 358), which
+    // already dispatches to CapturePopoverViewModel.HandleEscape()/HandlePrimaryEnter() while the
+    // capture scrim is visible, with args.Handled = true. Keyboard dispatch for this popover is owned
+    // entirely by MainWindow's root accelerators.
 
     /// <summary>One-shot entrance animation — port of `PopoverView.body`'s `.onAppear` (76-82):
     /// `.spring(response: 0.2, dampingFraction: 0.86)` scale 0.96-&gt;1 + fade. NOT a repeat-forever

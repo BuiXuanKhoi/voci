@@ -523,6 +523,75 @@ public sealed partial class CaptureFlowService
     }
 
     // ------------------------------------------------------------------------------------------
+    // MARK: External transcript entry (Wave 4, Stage C task 8) — volar://capture?text= app-link
+    // ------------------------------------------------------------------------------------------
+
+    /// <summary>
+    /// Public entry point for a transcript that arrived from OUTSIDE this class's own mic pipeline —
+    /// today, exactly one caller: <see cref="Volar.Orchestrator.AppLinkHandler.OnCapture"/>, wired by
+    /// Stage C's App.xaml.cs to route <c>volar://capture?text=...&amp;source=...</c> here (see
+    /// CompositionRoot.cs's own "NOTE (flagged, not silently skipped)" comment — this was the exact
+    /// gap it named: "CaptureFlowService.cs (C3) exposes no PUBLIC entry point that accepts a bare
+    /// transcript string outside its own mic-driven pipeline"). This method IS that entry point.
+    ///
+    /// STATE DISCIPLINE (mirrors FIX 1's invariant — see <see cref="StopCaptureAsync"/>'s own doc
+    /// comment for the full rationale this echoes): only callable from <see cref="CaptureState.Idle"/>
+    /// — a second/concurrent capture already in flight is left completely alone (no-op), the same
+    /// "never steal a capture the user is mid-way through" discipline every other entry point in this
+    /// class follows. There is no live microphone here (the text already arrived complete, e.g. from
+    /// Claude Code's Stop hook via the app link), so this collapses the mic path's
+    /// Recording-then-(FIX-1)-Parsing two-step into the ONE transition that actually matters to an
+    /// observer: it goes straight to <see cref="CaptureState.Parsing"/> (never <see cref="CaptureState.Recording"/>
+    /// — there is nothing to "listen" to) and then reuses the EXACT SAME finish pipeline a real
+    /// engine's <see cref="ISpeechEngine.OnFinal"/> callback reaches
+    /// (<see cref="FinishRecordingAsync"/> -&gt; delegation-intent / voice-done classification -&gt;
+    /// <see cref="ProceedToCaptureAsync"/> -&gt; <see cref="RunParseAsync"/>), so an externally-supplied
+    /// transcript gets the identical confirm-card/voice-done/delegation treatment a spoken one would —
+    /// it never bypasses the confirm card, matching app-links.md's own "never bypasses the confirm
+    /// card" contract for <c>volar://capture</c>.
+    /// </summary>
+    public async Task HandleExternalCaptureAsync(string transcript)
+    {
+        ArgumentNullException.ThrowIfNull(transcript);
+        if (State != CaptureState.Idle)
+        {
+            return;
+        }
+
+        _captureSession++;
+        var session = _captureSession;
+        Transcript = string.Empty;
+        _confirmDrafts.Clear();
+        VoiceDoneConfirmState = null;
+        VoiceDoneNoMatchTranscript = null;
+        CaptureErrorDetail = null;
+        PendingCloudConsent = false;
+        _pendingParseTranscript = null;
+        // FIX 1 parity: enter .Parsing unconditionally BEFORE the async finish tail runs — same
+        // ordering StopCaptureAsync enforces for the mic path (state flip before the thing that can
+        // take a while), just collapsed into one call since there is no engine.Stop() to await first.
+        State = CaptureState.Parsing;
+        RaiseChanged();
+
+        try
+        {
+            await FinishRecordingAsync(transcript).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Stale-session guard mirrors StartCaptureAsync's own catch block — only touch state if
+            // nothing else (a cancel, a fresh capture) has already superseded this session.
+            if (_captureSession == session && State == CaptureState.Parsing)
+            {
+                CaptureErrorDetail = "Couldn't process that.";
+                State = CaptureState.Error;
+                RaiseChanged();
+            }
+            Debug.WriteLine($"[Volar.App.Services.State.CaptureFlowService] HandleExternalCaptureAsync threw {ex.GetType().Name}.");
+        }
+    }
+
+    // ------------------------------------------------------------------------------------------
     // MARK: finishRecording -> delegation-intent / voice-done classification (887-1136, 970-1136)
     // ------------------------------------------------------------------------------------------
 

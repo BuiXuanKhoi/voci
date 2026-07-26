@@ -1,9 +1,55 @@
+<!--
+  MainWindow.xaml — Wave 4 Stage C: the real shell. Hosts the full layered overlay stack MainWindow
+  used to only stub (see App.xaml.cs's Stage 3/C5-era header comment and this task's contract,
+  specs/003-windows-port/wave4-contract.md, task 1). Z-order (back to front, mirrors VolarApp.swift's
+  own scene/sheet layering — see the MainWindow.xaml.cs "MARK: Shell composition" header for the full
+  per-layer citation):
+    1. AmbientBackground        — bottom, hit-test invisible.
+    2. TodayView                — the persistent window content.
+    3. Modal overlay layer      — TaskDetail / TaskBreakdown / Triage / Sweep / MorningFrog / Settings
+                                   / Onboarding. Each of TaskDetail/TaskBreakdown/Triage/Sweep/
+                                   MorningFrog is SELF-hosting (its own scrim + x:Bind Visibility off
+                                   its own ViewModel, per that view's own "HOSTING" doc comment) — this
+                                   file only needs to add it as one more sibling and assign .ViewModel
+                                   in code-behind, no extra scrim wiring here. Settings/Onboarding have
+                                   no such self-binding (SettingsView.xaml/OnboardingView.xaml's own
+                                   "HOSTING" comments say so) — MainWindow.xaml.cs toggles their
+                                   Visibility imperatively.
+    4. Capture scrim + popover  — CapturePopover.xaml owns no scrim of its own (unlike the 5 modals
+                                   above); this file supplies one (frozen decision 5 + this task's own
+                                   digest: "host it over a scrim Grid; scrim click -> CancelAsync").
+    5. FocusOverlay              — self-hosting full-bleed backdrop, Visibility driven imperatively by
+                                   FocusOverlay.xaml.cs's own Apply() (see that file's header).
+    6. NotificationBanner        — top-trailing, self-positioned (HorizontalAlignment="Right"
+                                   VerticalAlignment="Top" Margin="16" already declared on its own
+                                   root), Visibility driven by its own Apply().
+
+  Deviation from the wave4-contract.md's OLDER "STAGE C INSERTION POINT" comments inside TodayView.xaml
+  (B1's file): those comments describe mounting AmbientBackground/the capture scrim+popover/
+  FocusOverlay/NotificationBanner INSIDE TodayView's own RootGrid. Stage C's file-ownership list (this
+  task's own brief) does NOT include TodayView.xaml, so every one of those 4 overlays is instead
+  mounted here, one level up, layered OVER the whole TodayView UserControl instead of inside it —
+  visually equivalent for FocusOverlay/NotificationBanner/the capture popover (each is either a
+  full-bleed backdrop or self-positioned within the window bounds either way). AmbientBackground is
+  the one exception with a REAL visual gap: TodayView's own MainColumn Grid has a hardcoded opaque
+  `Background="{StaticResource VolarBgBrush}"` (TodayView.xaml, not editable by this agent), which
+  fully occludes anything painted behind the whole UserControl — so AmbientBackground, mounted here,
+  will not show through the main content column the way TodayView.swift's own ZStack layering lets it
+  on macOS. Flagged in this task's final report + backlog as a residual needing a TodayView.xaml
+  edit (out of this stage's file-ownership) to fix properly.
+
+  Keyboard accelerators (task 3): Escape/Enter declared on RootGrid so they work regardless of which
+  overlay (if any) currently holds focus — see MainWindow.xaml.cs's OnEscapeAccelerator/
+  OnEnterAccelerator for the exact per-state routing table.
+-->
 <Window
     x:Class="Volar.App.MainWindow"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    xmlns:views="using:Volar.App.Views"
+    xmlns:controls="using:Volar.App.Views.Controls"
     mc:Ignorable="d">
 
     <!-- Studio Dark: Mica system backdrop (window-level material closest to the Mac app's
@@ -14,100 +60,63 @@
         <MicaBackdrop Kind="Base" />
     </Window.SystemBackdrop>
 
-    <Grid Background="{StaticResource VolarBgBrush}">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="*" />
-            <RowDefinition Height="Auto" />
-        </Grid.RowDefinitions>
+    <Grid x:Name="RootGrid" Background="{StaticResource VolarBgBrush}">
+        <Grid.KeyboardAccelerators>
+            <KeyboardAccelerator Key="Escape" Invoked="OnEscapeAccelerator" />
+            <KeyboardAccelerator Key="Enter" Invoked="OnEnterAccelerator" />
+        </Grid.KeyboardAccelerators>
 
-        <StackPanel
-            Grid.Row="0"
-            HorizontalAlignment="Center"
-            VerticalAlignment="Center"
-            Spacing="20">
+        <!-- 1. AmbientBackground — bottom. Mode/ImagePath set imperatively in code-behind from
+             ThemeState (x:Bind cannot target a DependencyProperty-backed control's own property off
+             a plain-CLR ThemeState instance constructed after XAML load without extra ceremony; the
+             imperative update-on-Changed idiom this control's own OnVisualChanged already establishes
+             is simpler and consistent with FocusOverlay/SidebarControl's own "UpdateVisual()" pattern). -->
+        <controls:AmbientBackground x:Name="AmbientBackgroundHost" />
 
-            <!-- NOW spotlight demo: a single "NOW" chip using the reserved warm amber family +
-                 NowSpotlightBrush/NowRingBrush (Theme/Glass.xaml) — this is the "one lit thing"
-                 signature look. Exactly one such element should ever appear on a screen.
-                 NOTE: CornerRadius is a struct-typed property, and WinUI's XAML runtime does not
-                 implicitly convert a StaticResource'd x:Double (e.g. Theme/Metrics.xaml's
-                 VolarCornerRadiusGlass) into a CornerRadius the way a literal string like "12"
-                 gets converted via CornerRadiusHelper — attempting it crashes the native XAML
-                 parser at load time (0xC000027B) instead of raising a catchable XamlParseException.
-                 So these CornerRadius values are literal numbers mirroring
-                 Metrics.xaml's VolarCornerRadiusGlass (12) / VolarCornerRadiusSmall (6) by hand. -->
-            <Border
-                Width="220"
-                Height="64"
-                CornerRadius="12"
-                Background="{StaticResource NowSpotlightBrush}"
-                HorizontalAlignment="Center">
-                <Border
-                    CornerRadius="12"
-                    Background="{StaticResource VolarCardBrush}"
-                    BorderBrush="{StaticResource NowRingBrush}"
-                    BorderThickness="1">
-                    <StackPanel
-                        Orientation="Horizontal"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        Spacing="8">
-                        <Ellipse
-                            Width="8"
-                            Height="8"
-                            Fill="{StaticResource VolarNowAccentBrush}" />
-                        <TextBlock
-                            Text="NOW"
-                            FontFamily="{StaticResource VolarUiFontFamily}"
-                            FontSize="13"
-                            FontWeight="SemiBold"
-                            Foreground="{StaticResource VolarNowAccentSoftBrush}" />
-                        <TextBlock
-                            Text="Draft the release notes"
-                            Style="{StaticResource VolarCaptionTextStyle}" />
-                    </StackPanel>
-                </Border>
-            </Border>
+        <!-- 2. TodayView — the persistent window content. -->
+        <views:TodayView x:Name="TodayHost" />
 
-            <TextBlock
-                x:Name="TitleText"
-                Text="Volar — Today (Wave 4 view goes here)"
-                Style="{StaticResource VolarTitleTextStyle}"
-                HorizontalAlignment="Center" />
-            <TextBlock
-                x:Name="StatusText"
-                Text="Shell OK. Wave 4 will replace this with the real Today view."
-                Style="{StaticResource VolarCaptionTextStyle}"
-                Foreground="{StaticResource VolarTextSecBrush}"
-                HorizontalAlignment="Center" />
-            <Button
-                x:Name="CaptureButton"
-                Content="New task (Ctrl+Alt+M)"
+        <!-- 3. Modal overlay layer (self-hosting scrim+visibility, see file header). -->
+        <views:TaskDetailView x:Name="TaskDetailHost" />
+        <views:TaskBreakdownView x:Name="TaskBreakdownHost" />
+        <views:TriageView x:Name="TriageHost" />
+        <views:SweepView x:Name="SweepHost" />
+        <views:MorningFrogView x:Name="MorningFrogHost" />
+
+        <!-- Settings/Onboarding: no self-hosted scrim/visibility binding (see file header) —
+             MainWindow.xaml.cs toggles Visibility. Both default Collapsed; Onboarding's initial
+             Visibility is set in code-behind from the persisted hasOnboardedV1 flag. -->
+        <views:SettingsView x:Name="SettingsHost" Visibility="Collapsed" />
+        <views:OnboardingView x:Name="OnboardingHost" Visibility="Collapsed" />
+
+        <!-- 4. Capture scrim + CapturePopover — CapturePopover.xaml owns no scrim of its own (unlike
+             the 5 self-hosting modals above); supplied here per frozen decision 5. Positioned
+             top-center, below the toolbar row, mirroring where the hotkey/capture-button affordance
+             lives (Sidebar's capture button / TodayView's toolbar `+`) — Swift's PopoverView has no
+             direct Windows-window analog to port a position FROM (it anchors off a menu-bar-extra
+             popover on macOS), so this placement is Stage C's own design decision, flagged here and
+             in the final report rather than silently invented. -->
+        <Grid x:Name="CaptureScrimHost" Visibility="Collapsed">
+            <!-- A SIBLING Rectangle, not an ancestor, of CapturePopoverHost below — mirrors
+                 SettingsView.xaml's own scrim shape exactly (a Tapped'd background Rectangle plus a
+                 separately-positioned card as two siblings in the same Grid) so a tap that starts
+                 inside the popover card never bubbles up through this Rectangle's own Tapped handler;
+                 WinUI hit-tests to whichever element is topmost at the tap point, and since the card
+                 sits ON TOP of (not inside) this Rectangle, a tap under the card never reaches it. -->
+            <Rectangle Fill="#52000000" Tapped="OnCaptureScrimTapped" />
+            <views:CapturePopover
+                x:Name="CapturePopoverHost"
                 HorizontalAlignment="Center"
-                Padding="18,10"
-                CornerRadius="6"
-                Background="{StaticResource AccentSolidBrush}"
-                BorderThickness="0"
-                Foreground="{StaticResource VolarTextPriBrush}"
-                Click="CaptureButton_Click">
-                <Button.Resources>
-                    <!-- PointerOver/Pressed states pick up the cool accent's hover shade instead
-                         of the default WinUI ButtonBackgroundPointerOver. -->
-                    <SolidColorBrush x:Key="ButtonBackgroundPointerOver" Color="{StaticResource VolarIndigoHover}" />
-                    <SolidColorBrush x:Key="ButtonBackgroundPressed" Color="{StaticResource VolarIndigoSolid}" />
-                    <SolidColorBrush x:Key="ButtonForegroundPointerOver" Color="{StaticResource VolarTextPri}" />
-                    <SolidColorBrush x:Key="ButtonForegroundPressed" Color="{StaticResource VolarTextPri}" />
-                </Button.Resources>
-            </Button>
-        </StackPanel>
+                VerticalAlignment="Top"
+                Margin="0,64,0,0" />
+        </Grid>
 
-        <TextBlock
-            Grid.Row="1"
-            x:Name="FooterText"
-            Text=""
-            Margin="12"
-            Style="{StaticResource VolarCaptionTextStyle}"
-            Foreground="{StaticResource VolarTextMutBrush}"
-            HorizontalAlignment="Center" />
+        <!-- 5. FocusOverlay — self-hosting full-bleed backdrop + own Visibility (FocusOverlay.xaml.cs
+             Apply()). -->
+        <views:FocusOverlay x:Name="FocusHost" />
+
+        <!-- 6. NotificationBanner — top-trailing, self-positioned + own Visibility
+             (NotificationBanner.xaml.cs Apply()). -->
+        <controls:NotificationBanner x:Name="NotificationHost" />
     </Grid>
 </Window>
