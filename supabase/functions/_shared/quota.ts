@@ -1,30 +1,42 @@
 // supabase/functions/_shared/quota.ts
 //
-// Free-tier daily quota (Postgres counter) + paid-tier soft rate limit. Both go through the
-// SECURITY DEFINER RPC functions in supabase/migrations/0001_parse_quota.sql so the
-// increment-and-read is ONE atomic SQL statement — no read-modify-write race when two requests
-// for the same key land concurrently (see final report threat model, "quota bypass: parallel
-// requests racing the counter").
+// Account-based daily quota, keyed on (user_id, route, day) — see
+// specs/002-workflow-command-center/contracts/account-auth.md §1/§6. Both `/parse` and `/groq`
+// (the "speech" route) call `consumeQuota`, which wraps the atomic `consume_quota` SQL RPC
+// (supabase/migrations/0002_accounts_entitlements.sql) — a single INSERT ... ON CONFLICT DO UPDATE
+// statement, so the increment-and-check is race-free under concurrent requests from the same user
+// (no read-modify-write gap for two parallel requests to exploit).
 //
-// UTC day boundary: `utc_date` is computed from `new Date().toISOString().slice(0, 10)`.
-// `Date.prototype.toISOString()` always normalizes to UTC regardless of the server's local
-// timezone (Deno/V8 has no "local timezone" concept server-side beyond the OS default, which we
-// never rely on), so the day boundary is unambiguous and does not depend on the deployment
-// region. This means quota resets at 00:00 UTC, not device-local midnight — documented here and
-// in README.md so nobody "fixes" it into a timezone-dependent boundary later.
+// `route` is `'parse' | 'speech'` — this closes a known defect in the old device-keyed design:
+// `/groq` and `/parse` used to share ONE rate-limit bucket, so a burst on one route could 429 the
+// other. The `route` column on `usage_counters` (and this module's `route` param) gives each route
+// its own independent daily counter.
+//
+// UTC day boundary: the `consume_quota` SQL function uses Postgres's own `current_date`, and
+// `readUsageToday` below mirrors that with `Date.prototype.toISOString().slice(0, 10)` — always
+// UTC regardless of the server's local timezone. Quota resets at 00:00 UTC, not device-local
+// midnight — documented here and in README.md so nobody "fixes" it into a timezone-dependent
+// boundary later.
 
 import type { SupabaseClient } from "npm:@supabase/supabase-js@2.110.6";
 import { readEnvInt } from "./env.ts";
 
-export const DEFAULT_DAILY_QUOTA = 50;
-export const DEFAULT_PAID_RPM = 20;
+export type Route = "parse" | "speech";
 
-function utcDateString(now: Date): string {
-  return now.toISOString().slice(0, 10); // YYYY-MM-DD, UTC
+export const DEFAULT_PARSE_LIMIT_FREE = 20;
+export const DEFAULT_PARSE_LIMIT_PRO = 500;
+export const DEFAULT_SPEECH_LIMIT_PRO = 500;
+
+/** `/parse` is available to both tiers, just with a different daily cap. */
+export function parseLimitFor(tier: "free" | "pro"): number {
+  return tier === "pro"
+    ? readEnvInt("PARSE_LIMIT_PRO", DEFAULT_PARSE_LIMIT_PRO)
+    : readEnvInt("PARSE_LIMIT_FREE", DEFAULT_PARSE_LIMIT_FREE);
 }
 
-function utcMinuteBucket(now: Date): string {
-  return now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM, UTC
+/** `/groq` (speech) is Pro-only (contract §1) — there is no free-tier speech limit to compute. */
+export function speechLimitForPro(): number {
+  return readEnvInt("SPEECH_LIMIT_PRO", DEFAULT_SPEECH_LIMIT_PRO);
 }
 
 function nextUtcMidnightIso(now: Date): string {
@@ -32,63 +44,58 @@ function nextUtcMidnightIso(now: Date): string {
   return next.toISOString();
 }
 
-function nextUtcMinuteIso(now: Date): string {
-  const next = new Date(Date.UTC(
-    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
-    now.getUTCHours(), now.getUTCMinutes() + 1, 0, 0,
-  ));
-  return next.toISOString();
-}
-
 export type QuotaCheck =
-  | { allowed: true; count: number; limit: number }
-  | { allowed: false; count: number; limit: number; resetAt: string };
+  | { allowed: true; used: number; limit: number }
+  | { allowed: false; used: number; limit: number; resetAt: string };
 
-/** Free tier: increments and checks the per-device daily counter in ONE round trip (a PostgREST
- *  RPC call to the atomic `parse_quota_increment` SQL function). `PARSE_DAILY_QUOTA` env
- *  (default 50) is read fresh per-request so operators can retune it without a redeploy. */
-export async function checkFreeQuota(
+/** Atomically increments AND checks the (user_id, route, day) counter in one round trip via the
+ *  `consume_quota` RPC. Throws on any DB error so the caller maps it to an opaque 5xx — a DB
+ *  failure must never be interpreted as "quota ok, let the request through". */
+export async function consumeQuota(
   supabase: SupabaseClient,
-  quotaKeyHash: string,
+  userId: string,
+  route: Route,
+  limit: number,
   now: Date,
 ): Promise<QuotaCheck> {
-  const limit = readEnvInt("PARSE_DAILY_QUOTA", DEFAULT_DAILY_QUOTA);
-  const utcDate = utcDateString(now);
-  const { data, error } = await supabase.rpc("parse_quota_increment", {
-    p_key_hash: quotaKeyHash,
-    p_utc_date: utcDate,
+  const { data, error } = await supabase.rpc("consume_quota", {
+    p_user: userId,
+    p_route: route,
+    p_limit: limit,
   });
   if (error) {
-    // Propagate as a thrown error so the caller maps it to an opaque 502 — a DB failure must
-    // never be interpreted as "quota ok, let the request through".
-    throw new Error(`parse_quota_increment failed: ${error.message}`);
+    throw new Error(`consume_quota failed: ${error.message}`);
   }
-  const count = typeof data === "number" ? data : Number(data);
-  if (count > limit) {
-    return { allowed: false, count, limit, resetAt: nextUtcMidnightIso(now) };
+  // A `returns table(...)` RPC comes back through PostgREST as an array of rows.
+  const row = Array.isArray(data) ? data[0] : data;
+  const allowed = row?.allowed === true;
+  const usedRaw = row?.used;
+  const used = typeof usedRaw === "number" ? usedRaw : Number(usedRaw ?? 0);
+  if (!allowed) {
+    return { allowed: false, used, limit, resetAt: nextUtcMidnightIso(now) };
   }
-  return { allowed: true, count, limit };
+  return { allowed: true, used, limit };
 }
 
-/** Paid tier: soft per-minute rate limit (bounds abuse of an unmetered path), same atomic RPC
- *  pattern keyed by SHA-256(bundleId:originalTransactionId) instead of the App Attest keyId. */
-export async function checkPaidRateLimit(
+/** Read-only usage lookup for `GET /subscription/status` — does NOT increment the counter. Missing
+ *  row (no requests yet today) reports 0, not an error. */
+export async function readUsageToday(
   supabase: SupabaseClient,
-  rateLimitKeyHash: string,
+  userId: string,
+  route: Route,
   now: Date,
-): Promise<QuotaCheck> {
-  const limit = readEnvInt("PARSE_PAID_RPM", DEFAULT_PAID_RPM);
-  const bucket = utcMinuteBucket(now);
-  const { data, error } = await supabase.rpc("parse_rate_increment", {
-    p_key_hash: rateLimitKeyHash,
-    p_minute_bucket: bucket,
-  });
+): Promise<number> {
+  const utcDate = now.toISOString().slice(0, 10);
+  const { data, error } = await supabase
+    .from("usage_counters")
+    .select("count")
+    .eq("user_id", userId)
+    .eq("route", route)
+    .eq("day", utcDate)
+    .maybeSingle();
   if (error) {
-    throw new Error(`parse_rate_increment failed: ${error.message}`);
+    throw new Error(`usage_counters lookup failed: ${error.message}`);
   }
-  const count = typeof data === "number" ? data : Number(data);
-  if (count > limit) {
-    return { allowed: false, count, limit, resetAt: nextUtcMinuteIso(now) };
-  }
-  return { allowed: true, count, limit };
+  const row = data as { count: number } | null;
+  return typeof row?.count === "number" ? row.count : 0;
 }

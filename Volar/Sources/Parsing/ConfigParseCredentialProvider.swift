@@ -1,45 +1,70 @@
-// Sources/Parsing/ConfigParseCredentialProvider.swift — placeholder cloud-parse credentials.
+// Sources/Parsing/ConfigParseCredentialProvider.swift — account-token-backed cloud-parse
+// credentials.
 //
-// Wires the Cloud parse tier (`CloudParser`/`IntentRouter`) so the Local↔Cloud Settings switch is
-// functional NOW, before the real StoreKit paid-JWS + DeviceCheck free-token composite (the
-// intended concrete `ParseCredentialProvider`, Phase 8/T051) exists. "Code first, key later":
-// reads an optional proxy base URL + bearer token from UserDefaults; while either is missing it
-// returns no credential, so `CloudParser` reports `.unavailable` and `IntentRouter` falls back to
-// on-device parsing — never sending an unauthenticated request. Once both keys are set (e.g. via
-// `defaults write` on the Mac, or a future Settings field) the Cloud tier activates.
+// UPDATED (specs/002-workflow-command-center/contracts/account-auth.md, 2026-07-26): this used to
+// read a hand-typed `volar.parseProxyToken` from UserDefaults as a placeholder for the real
+// StoreKit-JWS/DeviceCheck composite (see this file's git history). The contract supersedes that
+// design entirely: EVERY cloud request (parse AND Groq) now carries a single
+// `Authorization: Bearer <supabase access_token>` regardless of tier — the server looks up
+// `entitlements.tier` by `user_id`, not by which client-side auth shape was sent. Free vs Pro is no
+// longer decided here at all for `/parse` (contract §1: free = 20/day, pro = 500/day, BOTH tiers
+// call the exact same route, just with different daily limits) — only Groq is tier-gated
+// client-side (see `GroqTranscriptionClient.swift`'s `EnvironmentGroqCredentialProvider`).
+//
+// `CloudParser.swift` is NOT in this task's owned-files list and still only knows two header
+// shapes: `.paidJWS(String)` -> `Authorization: Bearer <value>`, and `.freeDeviceToken(String)` ->
+// `X-Device-Token: <value>`. The contract's single-bearer shape IS exactly `.paidJWS`'s wire
+// behavior, so this file reuses that case purely to carry the account access token — the case
+// NAME is now a misnomer ("paidJWS" no longer implies a paid tier), but its WIRE BEHAVIOR
+// (`Authorization: Bearer <value>`) is exactly right, and renaming it would require editing a file
+// out of this task's scope. Flagged here for whoever next has authority over `CloudParser.swift`.
+//
+// Base URL (unchanged): the Supabase project ref (`nuzrpipwacravfgsiacv`) is fixed and checked
+// into this file as `defaultBaseURL` — NOT a secret (every client of a Supabase project embeds its
+// project ref/URL). `volar.parseProxyBaseURL` in UserDefaults still overrides it, useful for
+// pointing at a local `supabase functions serve` during development.
 import Foundation
 
 struct ConfigParseCredentialProvider: ParseCredentialProvider {
     /// UserDefaults key for the Supabase parse-proxy base URL, e.g. `https://<ref>.supabase.co`.
+    /// Overrides `defaultBaseURL` below when set — mainly useful for pointing at a local
+    /// `supabase functions serve` during development.
     static let baseURLKey = "volar.parseProxyBaseURL"
-    /// UserDefaults key for the bearer token sent as `Authorization: Bearer <token>`. Placeholder
-    /// for the real StoreKit JWS — sent as `.paidJWS` purely so the wire shape is Bearer auth; the
-    /// Phase 8 composite replaces this with a proper entitlement/attestation-derived credential.
-    static let tokenKey = "volar.parseProxyToken"
 
-    /// True only when BOTH a non-empty base URL (that parses as a `URL`) and token are configured —
-    /// drives the Settings "Not configured" hint without duplicating the key-reading logic.
+    /// Default parse-proxy base URL — the project's Supabase project ref, not a secret (see file
+    /// doc comment). Force-unwrap is safe: this is a fixed, hand-verified literal, never user input.
+    static let defaultBaseURL = URL(string: "https://nuzrpipwacravfgsiacv.supabase.co")!
+
+    /// `true` iff a Keychain-backed account session exists — i.e. the user is signed in. Cloud
+    /// parsing is available to ANY signed-in tier now (free = 20/day, pro = 500/day — contract
+    /// §1), so "configured" means "signed in", not "has a paid credential" like it did before this
+    /// change. `KeychainStore.loadSession()` is a synchronous Keychain read (replacing the old
+    /// synchronous `UserDefaults` read this used to be) — cheap enough for a SwiftUI view body,
+    /// same cost class as what it replaces. See `SettingsView`'s Account tab, which drives the
+    /// actual sign-in flow this flag now reflects.
     static var isConfigured: Bool {
-        guard let base = UserDefaults.standard.string(forKey: baseURLKey), !base.isEmpty,
-              URL(string: base) != nil,
-              let token = UserDefaults.standard.string(forKey: tokenKey), !token.isEmpty else {
-            return false
-        }
-        return true
+        KeychainStore.loadSession() != nil
     }
 
     func baseURL() async throws -> URL {
-        guard let raw = UserDefaults.standard.string(forKey: Self.baseURLKey),
-              let url = URL(string: raw) else {
-            throw ParseCredentialError.notConfigured
+        if let raw = UserDefaults.standard.string(forKey: Self.baseURLKey), !raw.isEmpty,
+           let url = URL(string: raw) {
+            return url
         }
-        return url
+        return Self.defaultBaseURL
     }
 
+    /// Signed out, or a refresh attempt failed -> `nil`, per `ParseCredentialProvider`'s own
+    /// contract ("`nil` is the ONLY signal ... must never throw"). `AccountService
+    /// .validAccessToken()` is `async throws`; any thrown error here is swallowed to `nil` via
+    /// `try?` rather than propagated, so an expired/unrefreshable session degrades to on-device
+    /// silently instead of surfacing an error mid-capture — exactly the same "not configured ->
+    /// quietly fall back" behavior this file has always had, now driven by account state instead
+    /// of a hand-typed UserDefaults token.
     func authHeader() async -> ParseAuthHeader? {
-        guard let token = UserDefaults.standard.string(forKey: Self.tokenKey), !token.isEmpty else {
-            return nil
-        }
+        guard let token = try? await AccountService.shared.validAccessToken() else { return nil }
+        // See file header: `.paidJWS` is reused here purely for its `Authorization: Bearer` wire
+        // behavior, NOT because this is a "paid" credential — tier is decided server-side now.
         return .paidJWS(token)
     }
 }

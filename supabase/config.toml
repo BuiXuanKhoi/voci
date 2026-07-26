@@ -2,19 +2,30 @@
 # Project: https://nuzrpipwacravfgsiacv.supabase.co
 project_id = "nuzrpipwacravfgsiacv"
 
-# The parse function does its OWN auth (StoreKit JWS in Authorization, or App Attest in
-# X-Device-Token — see supabase/functions/_shared/auth.ts). It must NOT sit behind Supabase's
-# gateway JWT check, so verify_jwt = false. The function itself rejects any request that carries
-# neither a valid JWS nor a valid device token (fail-closed), so disabling the gateway JWT does
-# not open it up — the in-function auth is the real gate.
+# Every function below does its OWN auth: `Authorization: Bearer <supabase access_token>`,
+# verified in-function by `_shared/auth.ts`'s `verifyAccount` (calls `auth.getUser()`, then loads
+# `entitlements` with the service-role key). `verify_jwt = false` is INTENTIONAL and load-bearing,
+# not a hole: Supabase's platform gateway "verify JWT" gate only checks that the bearer token is
+# SOME validly-signed JWT for this project, and the public anon/publishable key IS such a JWT (that
+# is what makes it safe to embed in a client at all). If the gateway gate were enabled, a caller
+# presenting the anon key as `Authorization` would pass the gateway and reach the function with no
+# real identity — so the gateway is not the authentication boundary here; `verifyAccount`'s
+# `auth.getUser()` call is. Every function still fails closed on a missing/invalid/anon-key bearer
+# (401 auth_missing / auth_invalid), so disabling the gateway JWT check does not open anything up.
+# See specs/002-workflow-command-center/contracts/account-auth.md §7 for this exact reasoning —
+# it looks wrong at a glance, so it's documented in two places on purpose.
 [functions.parse]
 enabled = true
 verify_jwt = false
 
-# The groq function is the paid-only Groq Speech-to-Text proxy (see supabase/functions/groq/
-# README.md). Same reasoning as [functions.parse] applies: it does its own auth (StoreKit JWS in
-# Authorization — verifyPaidAuth, no free/App-Attest path for this route) and fails closed on
-# anything else, so it must NOT sit behind Supabase's gateway JWT check either.
+# groq is the Pro-only Groq Speech-to-Text proxy (see supabase/functions/groq/README.md). Same
+# account-auth reasoning as [functions.parse] applies.
 [functions.groq]
+enabled = true
+verify_jwt = false
+
+# subscription hosts /link, /status, /delete-account (see supabase/functions/subscription/
+# index.ts and contracts/account-auth.md §3). Same account-auth reasoning applies.
+[functions.subscription]
 enabled = true
 verify_jwt = false

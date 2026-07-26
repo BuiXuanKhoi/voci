@@ -1,5 +1,15 @@
 // Sources/Views/TodayView.swift — main window content: sidebar + Today list + greeting + frog/focus pill
-// Ported from `design/volar-mac.jsx`'s `VolarMacApp`. Owns the overlay stack (popover, focus, ambient).
+// Ported from `design/volar-mac.jsx`'s `VolarMacApp`. Owns the in-window overlay stack (focus, ambient).
+//
+// FLOATING CAPTURE PANEL (feature 002 gap fix): `PopoverView` used to mount HERE, gated on
+// `appState.captureState != .idle`, alongside a click-outside-to-cancel dimming scrim. Since this
+// window is normally CLOSED (Volar is an `LSUIElement` menu-bar app), that made the ⌃⌥M capture UI
+// invisible whenever the user wasn't already looking at the main window — see
+// `Sources/Views/CapturePanel.swift`'s header for the full story. `PopoverView` now mounts in a
+// floating `NSPanel` instead (driven by `AppDelegate` in `VolarApp.swift`), which is why both the
+// scrim and the `PopoverView()` call are gone from this file; the panel is a system-wide overlay,
+// so an in-window dim no longer makes sense (and cancel-on-click-outside was deliberately dropped
+// too — the panel brief calls for recording to survive the user clicking elsewhere).
 //
 // STUDIO DARK RETHEME (2026-07, visual layer only): restructured the flat Now/Later/Completed list
 // into the NOW/NEXT/LATER spatial grammar from `volar-redesign/command-deck.html` — one spotlit
@@ -34,13 +44,6 @@ struct TodayView: View {
             HStack(spacing: 0) {
                 Sidebar()
                 mainColumn
-            }
-
-            if appState.captureState != .idle {
-                Color.black.opacity(0.32)
-                    .ignoresSafeArea()
-                    .onTapGesture { appState.cancelCapture() }
-                PopoverView()
             }
 
             if appState.focusActive {
@@ -83,6 +86,11 @@ struct TodayView: View {
                 ToolButton(icon: .plus, accent: true) {
                     appState.startCapture()
                 }
+                // Settings entry point from the main window: previously reachable ONLY via the
+                // menu-bar dropdown or the ⌘, shortcut (which requires the window to already be
+                // key). See `SettingsToolButton`'s own doc comment below for why this isn't just
+                // `ToolButton` with a `SettingsLink`-flavored action.
+                SettingsToolButton()
             }
         }
     }
@@ -525,6 +533,48 @@ struct TodayView: View {
 
     private func fmtClock(_ seconds: Int) -> String {
         "\(seconds / 60):\(String(format: "%02d", seconds % 60))"
+    }
+}
+
+/// Gear entry point into Settings from the main window's toolbar. Visually matches
+/// `Components.swift`'s `ToolButton` (28x28 hit target, 7pt-rounded hover tint, subtle press
+/// scale) so it reads as one more tool alongside ambient/read-aloud/search/capture — but it wraps
+/// `SettingsLink` (macOS 14+, opens the app's `Settings` scene) instead of a plain `Button`, for
+/// two reasons: `SettingsLink` owns its action outright and has no `action:` closure parameter to
+/// plug into `ToolButton`, and `ToolButton`/`ToolButtonStyle` both live in `Components.swift`,
+/// which is frozen/off-limits for this task. `SettingsLink { Text(...) }` mirrors the exact usage
+/// already in `VolarApp.swift`'s `MenuBarMenuContent` per the task brief; `ToolButtonStyle`'s
+/// press-scale is small enough to re-declare locally (`SettingsToolButtonStyle` below) rather than
+/// touching that file to make it non-private.
+///
+/// UNVERIFIED: whether `SettingsLink` actually honors a custom `ButtonStyle`/hover-driven
+/// background the way a plain `Button` does isn't confirmed on this machine (no Xcode/Swift
+/// toolchain to render it) — if it silently ignores `.buttonStyle(_:)` at runtime, the gear would
+/// still open Settings correctly, just without the hover/press affordance matching its siblings.
+private struct SettingsToolButton: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        SettingsLink {
+            VolarIcon(.settings, size: 14, color: VolarColor.textSec, weight: .regular)
+                .frame(width: 28, height: 28)
+        }
+        .buttonStyle(SettingsToolButtonStyle())
+        .background(isHovering ? Color.white.opacity(0.08) : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(VolarMotion.hover, value: isHovering)
+        .accessibilityLabel("Settings")
+    }
+}
+
+/// Local re-declaration of `Components.swift`'s private `ToolButtonStyle` — see
+/// `SettingsToolButton`'s doc comment for why it isn't reused directly.
+private struct SettingsToolButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(VolarMotion.press, value: configuration.isPressed)
     }
 }
 

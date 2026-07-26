@@ -7,11 +7,12 @@
 import SwiftUI
 import AppKit
 import Speech
+import StoreKit
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
-        case general, hotkeys, notifications, appearance, integrations, about
+        case general, hotkeys, notifications, appearance, integrations, account, about
         var id: String { rawValue }
 
         var icon: VolarIconName {
@@ -21,6 +22,11 @@ struct SettingsView: View {
             case .notifications: return .bell
             case .appearance: return .sparkle
             case .integrations: return .bolt
+            // No dedicated "person/account" glyph exists in `VolarIconName` (`Design/VolarIcon.swift`,
+            // not in this task's owned files — adding a case would require editing it). `.check`
+            // is the closest available stand-in (reads as "verified identity"); flagged in backlog.md
+            // as a follow-up for whoever next owns that file.
+            case .account: return .check
             case .about: return .project
             }
         }
@@ -32,6 +38,7 @@ struct SettingsView: View {
             case .notifications: return "Notifications"
             case .appearance: return "Appearance"
             case .integrations: return "Integrations"
+            case .account: return "Account"
             case .about: return "About"
             }
         }
@@ -53,6 +60,15 @@ struct SettingsView: View {
 
     @State private var themeChoice = "dark"
 
+    // Account tab (Task 4, account-auth.md contract) — purely local UI state for the sign-in
+    // forms; the actual session/tier/quota state lives on `AppState` (`accountEmail`,
+    // `accountTier`, `subscriptionStatus`, `accountBusy`, `accountError`), same split as every
+    // other tab's cosmetic `@State` vs. the frozen `AppState` API.
+    @State private var accountEmailInput = ""
+    @State private var accountCodeInput = ""
+    @State private var accountCodeSent = false
+    @State private var showDeleteAccountConfirm = false
+
     @Environment(AppState.self) private var appState
 
     var body: some View {
@@ -69,6 +85,7 @@ struct SettingsView: View {
                     case .notifications: notificationsTab
                     case .appearance: appearanceTab(appState: appState)
                     case .integrations: integrationsTab
+                    case .account: accountTab
                     case .about: aboutTab
                     }
                 }
@@ -170,7 +187,7 @@ struct SettingsView: View {
                 }
             }
             if appState.speechEngineChoice == .groq, !GroqEngine.isConfigured {
-                SettingsRow(label: "Groq status", hint: "Add a Groq token (env GROQ_API_KEY / GROQ_PROXY_TOKEN, or UserDefaults volar.groqToken) to enable cloud transcription. Until then Volar uses Apple on-device recognition.") {
+                SettingsRow(label: "Groq status", hint: "Groq cloud transcription is a Pro feature — sign in and upgrade in the Account tab to enable it. Until then Volar uses Apple on-device recognition.") {
                     Text("Not configured — using Apple on-device")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(VolarColor.textSec)
@@ -193,7 +210,7 @@ struct SettingsView: View {
                 .frame(width: 200)
             }
             if appState.parseEnginePreference == .cloud, !ConfigParseCredentialProvider.isConfigured {
-                SettingsRow(label: "Cloud parsing status", hint: "Add a parse-proxy base URL + token (UserDefaults keys volar.parseProxyBaseURL / volar.parseProxyToken) to enable cloud parsing. Until then Volar quietly uses on-device parsing.") {
+                SettingsRow(label: "Cloud parsing status", hint: "Sign in (Account tab) to enable cloud parsing — every signed-in account gets a daily quota, free or Pro. Until you sign in, Volar quietly uses on-device parsing.") {
                     Text("Not configured — using on-device")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(VolarColor.textSec)
@@ -204,6 +221,12 @@ struct SettingsView: View {
                     get: { appState.recognitionLocaleID },
                     set: { appState.setRecognitionLocale($0) }
                 )) {
+                    // "Automatic (multilingual)" first, ahead of the localized-name-sorted locale
+                    // list below, for anyone who code-switches between languages (e.g. vi↔en) —
+                    // see `AppState.autoRecognitionLocaleID`'s doc comment. Labeled in English (not
+                    // localized) to match every other row in this list, which are Apple's
+                    // localized locale names rather than translated UI strings.
+                    Text("Automatic (multilingual)").tag(AppState.autoRecognitionLocaleID)
                     ForEach(speechLocales, id: \.id) { loc in
                         Text(loc.name).tag(loc.id)
                     }
@@ -703,6 +726,200 @@ struct SettingsView: View {
         testSignalReceived = false
         testSignalAwaitingReceipt = true
         appState.claudeConnector.sendTestSignal()
+    }
+
+    // MARK: - Account (Task 4, account-auth.md contract)
+
+    private var accountTab: some View {
+        VStack(spacing: 12) {
+            accountCard
+        }
+    }
+
+    /// Single card, same "one `VolarColor.card` block, not several `SettingsRow`s" reasoning as
+    /// `claudeCodeCard` above — the sign-in forms and the signed-in summary don't fit that row's
+    /// fixed label/hint/control shape.
+    private var accountCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Account")
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                Text(appState.accountEmail == nil
+                     ? "Sign in to unlock Cloud parsing and Groq speech transcription. Volar's core (capture, tasks, reminders, focus) never requires an account."
+                     : "Manage your Volar account, subscription, and daily AI quota.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineSpacing(2)
+            }
+
+            if let email = appState.accountEmail {
+                signedInAccountBody(email: email)
+            } else {
+                signedOutAccountBody
+            }
+
+            if let accountError = appState.accountError {
+                Text(accountError)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.reschedule)
+                    .lineLimit(4)
+            }
+        }
+        .padding(16)
+        .background(VolarColor.card)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .volarHairline(cornerRadius: 11)
+    }
+
+    private var signedOutAccountBody: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            settingsPillButton("Sign in with Apple", solid: true) {
+                appState.signInWithApple()
+            }
+            .disabled(appState.accountBusy)
+
+            Text("or sign in with email")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(VolarColor.textMut)
+
+            HStack(spacing: 8) {
+                TextField("you@example.com", text: $accountEmailInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(VolarColor.textPri)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(Color.black.opacity(0.25))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .volarHairline(cornerRadius: 7)
+                settingsPillButton("Send code") {
+                    accountCodeSent = true
+                    appState.sendEmailOTP(email: accountEmailInput)
+                }
+                .disabled(appState.accountBusy || accountEmailInput.isEmpty)
+            }
+
+            if accountCodeSent {
+                HStack(spacing: 8) {
+                    TextField("6-digit code", text: $accountCodeInput)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 12.5, design: .monospaced))
+                        .foregroundStyle(VolarColor.textPri)
+                        .padding(.horizontal, 10)
+                        .frame(height: 30)
+                        .frame(width: 120)
+                        .background(Color.black.opacity(0.25))
+                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                        .volarHairline(cornerRadius: 7)
+                    settingsPillButton("Verify", solid: true) {
+                        appState.verifyEmailOTP(email: accountEmailInput, code: accountCodeInput)
+                    }
+                    .disabled(appState.accountBusy || accountCodeInput.count != 6)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func signedInAccountBody(email: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Text(email)
+                    .font(.system(size: 12.5, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                tierBadge
+            }
+
+            if let status = appState.subscriptionStatus {
+                Text("Parse: \(status.parseUsedToday)/\(status.parseLimit) lượt AI hôm nay")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textSec)
+                if appState.accountTier == .pro {
+                    Text("Speech: \(status.speechUsedToday)/\(status.speechLimit) lượt hôm nay")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(VolarColor.textSec)
+                }
+            }
+
+            if appState.accountTier == .free {
+                upgradeSection
+            }
+
+            HStack(spacing: 8) {
+                settingsPillButton("Restore Purchases") { appState.restorePurchases() }
+                    .disabled(appState.accountBusy)
+                settingsPillButton("Manage Subscription") { openManageSubscriptions() }
+                settingsPillButton("Sign out") { appState.signOutAccount() }
+            }
+
+            Button("Delete account", role: .destructive) {
+                showDeleteAccountConfirm = true
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(VolarColor.destruct)
+            .padding(.top, 4)
+            .confirmationDialog(
+                "Delete your Volar account? This cannot be undone — your tasks stay on this Mac, but your account, subscription link, and quota history are permanently removed.",
+                isPresented: $showDeleteAccountConfirm,
+                titleVisibility: .visible
+            ) {
+                Button("Delete account", role: .destructive) { appState.deleteAccount() }
+                Button("Cancel", role: .cancel) {}
+            }
+        }
+    }
+
+    private var tierBadge: some View {
+        Text(appState.accountTier == .pro ? "Pro" : "Free")
+            .font(.system(size: 10.5, weight: .semibold))
+            .foregroundStyle(appState.accountTier == .pro ? VolarColor.done : VolarColor.textSec)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background((appState.accountTier == .pro ? VolarColor.done : Color.white).opacity(0.14))
+            .clipShape(Capsule())
+    }
+
+    /// The two "Volar Pro" products (contract §8) — prices always come from `product.displayPrice`
+    /// (never a hardcoded "$6.99"), so this reads correctly in every storefront/currency.
+    private var upgradeSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Upgrade to Pro — 14-day free trial")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+                .padding(.top, 4)
+            productRow(appState.monthlyProduct, product: .monthly)
+            productRow(appState.yearlyProduct, product: .yearly)
+        }
+    }
+
+    @ViewBuilder
+    private func productRow(_ product: Product?, product which: VolarProduct) -> some View {
+        HStack {
+            Text(product?.displayName ?? (which == .monthly ? "Monthly" : "Yearly"))
+                .font(.system(size: 12))
+                .foregroundStyle(VolarColor.textSec)
+            Spacer()
+            if let product {
+                settingsPillButton(product.displayPrice, solid: true) {
+                    appState.purchase(which)
+                }
+                .disabled(appState.accountBusy)
+            } else {
+                Text("Unavailable")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textMut)
+            }
+        }
+    }
+
+    /// macOS has no `AppStore.showManageSubscriptions(in:)` equivalent (that StoreKit 2 call is
+    /// iOS-only) — opening the App Store's own subscriptions management page via `NSWorkspace` is
+    /// the standard macOS approach. // UNVERIFIED: not exercised on a real Mac.
+    private func openManageSubscriptions() {
+        guard let url = URL(string: "https://apps.apple.com/account/subscriptions") else { return }
+        NSWorkspace.shared.open(url)
     }
 
     // MARK: - About

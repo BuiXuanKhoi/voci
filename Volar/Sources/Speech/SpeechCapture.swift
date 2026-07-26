@@ -121,15 +121,51 @@ final class SpeechCapture {
     private var session = 0
 
     init(locale: Locale = Locale(identifier: "en-US")) {
-        self.recognizer = SFSpeechRecognizer(locale: locale)
+        self.recognizer = Self.resolvedRecognizer(for: locale)
         print("[Volar.Speech] recognizer == nil: \(self.recognizer == nil)")
     }
 
     /// Switch the recognition language at runtime (Settings ▸ Language). Recreates the underlying
-    /// recognizer; a nil result (unsupported locale) surfaces later as `.recognizerUnavailable`.
+    /// recognizer via `resolvedRecognizer(for:)`'s fallback chain; only a truly last-resort failure
+    /// (see that function's doc comment) surfaces later as `.recognizerUnavailable`.
     func setLocale(_ locale: Locale) {
-        recognizer = SFSpeechRecognizer(locale: locale)
+        recognizer = Self.resolvedRecognizer(for: locale)
         print("[Volar.Speech] setLocale \(locale.identifier) -> recognizer nil: \(recognizer == nil)")
+    }
+
+    /// Resolves a locale to a working `SFSpeechRecognizer`, with graceful fallbacks so a capture
+    /// never dies outright on an unsupported locale. Regression fix (2026-07-26): `AppState`'s
+    /// "Automatic" recognition-language choice resolves to `Locale.current`, and
+    /// `SFSpeechRecognizer.init(locale:)` returns `nil` for anything
+    /// `SFSpeechRecognizer.supportedLocales()` doesn't cover exactly — an unusual region, a locale
+    /// like "en-VN", or one carrying extensions like "vi-VN@calendar=gregorian" — which, unguarded,
+    /// would kill capture on a brand-new install whose system locale isn't a good match. Centralized
+    /// here (not in `AppState`) so every call site — `init`, `setLocale` — is protected the same way.
+    ///
+    /// 1. Try the exact locale first (unchanged fast path for an already-supported locale, e.g. the
+    ///    hardcoded `"en-US"` default or any locale the user explicitly picked in Settings).
+    /// 2. Fall back to any `supportedLocales()` entry sharing the same base language code (e.g. the
+    ///    system locale is a Vietnamese variant `SFSpeechRecognizer` doesn't recognize verbatim, but
+    ///    it does support a different Vietnamese locale tag) — still recognizes the right language.
+    /// 3. Last resort: `"en-US"`, which is guaranteed supported — this is exactly the fixed default
+    ///    this type had before the "Automatic"/`Locale.current` path existed, so behavior here can
+    ///    never be worse than it was before that change.
+    /// Logs which branch fired (via the same `print` convention as the two callers above) so this
+    /// is visible during a Mac verify session.
+    private static func resolvedRecognizer(for locale: Locale) -> SFSpeechRecognizer? {
+        if let exact = SFSpeechRecognizer(locale: locale) {
+            return exact
+        }
+        if let languageCode = locale.language.languageCode?.identifier,
+           let sameLanguageLocale = SFSpeechRecognizer.supportedLocales().first(where: {
+               $0.language.languageCode?.identifier == languageCode
+           }),
+           let sameLanguageRecognizer = SFSpeechRecognizer(locale: sameLanguageLocale) {
+            print("[Volar.Speech] locale \(locale.identifier) unsupported -> falling back to same-language locale \(sameLanguageLocale.identifier)")
+            return sameLanguageRecognizer
+        }
+        print("[Volar.Speech] locale \(locale.identifier) unsupported and no same-language match -> falling back to en-US")
+        return SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
     }
 
     // MARK: - Authorization

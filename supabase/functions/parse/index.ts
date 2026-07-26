@@ -1,24 +1,32 @@
 // supabase/functions/parse/index.ts — Edge Function for POST /functions/v1/parse
 //
-// Implements contracts/parse-proxy.md (spec 002-workflow-command-center). Read that file before
-// changing status codes or field names — this is the ONLY internet-facing surface of the product.
+// Implements specs/002-workflow-command-center/contracts/account-auth.md §3/§4. Read that file
+// before changing status codes, field names, or gate order — this is one of two internet-facing
+// surfaces of the product.
 //
 // Request shapes (validated in ../_shared/schema.ts):
 //   parse mode (default):    { transcript, locale_hint?, now, open_task_titles? }
 //   breakdown mode:          { mode: "breakdown", task_title, notes? }
-// Auth (../_shared/auth.ts), exactly one required:
-//   Authorization: Bearer <StoreKit JWS>   -> paid, unmetered, soft rate-limited
-//   X-Device-Token: <App Attest token>     -> free, metered (daily counter)
+// Auth (../_shared/auth.ts): `Authorization: Bearer <supabase access_token>` — a real user
+// account, verified via `verifyAccount`. Both tiers may call this route; only the daily quota
+// limit differs (`PARSE_LIMIT_FREE` / `PARSE_LIMIT_PRO`).
 //
-// Privacy: this file must never log transcript/title/notes body text — only sizes/counts/status/
-// latency, via ../_shared/log.ts (see that module's doc comment for why it's the only logger).
+// Gate order (contract §4 — FIXED defect: this route used to call `validateRequestBody` BEFORE
+// authenticating, letting an unauthenticated caller probe the validation schema; the old
+// constraint forcing body-reads before auth no longer exists now that App Attest — which needed
+// the raw body to bind `clientDataHash` — is gone):
+//   route -> method -> content-type -> AUTH -> tier -> quota (atomic) -> read & validate body ->
+//   upstream
+//
+// Privacy: this file must never log transcript/title/notes body text, access tokens, or a raw user
+// id — only sizes/counts/status/latency and a HASH of user_id, via ../_shared/log.ts +
+// ../_shared/auth.ts's `hashUserId` (see that module's doc comment for why it's the only logger).
 
-import { createClient } from "npm:@supabase/supabase-js@2.110.6";
 import { requireEnv, readEnvInt } from "../_shared/env.ts";
 import { logEvent, logError } from "../_shared/log.ts";
 import { BodyTooLargeError, errorResponse, jsonResponse, readBodyCapped } from "../_shared/http.ts";
-import { verifyPaidAuth, verifyFreeAuth } from "../_shared/auth.ts";
-import { checkFreeQuota, checkPaidRateLimit } from "../_shared/quota.ts";
+import { createServiceRoleClient, hashUserId, verifyAccount } from "../_shared/auth.ts";
+import { consumeQuota, parseLimitFor } from "../_shared/quota.ts";
 import {
   MAX_BODY_BYTES,
   validateBreakdownSteps,
@@ -43,13 +51,13 @@ Deno.serve(async (req) => {
     return await handle(req, startedAt);
   } catch (err) {
     // Last-resort net: nothing above should throw uncaught, but if it does, never leak the
-    // exception message to the client (opaque 5xx hardening requirement) and never let an
-    // unhandled rejection crash the isolate without a response.
+    // exception message to the client (opaque hardening requirement) and never let an unhandled
+    // rejection crash the isolate without a response.
     logError("parse_unhandled_error", {
       message: err instanceof Error ? err.name : "unknown",
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return errorResponse(500, "internal_error");
+    return errorResponse(503, "service_unavailable");
   }
 });
 
@@ -58,14 +66,58 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     return new Response(null, { status: 204, headers: { allow: "POST, OPTIONS" } });
   }
   if (req.method !== "POST") {
-    return errorResponse(405, "method_not_allowed");
+    return errorResponse(405, "invalid_request");
   }
 
   const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
   if (!contentType.startsWith("application/json")) {
-    return errorResponse(415, "unsupported_media_type");
+    return errorResponse(415, "invalid_request");
   }
 
+  // --- AUTH first (contract §4 fix — body is read/validated further down, AFTER auth+quota). ---
+  const authResult = await verifyAccount(req);
+  if (!authResult.ok) {
+    logEvent("parse_auth_rejected", {
+      status: authResult.response.status,
+      latencyMs: Math.round(performance.now() - startedAt),
+    });
+    return authResult.response;
+  }
+  const userIdHash = await hashUserId(authResult.userId);
+
+  // --- Tier: both free and pro may call /parse; only the daily limit differs. ---
+  const limit = parseLimitFor(authResult.tier);
+
+  const supabase = createServiceRoleClient();
+  if (!supabase) {
+    return errorResponse(503, "service_unavailable");
+  }
+
+  const now = new Date();
+  let quotaUsed: number;
+  try {
+    const check = await consumeQuota(supabase, authResult.userId, "parse", limit, now);
+    quotaUsed = check.used;
+    if (!check.allowed) {
+      logEvent("parse_request", {
+        userIdHash,
+        tier: authResult.tier,
+        status: 429,
+        quotaUsed: check.used,
+        latencyMs: Math.round(performance.now() - startedAt),
+      });
+      return jsonResponse(429, { error: "quota_exceeded", resetAt: check.resetAt });
+    }
+  } catch (err) {
+    logError("parse_quota_failure", {
+      userIdHash,
+      message: err instanceof Error ? err.message : "unknown",
+      latencyMs: Math.round(performance.now() - startedAt),
+    });
+    return errorResponse(503, "service_unavailable");
+  }
+
+  // --- Read & validate body only AFTER auth + quota have both passed. ---
   let rawBody: string;
   try {
     rawBody = await readBodyCapped(req, MAX_BODY_BYTES);
@@ -78,95 +130,19 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   try {
     parsedJson = JSON.parse(rawBody);
   } catch {
-    return errorResponse(400, "invalid_json");
+    return errorResponse(400, "invalid_request");
   }
 
   const validated = validateRequestBody(parsedJson);
   if (!validated.ok) {
-    return errorResponse(400, "invalid_request", { detail: validated.error });
+    return errorResponse(400, "invalid_request");
   }
   const body = validated.value;
-
-  // --- Auth: exactly one of the two headers, verified per ../_shared/auth.ts ---
-  const authorizationHeader = req.headers.get("authorization");
-  const deviceTokenHeader = req.headers.get("x-device-token");
-
-  if (!authorizationHeader && !deviceTokenHeader) {
-    return errorResponse(401, "auth_missing");
-  }
-
-  const authResult = authorizationHeader
-    ? await verifyPaidAuth(authorizationHeader)
-    : await verifyFreeAuth(deviceTokenHeader, rawBody);
-
-  if (!authResult.ok) {
-    logEvent("parse_auth_rejected", {
-      authMode: authorizationHeader ? "paid" : "free",
-      status: authResult.response.status,
-      latencyMs: Math.round(performance.now() - startedAt),
-    });
-    return authResult.response;
-  }
-
-  // --- Supabase service-role client (server-only; never the anon key) for the atomic RPC quota
-  // counters. Required regardless of auth mode's metering, since paid mode is soft-rate-limited
-  // through the same mechanism. ---
-  const supabaseCfg = requireEnv(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] as const);
-  if (!supabaseCfg.ok) {
-    // Opaque to the caller (info-leak hardening) — the specific missing keys are only useful to
-    // whoever owns the deployment, never to an unauthenticated internet caller.
-    logError("supabase_config_missing", { missingEnv: supabaseCfg.missing.join(",") });
-    return errorResponse(503, "config_missing");
-  }
-  const supabase = createClient(supabaseCfg.values.SUPABASE_URL, supabaseCfg.values.SUPABASE_SERVICE_ROLE_KEY, {
-    auth: { persistSession: false },
-  });
-
-  const now = new Date();
-  let quotaCount: number;
-  try {
-    if (authResult.mode === "free") {
-      const check = await checkFreeQuota(supabase, authResult.quotaKeyHash, now);
-      quotaCount = check.count;
-      if (!check.allowed) {
-        logEvent("parse_request", {
-          authMode: "free",
-          status: 429,
-          quotaCount: check.count,
-          latencyMs: Math.round(performance.now() - startedAt),
-        });
-        return jsonResponse(429, { reason: "quota", resetAt: check.resetAt });
-      }
-    } else {
-      const check = await checkPaidRateLimit(supabase, authResult.rateLimitKeyHash, now);
-      quotaCount = check.count;
-      if (!check.allowed) {
-        logEvent("parse_request", {
-          authMode: "paid",
-          status: 429,
-          rpmCount: check.count,
-          latencyMs: Math.round(performance.now() - startedAt),
-        });
-        // Contract only documents a "quota" reason for 429, but "rate_limited" is already a typed
-        // ApiErrorReason (http.ts) and is a more accurate label for the paid soft-rate-limit path
-        // (an abuse bound, not a real per-day quota); the client's documented behavior is "any
-        // non-200/401 4xx -> fallback", so this is safe to differentiate from the free-tier 429.
-        return jsonResponse(429, { reason: "rate_limited", resetAt: check.resetAt });
-      }
-    }
-  } catch (err) {
-    logError("parse_quota_failure", {
-      authMode: authResult.mode,
-      message: err instanceof Error ? err.message : "unknown",
-      latencyMs: Math.round(performance.now() - startedAt),
-    });
-    return errorResponse(500, "internal_error");
-  }
 
   const geminiCfg = requireEnv(["GEMINI_API_KEY"] as const);
   if (!geminiCfg.ok) {
     logError("gemini_config_missing", { missingEnv: geminiCfg.missing.join(",") });
-    return errorResponse(503, "config_missing");
+    return errorResponse(503, "service_unavailable");
   }
   const model = Deno.env.get("PARSE_MODEL") || DEFAULT_PARSE_MODEL;
   const timeoutMs = readEnvInt("PARSE_UPSTREAM_TIMEOUT_MS", 20000);
@@ -189,18 +165,19 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
       });
       const result = validateParsedTaskArray(raw);
       if (!result) {
-        logError("parse_output_invalid", { authMode: authResult.mode });
+        logError("parse_output_invalid", { tier: authResult.tier });
         return errorResponse(502, "upstream_error");
       }
       logEvent("parse_request", {
-        authMode: authResult.mode,
+        userIdHash,
+        tier: authResult.tier,
         status: 200,
         mode: "parse",
         transcriptChars: body.transcript.length,
         openTaskTitleCount: body.openTaskTitles.length,
         taskCount: result.tasks.length,
         droppedCount: result.droppedCount,
-        quotaCount,
+        quotaUsed,
         latencyMs: Math.round(performance.now() - startedAt),
       });
       return jsonResponse(200, result.tasks);
@@ -218,16 +195,17 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     });
     const steps = validateBreakdownSteps(raw);
     if (!steps) {
-      logError("parse_output_invalid", { authMode: authResult.mode, mode: "breakdown" });
+      logError("parse_output_invalid", { tier: authResult.tier, mode: "breakdown" });
       return errorResponse(502, "upstream_error");
     }
     logEvent("parse_request", {
-      authMode: authResult.mode,
+      userIdHash,
+      tier: authResult.tier,
       status: 200,
       mode: "breakdown",
       taskTitleChars: body.taskTitle.length,
       stepCount: steps.length,
-      quotaCount,
+      quotaUsed,
       latencyMs: Math.round(performance.now() - startedAt),
     });
     return jsonResponse(200, { steps });
@@ -236,7 +214,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     // else from this block. NEVER forward `err.message` — it may contain upstream response
     // fragments (see gemini.ts) — log only the error's class name.
     logError("parse_upstream_failure", {
-      authMode: authResult.mode,
+      tier: authResult.tier,
       errorType: err instanceof GeminiUpstreamError ? "gemini_upstream" : "unexpected",
       latencyMs: Math.round(performance.now() - startedAt),
     });

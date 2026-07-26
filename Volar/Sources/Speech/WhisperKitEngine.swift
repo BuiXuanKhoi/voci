@@ -189,6 +189,21 @@ final class WhisperKitEngine: SpeechEngine {
         }
     }
 
+    /// File-based transcription of a recording NOT captured by this engine's own `start()`/
+    /// `stop()` cycle — added for `GroqEngine`'s cloud-403/429 fallback
+    /// (`AppState.handleCloudSpeechUnavailable`), which salvages an already-recorded utterance
+    /// on-device instead of discarding it when the cloud proxy reports this account can't use Groq
+    /// right now. Callers MUST check `isModelReady` first (mirrors every other caller's gate on
+    /// this engine); this method itself touches only `pipeline`, never `session`/`isRunning`/
+    /// `recorder`, so it can run concurrently with this engine's own capture lifecycle without
+    /// racing it.
+    func transcribe(audioPath: String) async throws -> String {
+        guard let box = pipeline else {
+            throw NSError(domain: "Volar.WhisperKit", code: 1, userInfo: [NSLocalizedDescriptionKey: "Model not loaded"])
+        }
+        return try await Self.runTranscription(box, audioPath: audioPath)
+    }
+
     /// `nonisolated` is load-bearing: `WhisperKit`'s initializer and `transcribe` are both
     /// `nonisolated async`, so the pipeline must be built and used outside the main actor's region.
     /// Returning/receiving it inside a `Sendable` box is what lets it cross to `@MainActor` storage.

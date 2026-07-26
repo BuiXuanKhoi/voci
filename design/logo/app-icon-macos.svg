@@ -1,0 +1,67 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024" role="img" aria-label="Volar app icon (macOS)">
+  <!--
+    macOS re-composition of app-icon.svg. iOS icons are full-bleed (rx=224 on the full 1024x1024
+    canvas); macOS Dock icons instead expect the artwork inset inside a rounded square roughly
+    824x824 centered on the 1024x1024 canvas (~100px transparent margin on every side), with the
+    corner radius scaled down proportionally. Shipping the iOS full-bleed shape as-is on macOS
+    looks visibly wrong in the Dock (edges get clipped by the Dock's own mask, artwork reads as
+    cropped).
+
+    This file reuses every gradient/path/filter from app-icon.svg verbatim (same <defs>, same
+    <g clip-path="url(#ai-clip)"> content) and only adds an outer transform that scales the whole
+    1024x1024 composition down to 824x824 and centers it, leaving the remaining ~100px border of
+    this canvas transparent. Scaling uniformly means the clip rect's rx=224 renders at
+    224 * (824/1024) = 180.25, so "scaled proportionally" falls out of the transform for free;
+    no separate radius edit needed.
+  -->
+  <defs>
+    <radialGradient id="ai-studio" cx="50%" cy="6%" r="108%">
+      <stop offset="0%" stop-color="#191f29"/>
+      <stop offset="44%" stop-color="#0E1116"/>
+      <stop offset="100%" stop-color="#070A0D"/>
+    </radialGradient>
+    <radialGradient id="ai-spot" cx="60%" cy="34%" r="46%">
+      <stop offset="0%" stop-color="#E8B25A" stop-opacity="0.36"/>
+      <stop offset="46%" stop-color="#E8B25A" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#E8B25A" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="ai-wing" x1="20%" y1="90%" x2="80%" y2="10%">
+      <stop offset="0%" stop-color="#C68A3A"/>
+      <stop offset="55%" stop-color="#E8B25A"/>
+      <stop offset="100%" stop-color="#F2C982"/>
+    </linearGradient>
+    <filter id="ai-glow" x="-80%" y="-80%" width="260%" height="260%">
+      <feGaussianBlur stdDeviation="30"/>
+    </filter>
+    <clipPath id="ai-clip"><rect x="0" y="0" width="1024" height="1024" rx="224"/></clipPath>
+  </defs>
+
+  <!-- 100px margin on all sides: (1024 - 1024*0.8046875) / 2 = 100 -->
+  <g transform="translate(100,100) scale(0.8046875)">
+    <g clip-path="url(#ai-clip)">
+      <rect x="0" y="0" width="1024" height="1024" fill="url(#ai-studio)"/>
+      <rect x="0" y="0" width="1024" height="1024" fill="url(#ai-spot)"/>
+
+      <!-- bloom -->
+      <g filter="url(#ai-glow)" opacity="0.68">
+        <g transform="translate(196,250) scale(20.5)">
+          <path d="M6 13.2 Q9.7 19.7 13.5 21 Q17.5 17.3 22 8.3" fill="none" stroke="#E8B25A" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          <circle cx="24.7" cy="4.9" r="3.2" fill="#F2C982"/>
+        </g>
+      </g>
+
+      <!-- the wing -->
+      <g transform="translate(196,250) scale(20.5)">
+        <path d="M6 13.2 Q9.7 19.7 13.5 21 Q17.5 17.3 22 8.3" fill="none" stroke="url(#ai-wing)" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round"/>
+      </g>
+
+      <!-- the one lit thing -->
+      <circle cx="702" cy="350" r="50" fill="#F2C982"/>
+      <circle cx="702" cy="350" r="50" fill="none" stroke="#FBE9CC" stroke-width="6" stroke-opacity="0.9"/>
+      <circle cx="696" cy="342" r="19" fill="#FDF6E9" opacity="0.85"/>
+
+      <!-- top edge light -->
+      <rect x="1" y="1" width="1022" height="1022" rx="223" fill="none" stroke="#ffffff" stroke-opacity="0.05" stroke-width="2"/>
+    </g>
+  </g>
+</svg>

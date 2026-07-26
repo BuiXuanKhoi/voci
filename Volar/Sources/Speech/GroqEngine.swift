@@ -9,8 +9,11 @@ import AVFoundation
 ///
 /// Model strategy (backlog "★ KIẾN TRÚC CHỐT"): `whisper-large-v3` primary for best vi↔en
 /// code-switching; on a *server-side (5xx) or transport* failure it falls back once to
-/// `whisper-large-v3-turbo` (cheaper/faster) rather than failing the capture outright. Language is
-/// auto-detected (the client sends no `language`).
+/// `whisper-large-v3-turbo` (cheaper/faster) rather than failing the capture outright. Language:
+/// `languageCode` (set by `AppState` from Settings' Recognition-language picker) is forwarded as
+/// Groq's ISO-639-1 `language` hint on every request; the picker's "Automatic (multilingual)"
+/// choice leaves `languageCode` nil so the client sends no `language` field and Groq auto-detects
+/// instead — short clips auto-detect poorly, so a fixed locale should be preferred when known.
 ///
 /// Scope note: NOT yet wired into `AppState`/`PopoverView` (that's the tier-routing + StoreKit
 /// epic). It conforms to `SpeechEngine` so the capture flow can route to it later exactly as it
@@ -28,6 +31,28 @@ final class GroqEngine: SpeechEngine {
 
     var onFinal: ((String) -> Void)?
     var onError: ((Error) -> Void)?
+
+    /// Fired INSTEAD OF `onError` when the cloud proxy reports this account can't use Groq right
+    /// now — `403 upgrade_required` (the cached entitlement gate in
+    /// `EnvironmentGroqCredentialProvider.authorization()` was stale — a subscription lapsed, or
+    /// was never Pro, discovered only server-side/mid-flight) or `429 quota_exceeded` (today's
+    /// cloud speech cap hit). Per the no-shame UI rule (FR-016/FR-036, specs/002-workflow-command-
+    /// center/contracts/account-auth.md) this is a ROUTING signal, not a capture failure —
+    /// `AppState` never surfaces it through `.error` (see `AppState.handleCloudSpeechUnavailable`).
+    ///
+    /// Receives the just-recorded temp `.m4a`'s URL — still on disk at the moment this fires, since
+    /// the `defer` that removes it (top of the `stop()` task below) only runs once THIS closure's
+    /// `await` returns — so the receiver can attempt an on-device (WhisperKit) salvage
+    /// transcription of the same utterance before the file is gone. `async` specifically so the
+    /// caller can await an entitlement refresh and/or a salvage transcription before returning,
+    /// keeping the temp file alive for exactly as long as that needs.
+    var onCloudUnavailable: ((URL) async -> Void)?
+
+    /// ISO-639-1 language hint (e.g. "vi", "en") forwarded to Groq on every transcription, or `nil`
+    /// to let Groq auto-detect. Kept in sync with `AppState.recognitionLocaleID` by
+    /// `AppState.setRecognitionLocale`/its init — the "auto" sentinel resolves to `nil` here, any
+    /// specific locale resolves to its 2-letter code.
+    var languageCode: String?
 
     private let client: GroqTranscriptionClient
     private let primaryModel: GroqModel
@@ -110,6 +135,16 @@ final class GroqEngine: SpeechEngine {
                 self.onFinal?(text)
             } catch {
                 guard self.session == token else { return }
+                // 403 (stale entitlement) / 429 (quota) are not transcription failures — see
+                // `onCloudUnavailable`'s doc comment. Everything else (network, missing creds,
+                // decode, empty transcript, other HTTP statuses) is a real failure and still goes
+                // through `onError` exactly as before.
+                if case GroqTranscriptionError.http(let status, _) = error,
+                   status == 403 || status == 429,
+                   let onCloudUnavailable = self.onCloudUnavailable {
+                    await onCloudUnavailable(url)
+                    return
+                }
                 self.onError?(error)
             }
         }
@@ -120,10 +155,10 @@ final class GroqEngine: SpeechEngine {
     /// decoding) are NOT retried — a different model wouldn't help.
     private func transcribeWithFallback(audio: Data, filename: String) async throws -> String {
         do {
-            return try await client.transcribe(audio: audio, filename: filename, model: primaryModel)
+            return try await client.transcribe(audio: audio, filename: filename, model: primaryModel, language: languageCode)
         } catch let error as GroqTranscriptionError {
             guard Self.isRetriable(error) else { throw error }
-            return try await client.transcribe(audio: audio, filename: filename, model: fallbackModel)
+            return try await client.transcribe(audio: audio, filename: filename, model: fallbackModel, language: languageCode)
         }
     }
 
@@ -138,8 +173,9 @@ final class GroqEngine: SpeechEngine {
     /// Immediately abandons the in-flight capture. Bumps `session` FIRST — before anything else
     /// — so: (1) if `stop()` hasn't run yet, no upload ever starts for this session; (2) if an
     /// upload from `stop()` is already in flight, its session check (`guard self.session == token
-    /// else { return }` above) discards the result when it resolves — neither `onFinal` nor
-    /// `onError` fires. The network request itself may still complete in the background (Groq
+    /// else { return }` above) discards the result when it resolves — none of `onFinal`, `onError`,
+    /// nor `onCloudUnavailable` fires (that guard runs before the branch between them). The network
+    /// request itself may still complete in the background (Groq
     /// isn't told to abort), but its transcript can never reach the app. Then stops the recorder
     /// and deletes any temp audio file still referenced (a `stop()`-started upload already
     /// captured its own copy of the file path and cleans it up itself via `defer`).

@@ -234,6 +234,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// gracefully (no crash) rather than force-unwrapping.
     var appState: AppState?
 
+    /// Feature 002 gap fix: owns the floating capture panel (`Sources/Views/CapturePanel.swift`)
+    /// for the app's lifetime. Created lazily, on the first `syncCapturePanel()` call, rather than
+    /// here in `init`/`applicationDidFinishLaunching` — `CapturePanelController.init` needs a real
+    /// `AppState` to inject into `PopoverView`'s `.environment(...)`, and (per this class's own
+    /// doc comment above) `appState` isn't guaranteed assigned until `VolarApp.init()` has run,
+    /// which — for this property specifically — has already happened by the time
+    /// `applicationDidFinishLaunching` fires. Lazy construction here is just the more defensive
+    /// choice: it also tolerates `observeCaptureState()` firing before that assignment somehow did.
+    private var capturePanelController: CapturePanelController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // F1/F2 fix (MAJOR, liveness): this is an LSUIElement menu-bar app — `activateServices()`
         // used to be reachable ONLY from the main `Window`'s `.task` above, which never runs while
@@ -269,6 +279,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // scene's `.onReceive` modifiers so they fire even while the window is closed (see this
         // class's doc comment and VolarApp's final report).
         registerWindowIndependentObservers()
+
+        // Feature 002 gap fix: starts the `captureState` -> floating-panel mirroring described on
+        // `observeCaptureState()` below. Same "window-independent" motivation as the observers
+        // just above — this is what makes ⌃⌥M capture visible even while `Window("Volar")` is
+        // closed, the normal state for this `LSUIElement` menu-bar app.
+        observeCaptureState()
+    }
+
+    /// Drives `CapturePanelController` purely off `appState.captureState`, without touching
+    /// `AppState.swift` itself (off-limits for this task — another agent owns it right now).
+    /// `withObservationTracking`'s `onChange` closure fires exactly ONCE per call and — critically
+    /// — fires BEFORE the new value is actually committed to the observed property, so reading
+    /// `appState.captureState` synchronously inside `onChange` would still observe the OLD value.
+    /// Hopping into `Task { @MainActor in ... }` defers the read to the next run-loop turn, by
+    /// which point the mutation has landed; re-invoking `observeCaptureState()` from inside that
+    /// same hop is what re-arms tracking for the NEXT change (skip it and this would fire exactly
+    /// once, ever, and the panel would silently stop following `captureState` after the very first
+    /// capture).
+    private func observeCaptureState() {
+        withObservationTracking {
+            _ = appState?.captureState
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.syncCapturePanel()
+                self?.observeCaptureState()
+            }
+        }
+    }
+
+    /// Lazily creates `capturePanelController` (see that property's doc comment for why lazy),
+    /// then shows/refits or hides it to match the CURRENT `appState.captureState` — `.idle` hides,
+    /// anything else shows (first time) or re-fits (already visible; see
+    /// `CapturePanelController.presentOrRefit()`'s own doc comment for that distinction).
+    private func syncCapturePanel() {
+        guard let appState else { return }
+        if capturePanelController == nil {
+            capturePanelController = CapturePanelController(appState: appState)
+        }
+        guard let controller = capturePanelController else { return }
+
+        if appState.captureState == .idle {
+            controller.hide()
+        } else {
+            controller.presentOrRefit()
+        }
     }
 
     /// Moved verbatim (behaviorally) from `Window("Volar")`'s `.onReceive` modifiers in

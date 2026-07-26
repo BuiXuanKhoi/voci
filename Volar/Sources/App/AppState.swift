@@ -3,6 +3,7 @@ import AppKit
 import Foundation
 import Network
 import Observation
+import StoreKit
 import UserNotifications
 import VolarCore
 
@@ -205,8 +206,9 @@ final class AppState {
     private(set) var captureErrorDetail: String?
     /// User consented to Apple server-based recognition (audio leaves the Mac). Persisted.
     private(set) var allowServerRecognition: Bool
-    /// Speech-recognition language, as a BCP-47/locale identifier (e.g. "en-US", "vi-VN").
-    /// Persisted; applied live to `speech` via `setRecognitionLocale`.
+    /// Speech-recognition language, as a BCP-47/locale identifier (e.g. "en-US", "vi-VN") or the
+    /// `autoRecognitionLocaleID` ("auto") sentinel for "let each engine auto-detect". Persisted;
+    /// applied live to both `speech` and `groq` via `setRecognitionLocale`.
     private(set) var recognitionLocaleID: String
     /// Which transcription engine the user picked in Settings (freemium tier). Persisted; the
     /// engine actually used for a given capture is further gated by `selectedEngine` (e.g.
@@ -298,6 +300,30 @@ final class AppState {
     let whisper = WhisperKitEngine()
     /// Paid cloud tier.
     let groq = GroqEngine()
+
+    // MARK: - Account & Entitlements (specs/002-workflow-command-center/contracts/account-auth.md)
+    //
+    // Every property below is a `@MainActor`-observable MIRROR of `AccountService.shared`/
+    // `Entitlements.shared` (both plain, non-`@MainActor` `actor`s so their networking stays off
+    // the main actor per this feature's constraints) — refreshed by the methods further down
+    // right after each one awaits its actor. `SettingsView`'s Account tab reads these directly
+    // instead of awaiting an actor itself, matching how every other `SettingsView` tab only ever
+    // touches plain `AppState` properties/methods.
+    var accountEmail: String?
+    var accountTier: AccountTier = .free
+    var subscriptionStatus: SubscriptionStatus?
+    /// Inline error text for the Account tab (Apple sign-in / OTP / purchase / delete failures).
+    /// Deliberately separate from any other error surface in this file — account actions are
+    /// user-initiated from Settings, not part of the capture pipeline's error states.
+    var accountError: String?
+    /// True while an account/entitlement network action is in flight — drives a disabled/spinner
+    /// state on the Account tab's buttons so a slow network can't be raced into a double sign-in/
+    /// double-purchase.
+    var accountBusy = false
+    /// Hydrated by `startAccountLifecycle()`/`refreshAccountState()` so `SettingsView` can show
+    /// `product.displayPrice` (never a hardcoded "$6.99" — wrong in every non-US storefront).
+    var monthlyProduct: Product?
+    var yearlyProduct: Product?
     /// T036 (phase5-contract.md §C, contract A `VoiceDone`, `Sources/Speech/VoiceDone.swift`,
     /// sibling-owned — landed). Pure/stateless matcher; constructed once here like every other
     /// collaborator on this line.
@@ -359,7 +385,34 @@ final class AppState {
     private static let customImageKey = "volar.customImageURL"
     private static let allowServerRecognitionKey = "volar.allowServerRecognition"
     private static let recognitionLocaleKey = "volar.recognitionLocale"
+    /// Sentinel value for `recognitionLocaleID` meaning "no fixed language — let each engine
+    /// auto-detect": `SpeechCapture`/`WhisperKit` get `Locale.current` (the system language),
+    /// `GroqEngine` gets a nil `languageCode` so `GroqTranscriptionClient` omits the `language`
+    /// field entirely (Groq's own auto-detect, best for vi↔en code-switching). It's a magic string
+    /// rather than making `recognitionLocaleID` optional because that property is persisted
+    /// directly and used as a SwiftUI `Picker` `tag` (`SettingsView.swift`). `static`/internal (not
+    /// `private`) so `SettingsView` can tag its "Automatic (multilingual)" picker row with the same
+    /// constant instead of duplicating the string.
+    static let autoRecognitionLocaleID = "auto"
     private static let speechEngineKey = "volar.speechEngine"
+
+    /// Resolves the persisted `recognitionLocaleID` to a concrete `Locale` for `SpeechCapture`/
+    /// `WhisperKit`: `.current` (system locale) for the `autoRecognitionLocaleID` sentinel, the
+    /// literal locale otherwise (unchanged behavior for an explicit picker choice). `static` (not
+    /// an instance method) so it's safe to call from `init` before `self` is fully initialized.
+    private static func appleRecognitionLocale(for recognitionLocaleID: String) -> Locale {
+        recognitionLocaleID == autoRecognitionLocaleID ? Locale.current : Locale(identifier: recognitionLocaleID)
+    }
+
+    /// Resolves the persisted `recognitionLocaleID` to the ISO-639-1 code `GroqEngine`/
+    /// `GroqTranscriptionClient` expect in their `language` field (e.g. "vi-VN" -> "vi"). Returns
+    /// `nil` for the `autoRecognitionLocaleID` sentinel (Groq auto-detects when no `language` field
+    /// is sent) or if the locale identifier doesn't resolve to a known language code.
+    private static func groqLanguageCode(for recognitionLocaleID: String) -> String? {
+        guard recognitionLocaleID != autoRecognitionLocaleID else { return nil }
+        return Locale(identifier: recognitionLocaleID).language.languageCode?.identifier
+    }
+
     /// One-time cloud-parse consent. `fileprivate` (not `private`) so `DefaultCloudParseGate`
     /// (bottom of this file) can read the same key from `isOptedIn()`. `nonisolated` because a
     /// `static let` declared inside a `@MainActor` type inherits that isolation (only statics at
@@ -433,7 +486,10 @@ final class AppState {
             self.density = d
         }
         self.allowServerRecognition = UserDefaults.standard.bool(forKey: Self.allowServerRecognitionKey)
-        self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? "en-US"
+        // FIX (backlog 2026-07-26): default was hardcoded "en-US", silently ignoring the user's
+        // system language on first launch. "auto" lets both engines auto-detect until the user
+        // picks a specific locale in Settings (see `autoRecognitionLocaleID`'s doc comment).
+        self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? Self.autoRecognitionLocaleID
         self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .appleOnDevice
         self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
         self.voiceDeliveryMode = VoiceDeliveryMode(
@@ -500,7 +556,8 @@ final class AppState {
         // general (no public system-wide "is any app playing audio" API without an entitlement)
         // — calendar-busy (P3) + call/mic remain the real guards for that case.
         self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
-        speech.setLocale(Locale(identifier: self.recognitionLocaleID))
+        speech.setLocale(Self.appleRecognitionLocale(for: self.recognitionLocaleID))
+        groq.languageCode = Self.groqLanguageCode(for: self.recognitionLocaleID)
         // CAPTURE SEAM (AppLinkHandler.swift's own file header): wire `volar://capture?text=...`
         // into the SAME confirm-card-gated pipeline every other capture uses — never a bypass.
         // Assigned last (after every stored property above is set) since the closure captures
@@ -514,6 +571,156 @@ final class AppState {
             guard let self else { return }
             let transcript = source.map { "\(text) (via \($0))" } ?? text
             self.proceedToCapture(transcript: transcript)
+        }
+        // Account & Entitlements launch-time hydration — see that section below for what this
+        // kicks off. Called last, same reasoning as `appLinkHandler?.onCapture` immediately above:
+        // every stored property is settled by this point, and this call captures `self`.
+        startAccountLifecycle()
+    }
+
+    // MARK: - Account & Entitlements actions
+    //
+    // Every method below follows the same shape: flip `accountBusy`, run one `_Concurrency.Task`
+    // (qualified because `import VolarCore` shadows `Swift.Task` in this file — see the capture
+    // flow's own comment on this a few hundred lines down), await the actor call, mirror the
+    // result into the `@Observable` properties above, and clear `accountBusy` via `defer`.
+
+    /// Launch-time hydration: start-once `Transaction.updates` listener (renewals/refunds/Ask-to-
+    /// Buy), load the two products for the Account tab's upgrade rows, re-link every currently-
+    /// active StoreKit entitlement (contract §8 — no server-side App Store Notifications yet, so
+    /// this re-link-at-launch IS the renewal-propagation mechanism), then hydrate the mirrored
+    /// state below. Called once from the end of `init` above.
+    func startAccountLifecycle() {
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            await Entitlements.shared.startTransactionUpdatesListener()
+            await Entitlements.shared.loadProducts()
+            self.monthlyProduct = await Entitlements.shared.product(.monthly)
+            self.yearlyProduct = await Entitlements.shared.product(.yearly)
+            await Entitlements.shared.relinkCurrentEntitlements()
+            self.refreshAccountState()
+        }
+    }
+
+    /// Re-mirrors `AccountService`/`Entitlements`'s current state into this `@Observable` — called
+    /// after every sign-in/verify/purchase/restore action below, and at launch.
+    func refreshAccountState() {
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            self.accountEmail = await AccountService.shared.currentEmail
+            let status = await Entitlements.shared.refreshStatus()
+            self.subscriptionStatus = status
+            self.accountTier = status?.tier ?? (Entitlements.cachedIsPro ? .pro : .free)
+        }
+    }
+
+    func signInWithApple() {
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                let user = try await AccountService.shared.signInWithApple()
+                self.accountEmail = user.email
+                await Entitlements.shared.relinkCurrentEntitlements()
+                self.refreshAccountState()
+            } catch AccountError.cancelled {
+                // Not a real failure — user dismissed the sheet. No error text shown.
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
+    func sendEmailOTP(email: String) {
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                try await AccountService.shared.sendEmailOTP(email: email)
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
+    func verifyEmailOTP(email: String, code: String) {
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                let user = try await AccountService.shared.verifyEmailOTP(email: email, code: code)
+                self.accountEmail = user.email
+                await Entitlements.shared.relinkCurrentEntitlements()
+                self.refreshAccountState()
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
+    func signOutAccount() {
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            await AccountService.shared.signOut()
+            self.accountEmail = nil
+            self.accountTier = .free
+            self.subscriptionStatus = nil
+            self.accountError = nil
+        }
+    }
+
+    /// Contract §3 `delete-account` — Apple Guideline 5.1.1(v). `SettingsView` is responsible for
+    /// the confirmation step before calling this; by the time this runs, deletion is final.
+    func deleteAccount() {
+        accountBusy = true
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                try await AccountService.shared.deleteAccount()
+                self.accountEmail = nil
+                self.accountTier = .free
+                self.subscriptionStatus = nil
+                self.accountError = nil
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
+    func purchase(_ product: VolarProduct) {
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                _ = try await Entitlements.shared.purchase(product)
+                self.refreshAccountState()
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
+    func restorePurchases() {
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                try await Entitlements.shared.restorePurchases()
+                self.refreshAccountState()
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
         }
     }
 
@@ -666,16 +873,27 @@ final class AppState {
     /// with nothing left to ever turn it off.
     private var captureSession = 0
 
+    /// Session-only (never persisted, never touches `speechEngineChoice`): set by
+    /// `handleCloudSpeechUnavailable` the moment Groq reports a `403`/`429` mid-flight. Stops
+    /// `selectedEngine` from retrying Groq for the REST OF THIS RUN without waiting on a second
+    /// network round trip each capture — a lapsed subscription or a spent daily quota is a
+    /// transient condition, not a user preference change, so the Settings picker stays exactly as
+    /// the user left it. Never reset back to `false` within a run: the next thing that legitimately
+    /// re-arms Groq is the user relaunching (fresh `AppState`) or explicitly re-picking it in
+    /// Settings after fixing the underlying issue (resubscribing, waiting for the daily reset).
+    private var groqDegradedThisSession = false
+
     /// Picks the engine for the NEXT capture based on user choice, with safe fallbacks:
     /// WhisperKit only when supported AND its model is loaded, else Apple; Groq (cloud) only when a
-    /// credential is configured, else Apple on-device — so choosing cloud before a key exists
-    /// degrades quietly to local instead of hard-erroring at upload time ("code first, key later",
-    /// mirrors the Local↔Cloud parse switch's fallback).
+    /// credential is configured AND it hasn't degraded this session, else Apple on-device — so
+    /// choosing cloud before a key exists (or after a `403`/`429` mid-capture, see
+    /// `groqDegradedThisSession`) degrades quietly to local instead of hard-erroring at upload time
+    /// ("code first, key later", mirrors the Local↔Cloud parse switch's fallback).
     private var selectedEngine: SpeechEngine {
         switch speechEngineChoice {
         case .appleOnDevice: return speech
         case .whisperKit: return (WhisperKitEngine.isSupported && whisper.isModelReady) ? whisper : speech
-        case .groq: return GroqEngine.isConfigured ? groq : speech
+        case .groq: return (GroqEngine.isConfigured && !groqDegradedThisSession) ? groq : speech
         }
     }
 
@@ -721,10 +939,22 @@ final class AppState {
                 guard let self, self.captureSession == session else { return }
                 self.handleCaptureError(error)
             }
-            // Apple-only: server-consent + (locale already applied via setRecognitionLocale).
-            // WhisperKit/Groq auto-detect language, so there's nothing analogous to wire for them.
+            // Apple-only: server-consent. (Locale/language is already applied live by
+            // `setRecognitionLocale`/init — but only for `speech` (Apple, via `setLocale`) and
+            // `groq` (via `languageCode`); WhisperKit takes no locale input at all and always
+            // auto-detects the spoken language, so there is nothing to apply to it here or there.)
+            // WhisperKit also has no server-consent concept at all; Groq is cloud-only already (its
+            // consent gate is the paid-tier check in `selectedEngine`, not this on-device/server
+            // toggle) — so there's nothing analogous to wire for either of them here.
             if let apple = engine as? SpeechCapture {
                 apple.allowServerFallback = self.allowServerRecognition
+            }
+            // Groq-only: 403/429 mid-flight routes here instead of `onError` — see
+            // `handleCloudSpeechUnavailable`'s doc comment.
+            if let groqEngine = engine as? GroqEngine {
+                groqEngine.onCloudUnavailable = { [weak self] fileURL in
+                    await self?.handleCloudSpeechUnavailable(session: session, salvageAudioURL: fileURL)
+                }
             }
             engine.start(onPartial: { [weak self] partial in self?.liveTranscript = partial })
         }
@@ -744,6 +974,56 @@ final class AppState {
         captureErrorDetail = detail
         print("[Volar.Speech] onError -> \(detail)")
         captureState = .error
+    }
+
+    /// `GroqEngine.onCloudUnavailable` lands here (403 `upgrade_required` / 429 `quota_exceeded`)
+    /// instead of `handleCaptureError` — see that property's doc comment in `GroqEngine.swift`. The
+    /// no-shame UI rule (FR-016/FR-036) makes this a routing decision, never a visible error:
+    /// `captureState` must never become `.error` for either status.
+    ///
+    /// 1. Marks `groqDegradedThisSession` so `selectedEngine` stops retrying Groq for the rest of
+    ///    this run (see that property's doc comment) — independent of whether the refresh below
+    ///    actually observes the change, since a spent daily quota doesn't necessarily flip the
+    ///    cached tier that `GroqEngine.isConfigured` reads.
+    /// 2. Best-effort refreshes the entitlement cache via `Entitlements.shared.refreshStatus()` —
+    ///    the same "refresh affordance" `SettingsView`/app-launch already use, not a new mechanism —
+    ///    so `EnvironmentGroqCredentialProvider.isConfigured`'s cached tier stops being stale.
+    /// 3. Only when WhisperKit is genuinely `.ready` does it salvage the just-recorded utterance by
+    ///    handing Groq's temp audio file to it; on success this calls `groq.onFinal` — the SAME
+    ///    closure `startCapture()` already wired for this session — so the salvaged transcript flows
+    ///    through the exact normal `finishRecording` path exactly once, never a second/parallel one.
+    /// 4. If salvage isn't possible (hardware/model not ready) or fails (empty/throws), the
+    ///    recording is discarded and, if this session is still the current one and still sitting in
+    ///    `.parsing` (where `stopCapture()` leaves it while Groq's upload is in flight), capture
+    ///    quietly returns to `.idle` — never `.error`, and never left stuck on "Parsing…" forever.
+    ///
+    /// `session` is the `AppState.captureSession` token captured at `startCapture()` time (NOT
+    /// `GroqEngine`'s own private `session` counter) — re-checked after every `await` below exactly
+    /// like `onFinal`/`onError`'s own guards, so a `cancelCapture()`/a fresh capture superseding this
+    /// one while this method is mid-flight can never resurrect or clobber state for a session the
+    /// user has already moved on from.
+    private func handleCloudSpeechUnavailable(session: Int, salvageAudioURL: URL) async {
+        groqDegradedThisSession = true
+        // Calm, developer-facing log line only — this product has no non-error notice channel
+        // wired up yet (`IntentParsing.lastCloudQuotaNote` is the analogous parse-side signal and
+        // is itself not consumed by any view today), so per the no-shame UI rule this prefers
+        // silence over inventing a banner.
+        print("[Volar.Speech] cloud unavailable (stale entitlement or quota) -> falling back on-device")
+        _ = await Entitlements.shared.refreshStatus()
+
+        guard captureSession == session, captureState == .parsing else { return }
+
+        if WhisperKitEngine.isSupported, whisper.isModelReady,
+           let text = try? await whisper.transcribe(audioPath: salvageAudioURL.path),
+           !text.isEmpty {
+            guard captureSession == session else { return }
+            groq.onFinal?(text)
+            return
+        }
+
+        guard captureSession == session, captureState == .parsing else { return }
+        captureState = .idle
+        liveTranscript = ""
     }
 
     /// Turns a `SpeechCaptureError` into a user-facing message for `captureErrorDetail` — surfaces
@@ -840,11 +1120,15 @@ final class AppState {
         startCapture()
     }
 
-    /// Change the speech-recognition language (Settings ▸ Language). Persists and applies live.
+    /// Change the speech-recognition language (Settings ▸ Language). Persists and applies live to
+    /// BOTH engines: `speech` (Apple/WhisperKit path) gets a concrete `Locale`, `groq` gets the
+    /// matching ISO-639-1 `languageCode` — `id == autoRecognitionLocaleID` resolves to
+    /// `Locale.current` / `nil` respectively so each engine auto-detects instead.
     func setRecognitionLocale(_ id: String) {
         recognitionLocaleID = id
         UserDefaults.standard.set(id, forKey: Self.recognitionLocaleKey)
-        speech.setLocale(Locale(identifier: id))
+        speech.setLocale(Self.appleRecognitionLocale(for: id))
+        groq.languageCode = Self.groqLanguageCode(for: id)
     }
 
     /// Change the transcription engine (Settings). Persists; picking WhisperKit on Apple Silicon
