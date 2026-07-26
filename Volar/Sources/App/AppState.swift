@@ -668,6 +668,10 @@ final class AppState {
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
             await AccountService.shared.signOut()
+            // Must pair with the line above: `AccountService.signOut()` only clears the SESSION.
+            // The tier snapshot lives in `Entitlements` (UserDefaults), and leaving it behind
+            // makes `Entitlements.cachedIsPro` report Pro for a signed-out user at next launch.
+            await Entitlements.shared.clearEntitlementCache()
             self.accountEmail = nil
             self.accountTier = .free
             self.subscriptionStatus = nil
@@ -684,6 +688,9 @@ final class AppState {
             defer { self.accountBusy = false }
             do {
                 try await AccountService.shared.deleteAccount()
+                // Same pairing as `signOutAccount()` above — the account is gone server-side, so
+                // the cached Pro snapshot must go with it.
+                await Entitlements.shared.clearEntitlementCache()
                 self.accountEmail = nil
                 self.accountTier = .free
                 self.subscriptionStatus = nil

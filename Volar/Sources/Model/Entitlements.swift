@@ -72,6 +72,19 @@ actor Entitlements {
         UserDefaults.standard.set(tier.rawValue, forKey: cachedTierKey)
     }
 
+    /// Drops the tier snapshot AND the in-memory `status`. Called on sign-out / account deletion
+    /// (`AppState`), and by `refreshStatus()` below whenever it learns there is no session at all.
+    ///
+    /// Without this the snapshot is write-only: `cachedIsPro` keeps returning `true` after signing
+    /// out, so the next launch's `AppState.refreshAccountState()` — which falls back to
+    /// `cachedIsPro` when `refreshStatus()` returns nil for lack of a token — shows a signed-out
+    /// user as Pro. Note this is a stale-STATE bug, not an entitlement bypass: Groq stays shut
+    /// because `GroqTranscriptionClient.isConfigured` also requires a stored session.
+    func clearEntitlementCache() {
+        status = nil
+        UserDefaults.standard.removeObject(forKey: Self.cachedTierKey)
+    }
+
     private(set) var products: [Product] = []
     private(set) var status: SubscriptionStatus?
     private var updatesTask: Task<Void, Never>?
@@ -159,9 +172,45 @@ actor Entitlements {
         updatesTask = Task.detached { [weak self] in
             for await update in Transaction.updates {
                 guard let transaction = try? Self.checkVerified(update) else { continue }
-                _ = try? await self?.link(update)
-                await transaction.finish()
+                guard let self else { return }
+                do {
+                    _ = try await self.link(update)
+                    await transaction.finish()
+                } catch {
+                    // Leaving it UNFINISHED is the whole retry mechanism: StoreKit keeps
+                    // redelivering an unfinished transaction through `Transaction.updates` (and
+                    // `relinkCurrentEntitlements()` re-sees it at next launch), which is what
+                    // stands in for App Store Server Notifications this round (contract §8).
+                    // Only a failure that can never succeed gets finished — see below.
+                    if Self.isPermanentLinkFailure(error) {
+                        await transaction.finish()
+                    }
+                }
             }
+        }
+    }
+
+    /// Is retrying this `link` failure pointless? Used only by the listener above, to decide
+    /// between "leave unfinished so StoreKit redelivers it" and "finish it, the answer will never
+    /// change". Getting this wrong in the permissive direction is the worse failure: a transaction
+    /// finished on a transient error is never redelivered, so the server silently never learns
+    /// about that renewal — hence everything not provably permanent is treated as retryable.
+    private static func isPermanentLinkFailure(_ error: Error) -> Bool {
+        guard let error = error as? EntitlementError else { return false }
+        switch error {
+        case .alreadyLinkedToAnotherAccount:
+            // Contract §3 first-claim-wins — this Apple subscription belongs to a different Volar
+            // account. No number of retries changes that, and `purchase()` throws before finishing
+            // in this case too, so without this the transaction would be redelivered forever.
+            return true
+        case .http(let status, _):
+            // 4xx = the request itself is wrong for this account. Except the transient three:
+            // 401 (a later token refresh may fix it), 408, 429 (rate limited).
+            return (400..<500).contains(status) && ![401, 408, 429].contains(status)
+        default:
+            // `.notSignedIn` (user signs in later), `.network`, 5xx, decode failures, and any
+            // `AccountError` thrown out of `validAccessToken()` — all plausibly fixed by a retry.
+            return false
         }
     }
 
@@ -182,7 +231,21 @@ actor Entitlements {
     /// under a concurrent reader; `SettingsView` only shows this while signed in anyway.
     @discardableResult
     func refreshStatus() async -> SubscriptionStatus? {
-        guard let token = try? await AccountService.shared.validAccessToken() else { return status }
+        let token: String?
+        do {
+            token = try await AccountService.shared.validAccessToken()
+        } catch {
+            // THROWN = transient (offline, decode, a refresh that failed for a reason other than a
+            // dead token). Keep what we last knew rather than downgrading a paying user offline.
+            return status
+        }
+        guard let token else {
+            // RETURNED nil = definitive, not transient: `validAccessToken()` only does that when
+            // there is no session at all — the user signed out, or `performRefresh` found the
+            // refresh token dead (400/401) and cleared it. Either way the Pro snapshot has to go.
+            clearEntitlementCache()
+            return nil
+        }
         do {
             let (code, data) = try await Self.send(
                 path: "functions/v1/subscription/status", method: "GET", body: nil, bearer: token
