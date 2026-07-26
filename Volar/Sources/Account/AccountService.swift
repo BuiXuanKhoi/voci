@@ -273,7 +273,14 @@ private final class ThrowingContinuationOnce<T>: @unchecked Sendable {
         self.continuation = continuation
     }
 
-    func resume(returning value: T) {
+    /// `sending` (both here and on `resume(throwing:)`) matches `SpeechCapture`'s `ContinuationOnce`
+    /// and, more importantly, `CheckedContinuation.resume(returning:)`'s own Swift 6 signature
+    /// (`sending T`, SE-0430). Without it the compiler rejects the forward below with "sending
+    /// 'value' risks causing data races": a plain parameter is task-isolated, so handing it to a
+    /// `sending` parameter would let this task keep a reference to a value the continuation's
+    /// resumed task now also owns. Declaring it `sending` pushes that obligation out to the call
+    /// sites, which all pass freshly-constructed (and in fact `Sendable`) values.
+    func resume(returning value: sending T) {
         lock.lock()
         let c = continuation
         continuation = nil
@@ -281,7 +288,7 @@ private final class ThrowingContinuationOnce<T>: @unchecked Sendable {
         c?.resume(returning: value)
     }
 
-    func resume(throwing error: Error) {
+    func resume(throwing error: sending Error) {
         lock.lock()
         let c = continuation
         continuation = nil
