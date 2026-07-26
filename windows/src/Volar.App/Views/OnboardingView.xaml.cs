@@ -80,7 +80,7 @@ public sealed partial class OnboardingView : UserControl
     {
         var appResources = Application.Current.Resources;
         var accentSolid = (Brush)appResources["AccentSolidBrush"];
-        var inactive = new SolidColorBrush(Windows.UI.Color.FromArgb(0x26, 255, 255, 255)); // white@0.15.
+        var inactive = new SolidColorBrush(Windows.UI.Color.FromArgb(0x26, 0x94, 0xB2, 0xE0)); // veil@0.15.
 
         for (var i = 0; i < _stepDots.Count; i++)
         {
@@ -385,7 +385,7 @@ public sealed partial class OnboardingView : UserControl
             Padding = new Thickness(16, 12, 16, 12),
             CornerRadius = new CornerRadius(12), // one-off literal, OnboardingView.swift:253.
             BorderThickness = new Thickness(0.5),
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x0A, 255, 255, 255)), // white@0.04.
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x0A, 0x94, 0xB2, 0xE0)), // veil@0.04.
             BorderBrush = (Brush)appResources["VolarGlassBorderBrush"],
             Child = trySayingStack,
             Margin = new Thickness(0, 0, 0, 22),

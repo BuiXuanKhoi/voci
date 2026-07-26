@@ -21,9 +21,9 @@
          ============================================================ -->
     <Color x:Key="VolarIndigoSolid">#86B9FF</Color>
     <Color x:Key="VolarIndigoHover">#B3D2FF</Color>
-    <!-- #5B8DEF @0.15 -> alpha 0x26 -->
+    <!-- #86B9FF @0.15 -> alpha 0x26 -->
     <Color x:Key="VolarIndigoSurface">#2686B9FF</Color>
-    <!-- #5B8DEF @0.45 -> alpha 0x73 -->
+    <!-- #86B9FF @0.45 -> alpha 0x73 -->
     <Color x:Key="VolarIndigoGlow">#7386B9FF</Color>
 
     <SolidColorBrush x:Key="VolarIndigoSolidBrush" Color="{StaticResource VolarIndigoSolid}" />
@@ -48,7 +48,8 @@
 
     <!-- ============================================================
          Amber (selectable accent family — copper/burnt-orange #D9853D, deliberately NOT
-         VolarNowAccent's honey-gold #E8B25A; see file header).
+         VolarNowAccent's mint #8FEDCB; since Twilight the
+         spotlight is no longer amber at all, so this family no longer has anything to dodge).
          ============================================================ -->
     <Color x:Key="VolarAccentAmberSolid">#D9853D</Color>
     <Color x:Key="VolarAccentAmberHover">#E9A165</Color>

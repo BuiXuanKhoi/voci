@@ -328,7 +328,7 @@ public sealed partial class TodayView : UserControl
             NextPeekTitleText.Foreground = peek.IsDone ? (Brush)appResources["VolarTextMutBrush"] : (Brush)appResources["VolarTextSecBrush"];
             NextPeekTitleText.TextDecorations = peek.IsDone ? Windows.UI.Text.TextDecorations.Strikethrough : Windows.UI.Text.TextDecorations.None;
             NextPeekMetaText.Text = peek.DurationLabel ?? peek.TimeBadgeText ?? string.Empty;
-            var checkboxColor = peek.IsDone ? (Brush)appResources["AccentSolidBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x47, 255, 255, 255));
+            var checkboxColor = peek.IsDone ? (Brush)appResources["AccentSolidBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x47, 0x94, 0xB2, 0xE0));
             NextPeekCheckboxRing.Stroke = checkboxColor;
             NextPeekCheckboxFill.Fill = peek.IsDone ? (Brush)appResources["AccentSolidBrush"] : new SolidColorBrush(Microsoft.UI.Colors.Transparent);
             NextPeekCheckIcon.Visibility = peek.IsDone ? Visibility.Visible : Visibility.Collapsed;

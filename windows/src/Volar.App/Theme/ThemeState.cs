@@ -79,7 +79,7 @@ public static class AccentColorTable
             VolarAccent.Teal => (0x3DBFAFu, 0x63D6C7u), // Accents.xaml VolarTealSolid/Hover
             VolarAccent.Amber => (0xD9853Du, 0xE9A165u), // Accents.xaml VolarAccentAmberSolid/Hover
             VolarAccent.Magenta => (0xD16BC0u, 0xE38BD4u), // Accents.xaml VolarMagentaSolid/Hover
-            _ => (0x5B8DEFu, 0x7FA5F5u), // Indigo (default) — Accents.xaml VolarIndigoSolid/Hover
+            _ => (0x86B9FFu, 0xB3D2FFu), // Indigo (default) — Accents.xaml VolarIndigoSolid/Hover
         };
         var solid = FromRgb(solidRgb, 0xFF);
         var hover = FromRgb(hoverRgb, 0xFF);

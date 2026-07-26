@@ -36,9 +36,9 @@ namespace Volar.App.Views;
 
 public sealed partial class CapturePopover : UserControl
 {
-    // Color.white.opacity(0.18) -> alpha = round(0.18*255) = 45.9 -> 46 = 0x2E (PopoverView.swift's
+    // VolarColor.veil(0.18) -> alpha = round(0.18*255) = 45.9 -> 46 = 0x2E (PopoverView.swift's
     // accent-button hairline stroke, e.g. actionsRow's Save button, 817-819).
-    private static readonly SolidColorBrush WhiteOpacity18 = new(Color.FromArgb(0x2E, 255, 255, 255));
+    private static readonly SolidColorBrush WhiteOpacity18 = new(Color.FromArgb(0x2E, 0x94, 0xB2, 0xE0));
 
     private CapturePopoverViewModel? _viewModel;
 

@@ -14,15 +14,15 @@ namespace Volar.App.Views.Controls;
 public sealed partial class SidebarControl : UserControl
 {
     // VolarColor.surface.opacity(0.45) (Sidebar.swift:63-65, ambient-mode overlay) -> alpha =
-    // round(0.45*255) = 114.75 -> 115 = 0x73, over VolarSurface's own RGB (#15181E).
-    private static readonly SolidColorBrush AmbientSurfaceOverlayBrush = new(Color.FromArgb(0x73, 0x15, 0x18, 0x1E));
+    // round(0.45*255) = 114.75 -> 115 = 0x73, over VolarSurface's own RGB (#0A101C).
+    private static readonly SolidColorBrush AmbientSurfaceOverlayBrush = new(Color.FromArgb(0x73, 0x0A, 0x10, 0x1C));
 
-    // Color.white.opacity(0.03) (Sidebar.swift:121, footer background) -> alpha = round(0.03*255) =
+    // VolarColor.veil(0.03) (Sidebar.swift:121, footer background) -> alpha = round(0.03*255) =
     // 7.65 -> 8 = 0x08.
-    private static readonly SolidColorBrush FooterBackgroundBrush = new(Color.FromArgb(0x08, 255, 255, 255));
+    private static readonly SolidColorBrush FooterBackgroundBrush = new(Color.FromArgb(0x08, 0x94, 0xB2, 0xE0));
 
-    // Color.white.opacity(0.04) (Sidebar.swift:183, nav-item hover tint) -> alpha 0x0A.
-    private static readonly SolidColorBrush NavHoverBrush = new(Color.FromArgb(0x0A, 255, 255, 255));
+    // VolarColor.veil(0.04) (Sidebar.swift:183, nav-item hover tint) -> alpha 0x0A.
+    private static readonly SolidColorBrush NavHoverBrush = new(Color.FromArgb(0x0A, 0x94, 0xB2, 0xE0));
 
     private static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
 

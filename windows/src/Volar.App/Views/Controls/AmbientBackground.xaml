@@ -47,7 +47,7 @@
                 FontFamily="{StaticResource VolarMonoFontFamily}"
                 FontSize="12"
                 CharacterSpacing="40"
-                Foreground="#47FFFFFF"
+                Foreground="#4794B2E0"
                 TextAlignment="Center"
                 TextWrapping="Wrap"
                 MaxWidth="320"

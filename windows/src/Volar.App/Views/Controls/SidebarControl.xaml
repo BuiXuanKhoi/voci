@@ -9,7 +9,7 @@
   Width 160 = wave4-slice.md's own "Sidebar w=160" spec (Sidebar.swift:50, matches exactly). Corner
   radii 9 (capture button/footer, VolarCornerRadiusHairline) and 7 (nav-item hover pill,
   Sidebar.swift:184) are literals per the CornerRadius/Thickness gotcha. Hairline 0.5 =
-  VolarHairlineThickness, literal. `Color.white.opacity(0.03/0.04)` (Sidebar.swift:63,121 — the
+  VolarHairlineThickness, literal. `VolarColor.veil(0.03/0.04)` (Sidebar.swift:63,121 — the
   ambient-mode surface overlay tint and the footer's plain-mode background) are one-off inline
   literals, same "component-local one-off" pattern Components.swift's own inline opacities use
   elsewhere in this port (no named Colors.xaml resource exists for these — see views-inventory.md §1.5

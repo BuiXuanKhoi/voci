@@ -11,9 +11,9 @@ namespace Volar.App.Views.Controls;
 
 public sealed partial class VolarToggle : UserControl
 {
-    // Color.white.opacity(0.12) -> alpha = round(0.12*255) = 30.6 -> 31 = 0x1F (SettingsView.swift:795,
+    // VolarColor.veil(0.12) -> alpha = round(0.12*255) = 30.6 -> 31 = 0x1F (SettingsView.swift:795,
     // the off-state track fill).
-    private static readonly SolidColorBrush OffTrackBrush = new(Color.FromArgb(0x1F, 255, 255, 255));
+    private static readonly SolidColorBrush OffTrackBrush = new(Color.FromArgb(0x1F, 0x94, 0xB2, 0xE0));
 
     // The thumb's travel distance: track width (38) - thumb width (18) - left/right margin (2*2) = 16.
     private const double ThumbTravel = 16;

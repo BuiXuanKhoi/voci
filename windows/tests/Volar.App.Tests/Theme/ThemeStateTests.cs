@@ -17,11 +17,14 @@ namespace Volar.App.Tests.Theme;
 public sealed class ThemeStateTests
 {
     // ------------------------------------------------------------------------------------------
-    // MARK: AccentColorTable — cross-checked against Accents.xaml's hex literals verbatim.
+    // MARK: AccentColorTable — the InlineData below is a hand-copy of Accents.xaml, so it can
+    // only catch a change to AccentColorTable itself. AccentColorTable_MatchesAccentsXaml (bottom of
+    // this file) is the one that actually reads the XAML and catches the two drifting apart — the
+    // Twilight retheme changed the XAML alone and every test here still passed.
     // ------------------------------------------------------------------------------------------
 
     [Theory]
-    [InlineData(VolarAccent.Indigo, 0x5B, 0x8D, 0xEF, 0x7F, 0xA5, 0xF5)]
+    [InlineData(VolarAccent.Indigo, 0x86, 0xB9, 0xFF, 0xB3, 0xD2, 0xFF)]
     [InlineData(VolarAccent.Teal, 0x3D, 0xBF, 0xAF, 0x63, 0xD6, 0xC7)]
     [InlineData(VolarAccent.Amber, 0xD9, 0x85, 0x3D, 0xE9, 0xA1, 0x65)]
     [InlineData(VolarAccent.Magenta, 0xD1, 0x6B, 0xC0, 0xE3, 0x8B, 0xD4)]
@@ -205,6 +208,55 @@ public sealed class ThemeStateTests
         Assert.Equal(@"C:\pictures\bg.png", state.CustomImagePath);
         Assert.Equal(AmbientMode.Custom, state.Ambient); // SetCustomImage's own asymmetric contract.
     }
+
+    /// <summary>The cross-check the InlineData above only claims to be: parses the REAL
+    /// Accents.xaml (embedded into this test assembly by the .csproj) and diffs every family's
+    /// solid/hover against <see cref="AccentColorTable"/>. The two are separate hand-maintained
+    /// copies of the same palette — the Twilight retheme edited the XAML and left the C# table on
+    /// the old indigo, and nothing failed, because every existing assertion was written against a
+    /// hand-copy rather than the file.</summary>
+    [Fact]
+    public void AccentColorTable_MatchesAccentsXaml()
+    {
+        using var stream = typeof(ThemeStateTests).Assembly.GetManifestResourceStream("Accents.xaml");
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream!);
+        var xaml = reader.ReadToEnd();
+
+        // Accents.xaml key names are NOT a uniform "Volar<Family>Solid": amber's are
+        // VolarAccentAmber* (plain "VolarAmber*" would collide with nothing today, but the file
+        // chose the longer form), so the family -> key-prefix mapping is spelled out here.
+        var prefixes = new (VolarAccent Accent, string Prefix)[]
+        {
+            (VolarAccent.Indigo, "VolarIndigo"),
+            (VolarAccent.Teal, "VolarTeal"),
+            (VolarAccent.Amber, "VolarAccentAmber"),
+            (VolarAccent.Magenta, "VolarMagenta"),
+        };
+
+        foreach (var (accent, prefix) in prefixes)
+        {
+            var colors = AccentColorTable.For(accent);
+            Assert.Equal(ReadHex(xaml, prefix + "Solid"), ToHex(colors.Solid));
+            Assert.Equal(ReadHex(xaml, prefix + "Hover"), ToHex(colors.Hover));
+            // Surface/glow carry the documented alphas over the SAME rgb, so comparing the full
+            // 8-digit literal also pins the 0x26/0x73 alpha math the file's comments promise.
+            Assert.Equal(ReadHex(xaml, prefix + "Surface"), ToArgbHex(colors.Surface));
+            Assert.Equal(ReadHex(xaml, prefix + "Glow"), ToArgbHex(colors.Glow));
+        }
+    }
+
+    private static string ReadHex(string xaml, string key)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            xaml, $"<Color x:Key=\"{key}\">#([0-9A-Fa-f]{{6,8}})</Color>");
+        Assert.True(match.Success, $"Accents.xaml has no <Color x:Key=\"{key}\">");
+        return match.Groups[1].Value.ToUpperInvariant();
+    }
+
+    private static string ToHex(Windows.UI.Color c) => $"{c.R:X2}{c.G:X2}{c.B:X2}";
+
+    private static string ToArgbHex(Windows.UI.Color c) => $"{c.A:X2}{c.R:X2}{c.G:X2}{c.B:X2}";
 
     /// <summary>Stands in for <see cref="ApplicationAccentBrushWriter"/> (which needs a live
     /// Application.Resources and cannot run in this headless test host) — records every accent it

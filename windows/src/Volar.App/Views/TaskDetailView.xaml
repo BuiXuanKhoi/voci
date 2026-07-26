@@ -30,9 +30,9 @@
              sits ON TOP of content rather than being a translucent panel fill). -->
         <SolidColorBrush x:Key="ScrimBrush" Color="Black" Opacity="0.45" />
 
-        <!-- Color.white.opacity(0.06) -> alpha = round(0.06*255) = 15.3 -> 15 = 0x0F
+        <!-- VolarColor.veil(0.06) -> alpha = round(0.06*255) = 15.3 -> 15 = 0x0F
              (TaskDetailView.swift:162, Close button background). -->
-        <SolidColorBrush x:Key="White06Brush" Color="#0FFFFFFF" />
+        <SolidColorBrush x:Key="White06Brush" Color="#0F94B2E0" />
 
         <!-- VolarHigh (#B9705A) @0.12 -> alpha = round(0.12*255) = 30.6 -> 31 = 0x1F
              (TaskDetailView.swift:177, Delete button background). -->

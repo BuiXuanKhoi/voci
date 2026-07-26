@@ -8,13 +8,13 @@ namespace Volar.App.Views.Controls;
 
 public sealed partial class KeyBadge : UserControl
 {
-    // Color.white.opacity(0.08) -> alpha = round(0.08*255) = 20.4 -> 20 = 0x14 (Components.swift:31,
+    // VolarColor.veil(0.08) -> alpha = round(0.08*255) = 20.4 -> 20 = 0x14 (Components.swift:31,
     // the non-accent background).
-    private static readonly SolidColorBrush WhiteOpacity08 = new(Color.FromArgb(0x14, 255, 255, 255));
+    private static readonly SolidColorBrush WhiteOpacity08 = new(Color.FromArgb(0x14, 0x94, 0xB2, 0xE0));
 
-    // Color.white.opacity(0.10) -> alpha = round(0.10*255) = 25.5 -> 26 = 0x1A (Components.swift:35,
+    // VolarColor.veil(0.10) -> alpha = round(0.10*255) = 25.5 -> 26 = 0x1A (Components.swift:35,
     // the non-accent border stroke).
-    private static readonly SolidColorBrush WhiteOpacity10 = new(Color.FromArgb(0x1A, 255, 255, 255));
+    private static readonly SolidColorBrush WhiteOpacity10 = new(Color.FromArgb(0x1A, 0x94, 0xB2, 0xE0));
 
     public static readonly DependencyProperty TextProperty = DependencyProperty.Register(
         nameof(Text), typeof(string), typeof(KeyBadge), new PropertyMetadata(string.Empty, OnVisualChanged));

@@ -15,9 +15,9 @@ namespace Volar.App.Views.Controls;
 
 public sealed partial class ToolButton : UserControl
 {
-    // Color.white.opacity(0.08) -> alpha 0x14 (Components.swift:160, plain-mode hover tint — same
+    // VolarColor.veil(0.08) -> alpha 0x14 (Components.swift:160, plain-mode hover tint — same
     // math as KeyBadge's identical literal).
-    private static readonly SolidColorBrush WhiteOpacity08 = new(Color.FromArgb(0x14, 255, 255, 255));
+    private static readonly SolidColorBrush WhiteOpacity08 = new(Color.FromArgb(0x14, 0x94, 0xB2, 0xE0));
 
     private static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
     private static readonly SolidColorBrush WhiteBrush = new(Color.FromArgb(0xFF, 255, 255, 255));

@@ -22,8 +22,8 @@
     <UserControl.Resources>
         <SolidColorBrush x:Key="ScrimBrush" Color="Black" Opacity="0.45" />
 
-        <!-- Color.white.opacity(0.06) -> alpha 0x0F (SweepView.swift:181/196, action button background). -->
-        <SolidColorBrush x:Key="White06Brush" Color="#0FFFFFFF" />
+        <!-- VolarColor.veil(0.06) -> alpha 0x0F (SweepView.swift:181/196, action button background). -->
+        <SolidColorBrush x:Key="White06Brush" Color="#0F94B2E0" />
 
         <Style x:Key="ActionButtonStyle" TargetType="Button">
             <Setter Property="Height" Value="28" />

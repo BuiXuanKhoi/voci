@@ -68,12 +68,12 @@
                     <ColumnDefinition Width="*" />
                 </Grid.ColumnDefinitions>
 
-                <!-- Done / Snooze — not solid (NotificationView.swift:71: Color.white.opacity(0.08)
-                     background -> #14FFFFFF, border Color.white.opacity(0.06) -> #0FFFFFFF). -->
-                <Button Grid.Column="0" x:Name="DoneButton" Click="OnDoneClick" Height="28" Padding="0" CornerRadius="8" Background="#14FFFFFF" BorderBrush="#0FFFFFFF" BorderThickness="0.5">
+                <!-- Done / Snooze — not solid (NotificationView.swift:71: VolarColor.veil(0.08)
+                     background -> #1494B2E0, border VolarColor.veil(0.06) -> #0F94B2E0). -->
+                <Button Grid.Column="0" x:Name="DoneButton" Click="OnDoneClick" Height="28" Padding="0" CornerRadius="8" Background="#1494B2E0" BorderBrush="#0F94B2E0" BorderThickness="0.5">
                     <TextBlock Text="Done" FontSize="11.5" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
                 </Button>
-                <Button Grid.Column="1" x:Name="SnoozeButton" Click="OnSnoozeClick" Height="28" Padding="0" CornerRadius="8" Background="#14FFFFFF" BorderBrush="#0FFFFFFF" BorderThickness="0.5">
+                <Button Grid.Column="1" x:Name="SnoozeButton" Click="OnSnoozeClick" Height="28" Padding="0" CornerRadius="8" Background="#1494B2E0" BorderBrush="#0F94B2E0" BorderThickness="0.5">
                     <TextBlock Text="Snooze 10 min" FontSize="11.5" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
                 </Button>
                 <!-- Reschedule — solid (NotificationView.swift:71: accentColors.surface background,

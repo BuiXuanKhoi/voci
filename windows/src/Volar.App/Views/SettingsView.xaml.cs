@@ -316,7 +316,7 @@ public sealed partial class SettingsView : UserControl
             CornerRadius = new CornerRadius(8),
             BorderThickness = new Thickness(0.5),
             Background = solid ? (Brush)appResources["AccentSolidBrush"] : (Brush)appResources["VolarSurfaceHiBrush"],
-            BorderBrush = solid ? new SolidColorBrush(Windows.UI.Color.FromArgb(0x2E, 255, 255, 255)) : (Brush)appResources["VolarBorderHiBrush"],
+            BorderBrush = solid ? new SolidColorBrush(Windows.UI.Color.FromArgb(0x2E, 0x94, 0xB2, 0xE0)) : (Brush)appResources["VolarBorderHiBrush"],
             Foreground = solid ? new SolidColorBrush(Microsoft.UI.Colors.White) : (Brush)appResources["VolarTextPriBrush"],
         };
         SuppressStockButtonChrome(button);
@@ -575,7 +575,7 @@ public sealed partial class SettingsView : UserControl
             Width = 44,
             Height = 30,
             CornerRadius = new CornerRadius(6), // VolarCornerRadiusSmall's value — literal per the gotcha.
-            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x0F, 255, 255, 255)),
+            Background = new SolidColorBrush(Windows.UI.Color.FromArgb(0x0F, 0x94, 0xB2, 0xE0)),
         };
         if (!string.IsNullOrEmpty(path) && File.Exists(path))
         {
@@ -621,7 +621,7 @@ public sealed partial class SettingsView : UserControl
                 Width = 22,
                 Height = 22,
                 Fill = (Brush)appResources[brushKey],
-                Stroke = selected ? (Brush)appResources[brushKey] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x33, 255, 255, 255)),
+                Stroke = selected ? (Brush)appResources[brushKey] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x33, 0x94, 0xB2, 0xE0)),
                 StrokeThickness = selected ? 1.5 : 0.5,
             };
             var wrapper = new Grid
@@ -861,7 +861,7 @@ public sealed partial class SettingsView : UserControl
         {
             Padding = new Thickness(8, 2, 8, 2),
             CornerRadius = new CornerRadius(999), // Capsule — same convention as BuildPill's badge.
-            Background = vm.IsPro ? (Brush)appResources["AccentSurfaceBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x1F, 255, 255, 255)),
+            Background = vm.IsPro ? (Brush)appResources["AccentSurfaceBrush"] : new SolidColorBrush(Windows.UI.Color.FromArgb(0x1F, 0x94, 0xB2, 0xE0)),
             Child = new TextBlock
             {
                 Text = vm.TierLabel,
@@ -1004,7 +1004,7 @@ public sealed partial class SettingsView : UserControl
 
         var pillsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, HorizontalAlignment = HorizontalAlignment.Center };
         pillsRow.Children.Add(BuildPill("What's new", (Brush)appResources["AccentSolidBrush"], (Brush)appResources["AccentSurfaceBrush"]));
-        pillsRow.Children.Add(BuildPill("Acknowledgements", (Brush)appResources["VolarTextSecBrush"], new SolidColorBrush(Windows.UI.Color.FromArgb(0x0F, 255, 255, 255))));
+        pillsRow.Children.Add(BuildPill("Acknowledgements", (Brush)appResources["VolarTextSecBrush"], new SolidColorBrush(Windows.UI.Color.FromArgb(0x0F, 0x94, 0xB2, 0xE0))));
         stack.Children.Add(pillsRow);
 
         return new ScrollViewer { Content = stack, VerticalScrollBarVisibility = ScrollBarVisibility.Disabled, HorizontalContentAlignment = HorizontalAlignment.Center };

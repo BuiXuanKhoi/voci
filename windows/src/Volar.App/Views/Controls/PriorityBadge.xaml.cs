@@ -12,9 +12,9 @@ namespace Volar.App.Views.Controls;
 
 public sealed partial class PriorityBadge : UserControl
 {
-    // Color.white.opacity(0.05) -> alpha = round(0.05*255) = 12.75 -> 13 = 0x0D (Components.swift:55,
+    // VolarColor.veil(0.05) -> alpha = round(0.05*255) = 12.75 -> 13 = 0x0D (Components.swift:55,
     // Low's background — the one case that does NOT derive from VolarLow/VolarHigh/VolarMed).
-    private static readonly SolidColorBrush LowBackground = new(Color.FromArgb(0x0D, 255, 255, 255));
+    private static readonly SolidColorBrush LowBackground = new(Color.FromArgb(0x0D, 0x94, 0xB2, 0xE0));
 
     // VolarHigh (#B9705A) @0.14 -> alpha = round(0.14*255) = 35.7 -> 36 = 0x24 (Components.swift:51).
     private static readonly SolidColorBrush HighBackground = new(Color.FromArgb(0x24, 0xB9, 0x70, 0x5A));

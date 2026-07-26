@@ -32,9 +32,9 @@
     <UserControl.Resources>
         <SolidColorBrush x:Key="AccentBorder027Brush" Color="{Binding Color, Source={StaticResource AccentSolidBrush}}" Opacity="0.27" />
 
-        <!-- Color.white.opacity(0.28) -> alpha = round(0.28*255) = 71.4 -> 71 = 0x47
+        <!-- VolarColor.veil(0.28) -> alpha = round(0.28*255) = 71.4 -> 71 = 0x47
              (MorningFrogView.swift:147, unselected candidate-row radio ring). -->
-        <SolidColorBrush x:Key="White28Brush" Color="#47FFFFFF" />
+        <SolidColorBrush x:Key="White28Brush" Color="#4794B2E0" />
 
         <!-- VolarHigh (#B9705A) @0.12 -> alpha 0x1F (MorningFrogView.swift:171, "urgent" badge
              background — same math as TaskDetailView.xaml's HighBackground012Brush). -->

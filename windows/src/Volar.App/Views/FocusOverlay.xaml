@@ -60,11 +60,11 @@
 
             <!-- Progress hairline — FocusOverlay.swift:100-112. Fixed width 240 (literal, matches
                  the Swift `total: CGFloat = 240`), height 2, cornerRadius 1 (one-off, not a Metrics
-                 key). Track tint Color.white.opacity(0.10) -> alpha 0x1A. Fill width set by
+                 key). Track tint VolarColor.veil(0.10) -> alpha 0x1A. Fill width set by
                  FocusOverlay.xaml.cs's Apply() from ViewModel.ProgressFraction — no per-second
                  animation in v1 (this task's brief). -->
             <Grid Width="240" Height="2" Margin="0,20,0,0" HorizontalAlignment="Center">
-                <Border Background="#1AFFFFFF" CornerRadius="1" />
+                <Border Background="#1A94B2E0" CornerRadius="1" />
                 <Border x:Name="ProgressFillBorder" CornerRadius="1" HorizontalAlignment="Left" Width="0" />
             </Grid>
 
@@ -120,25 +120,25 @@
 
         <!-- Top-right (pause/end) + bottom nav (prev/index/next) overlay — FocusOverlay.swift:88-96,
              `.padding(14)`. FocusRoundBtn (FocusOverlay.swift:238-268): 30x30 circle,
-             background Color.white.opacity(0.06) -> #0FFFFFFF, border Color.white.opacity(0.10)
-             stroke 0.5 -> #1AFFFFFF, icon Color.white.opacity(0.7) -> #B3FFFFFF. Hover-swap to
+             background VolarColor.veil(0.06) -> #0F94B2E0, border VolarColor.veil(0.10)
+             stroke 0.5 -> #1A94B2E0, icon Color.white.opacity(0.7) -> #B3FFFFFF. Hover-swap to
              opacity(0.12) is NOT replicated — these small round buttons use the stock WinUI Button
              PointerOver visual state instead (a v1 simplification, flagged in this task's final
              report, not a silent drop: the stock hover is still a visible, working hover state,
              just not byte-identical to the Swift opacity value). -->
         <Grid Margin="14">
             <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" VerticalAlignment="Top">
-                <Button x:Name="PauseButton" Click="OnPauseClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5">
+                <Button x:Name="PauseButton" Click="OnPauseClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0F94B2E0" BorderBrush="#1A94B2E0" BorderThickness="0.5">
                     <controls:VolarIcon x:Name="PauseIcon" IconSize="12" IconBrush="#B3FFFFFF" />
                 </Button>
-                <Button x:Name="EndButton" Click="OnEndClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5" ToolTipService.ToolTip="End session">
+                <Button x:Name="EndButton" Click="OnEndClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0F94B2E0" BorderBrush="#1A94B2E0" BorderThickness="0.5" ToolTipService.ToolTip="End session">
                     <controls:VolarIcon IconName="X" IconSize="12" IconBrush="#B3FFFFFF" />
                 </Button>
             </StackPanel>
 
             <StackPanel HorizontalAlignment="Center" VerticalAlignment="Bottom" Spacing="7">
                 <StackPanel Orientation="Horizontal" Spacing="14" HorizontalAlignment="Center">
-                    <Button x:Name="PrevButton" Click="OnPreviousClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5" ToolTipService.ToolTip="Previous task (←)">
+                    <Button x:Name="PrevButton" Click="OnPreviousClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0F94B2E0" BorderBrush="#1A94B2E0" BorderThickness="0.5" ToolTipService.ToolTip="Previous task (←)">
                         <controls:VolarIcon IconName="Back" IconSize="12" IconBrush="#B3FFFFFF" />
                     </Button>
                     <TextBlock
@@ -149,7 +149,7 @@
                         MinWidth="52"
                         TextAlignment="Center"
                         VerticalAlignment="Center" />
-                    <Button x:Name="NextButton" Click="OnNextClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5" ToolTipService.ToolTip="Next task (→)">
+                    <Button x:Name="NextButton" Click="OnNextClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0F94B2E0" BorderBrush="#1A94B2E0" BorderThickness="0.5" ToolTipService.ToolTip="Next task (→)">
                         <controls:VolarIcon IconName="Chevron" IconSize="12" IconBrush="#B3FFFFFF" />
                     </Button>
                 </StackPanel>

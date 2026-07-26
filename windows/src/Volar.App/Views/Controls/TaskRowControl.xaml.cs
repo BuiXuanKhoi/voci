@@ -18,9 +18,9 @@ namespace Volar.App.Views.Controls;
 
 public sealed partial class TaskRowControl : UserControl
 {
-    // Color.white.opacity(0.28) -> alpha = round(0.28*255) = 71.4 -> 71 = 0x47 (TaskRow.swift:108,
+    // VolarColor.veil(0.28) -> alpha = round(0.28*255) = 71.4 -> 71 = 0x47 (TaskRow.swift:108,
     // the not-done checkbox ring stroke).
-    private static readonly SolidColorBrush CheckboxRingIdleBrush = new(Color.FromArgb(0x47, 255, 255, 255));
+    private static readonly SolidColorBrush CheckboxRingIdleBrush = new(Color.FromArgb(0x47, 0x94, 0xB2, 0xE0));
 
     private static readonly SolidColorBrush TransparentBrush = new(Colors.Transparent);
     private static readonly SolidColorBrush WhiteBrush = new(Color.FromArgb(0xFF, 255, 255, 255));

@@ -24,15 +24,15 @@
     <UserControl.Resources>
         <SolidColorBrush x:Key="ScrimBrush" Color="Black" Opacity="0.45" />
 
-        <!-- Color.white.opacity(0.06) -> alpha 0x0F (see TaskDetailView.xaml's identical brush;
+        <!-- VolarColor.veil(0.06) -> alpha 0x0F (see TaskDetailView.xaml's identical brush;
              duplicated locally per this wave's file-disjoint-view convention). -->
-        <SolidColorBrush x:Key="White06Brush" Color="#0FFFFFFF" />
+        <SolidColorBrush x:Key="White06Brush" Color="#0F94B2E0" />
 
-        <!-- Color.white.opacity(0.04) -> alpha = round(0.04*255) = 10.2 -> 10 = 0x0A
+        <!-- VolarColor.veil(0.04) -> alpha = round(0.04*255) = 10.2 -> 10 = 0x0A
              (TaskBreakdownView.swift:121, duration pill background — distinct from VolarCard's
              own 0x0A, same value, kept local/explicit since the Swift source names it as a plain
              literal rather than VolarColor.card at that call site). -->
-        <SolidColorBrush x:Key="White04Brush" Color="#0AFFFFFF" />
+        <SolidColorBrush x:Key="White04Brush" Color="#0A94B2E0" />
 
         <SolidColorBrush x:Key="AccentBorder02Brush" Color="{Binding Color, Source={StaticResource AccentSolidBrush}}" Opacity="0.2" />
 

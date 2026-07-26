@@ -42,4 +42,12 @@
     <ProjectReference Include="..\..\src\Volar.Voice\Volar.Voice.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- The real Accents.xaml, embedded so ThemeStateTests can diff AccentColorTable against it.
+         Embedded rather than read from disk: a relative source path works from `dotnet test` and
+         breaks from anywhere else, and a test that silently skips when it cannot find its input is
+         how the C#/XAML pair drifted through the Twilight retheme unnoticed in the first place. -->
+    <EmbeddedResource Include="..\..\src\Volar.App\Theme\Accents.xaml" LogicalName="Accents.xaml" />
+  </ItemGroup>
+
 </Project>
