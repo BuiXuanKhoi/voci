@@ -1,0 +1,19 @@
+<!--
+  Supabase Auth email template for EXISTING users signing in (GoTrue's "Magic Link" template —
+  what `POST /auth/v1/otp` sends when the address already exists in auth.users).
+
+  Both clients sign in with a CODE, never a link: they POST /auth/v1/otp then
+  POST /auth/v1/verify with {email, token: <code>, type: "email"} (Volar/Sources/Account/
+  AccountService.swift:96-100 and the Windows AccountService.cs equivalent). So this body must
+  render {{ .Token }} — the default Supabase template ships {{ .ConfirmationURL }}, which produces
+  a magic link the app has no way to consume.
+
+  NOT auto-applied: the CLI can only push this via `supabase config push`, which rewrites the WHOLE
+  remote auth config from config.toml and would clobber dashboard-set values. Paste it into
+  Authentication -> Emails -> "Magic Link" instead (see backlog.md).
+-->
+<h2>Sign in to Volar</h2>
+<p>Your sign-in code:</p>
+<p style="font-size: 28px; font-weight: 600; letter-spacing: 4px; margin: 16px 0;">{{ .Token }}</p>
+<p>Enter it in Volar under <strong>Settings &rarr; Account</strong>. The code expires in 1 hour.</p>
+<p style="color: #888; font-size: 12px;">If you didn't ask to sign in, you can ignore this email.</p>
