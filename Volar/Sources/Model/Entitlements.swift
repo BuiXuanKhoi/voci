@@ -111,7 +111,7 @@ actor Entitlements {
         switch result {
         case .success(let verification):
             let transaction = try Self.checkVerified(verification)
-            let linked = try await link(transaction: transaction)
+            let linked = try await link(verification)
             await transaction.finish()
             await refreshStatus()
             return linked
@@ -132,8 +132,8 @@ actor Entitlements {
     /// failing to link (e.g. a stale/edge-case entitlement) must not stop the others.
     func relinkCurrentEntitlements() async {
         for await result in Transaction.currentEntitlements {
-            guard let transaction = try? Self.checkVerified(result) else { continue }
-            _ = try? await link(transaction: transaction)
+            guard (try? Self.checkVerified(result)) != nil else { continue }
+            _ = try? await link(result)
         }
         await refreshStatus()
     }
@@ -149,7 +149,7 @@ actor Entitlements {
         updatesTask = Task.detached { [weak self] in
             for await update in Transaction.updates {
                 guard let transaction = try? Self.checkVerified(update) else { continue }
-                _ = try? await self?.link(transaction: transaction)
+                _ = try? await self?.link(update)
                 await transaction.finish()
             }
         }
@@ -189,11 +189,16 @@ actor Entitlements {
 
     // MARK: - Networking (mirrors `AccountService`'s hand-rolled URLSession layer)
 
-    private func link(transaction: Transaction) async throws -> SubscriptionLinkResponse {
+    /// Takes the `VerificationResult`, NOT the unwrapped `Transaction`: the signed JWS the server
+    /// re-verifies (contract §3) lives on `VerificationResult.jwsRepresentation` — `Transaction`
+    /// itself only exposes `jsonRepresentation`, which carries no signature and so is worthless to
+    /// the edge function. Callers still unwrap separately via `checkVerified` when they need the
+    /// `Transaction` for `finish()`.
+    private func link(_ verification: VerificationResult<Transaction>) async throws -> SubscriptionLinkResponse {
         guard let token = try await AccountService.shared.validAccessToken() else {
             throw EntitlementError.notSignedIn
         }
-        guard let body = try? JSONSerialization.data(withJSONObject: ["jws": transaction.jwsRepresentation]) else {
+        guard let body = try? JSONSerialization.data(withJSONObject: ["jws": verification.jwsRepresentation]) else {
             throw EntitlementError.verificationFailed
         }
         let (code, data) = try await Self.send(
