@@ -160,4 +160,68 @@ internal static class TrayNativeMethods
         public uint time;
         public POINT pt;
     }
+
+    // --- Icon generation (B5: 3 tray icon states — idle/listening/focus-lock,
+    // wave4-contract.md frozen decision 4). Raw GDI32/User32 P/Invoke, same "no new NuGet packages"
+    // constraint (Stage A rule 2) that already ruled out Win2D/System.Drawing.Common for the view
+    // layer — a 32bpp DIB section drawn with plain per-pixel math, wrapped into an HICON via
+    // CreateIconIndirect, needs neither. -------------------------------------------------------
+
+    public const uint BI_RGB = 0;
+    public const uint DIB_RGB_COLORS = 0;
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFOHEADER
+    {
+        public int biSize;
+        public int biWidth;
+        public int biHeight;
+        public short biPlanes;
+        public short biBitCount;
+        public uint biCompression;
+        public int biSizeImage;
+        public int biXPelsPerMeter;
+        public int biYPelsPerMeter;
+        public uint biClrUsed;
+        public uint biClrImportant;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct BITMAPINFO
+    {
+        public BITMAPINFOHEADER bmiHeader;
+        // bmiColors omitted — unused for 32bpp BI_RGB (no palette).
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    public struct ICONINFO
+    {
+        [MarshalAs(UnmanagedType.Bool)]
+        public bool fIcon;
+        public int xHotspot;
+        public int yHotspot;
+        public nint hbmMask;
+        public nint hbmColor;
+    }
+
+    [DllImport("user32.dll")]
+    public static extern nint GetDC(nint hWnd);
+
+    [DllImport("user32.dll")]
+    public static extern int ReleaseDC(nint hWnd, nint hDC);
+
+    [DllImport("gdi32.dll")]
+    public static extern nint CreateDIBSection(nint hdc, ref BITMAPINFO pbmi, uint usage, out nint ppvBits, nint hSection, uint dwOffset);
+
+    [DllImport("gdi32.dll")]
+    public static extern nint CreateBitmap(int nWidth, int nHeight, uint nPlanes, uint nBitCount, nint lpBits);
+
+    [DllImport("gdi32.dll")]
+    public static extern bool DeleteObject(nint hObject);
+
+    [DllImport("user32.dll")]
+    public static extern nint CreateIconIndirect(ref ICONINFO piconinfo);
+
+    [DllImport("user32.dll")]
+    public static extern bool DestroyIcon(nint hIcon);
 }

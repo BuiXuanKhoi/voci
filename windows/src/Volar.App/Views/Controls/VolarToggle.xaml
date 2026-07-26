@@ -1,0 +1,44 @@
+<!--
+  Views/Controls/VolarToggle.xaml — B4 (Settings + Onboarding). Port of SettingsView.swift's
+  private `VolarToggle` (lines 787-808): a hand-rolled pill switch (named `VolarToggle`, not
+  `Toggle`, per that file's own comment, to avoid clashing with SwiftUI's stock control — kept the
+  same name here for continuity even though WinUI's stock control is `ToggleSwitch`, not `Toggle`).
+
+  wave4-contract.md's own Settings-local-controls list names "VolarToggle (restyled ToggleSwitch)"
+  as an acceptable alternative to a hand-roll; this implementation hand-rolls instead (a `ToggleSwitch`
+  fully restyled to a 38x22 pill with a 18x18 thumb ends up needing a from-scratch ControlTemplate
+  anyway — see WinUI 3's shipped `ToggleSwitch` template, which is built around a much larger
+  track+header+on/off-label layout — so there is no real templating savings over building the pill
+  directly, and a direct build stays closer 1:1 to SettingsView.swift:793-807's own literal shape).
+
+  38x22 track / 18x18 thumb / CornerRadius 12 track / 9 thumb are literal one-offs (CornerRadius/
+  Thickness gotcha) matching SettingsView.swift:794-796,800 exactly (12 happens to equal
+  VolarCornerRadiusGlass's VALUE and 9 happens to equal VolarCornerRadiusHairline's VALUE, but both
+  are still hand-copied, not StaticResource-bound, per the gotcha).
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.VolarToggle"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid
+        x:Name="RootGrid"
+        Width="38"
+        Height="22"
+        Background="Transparent"
+        PointerPressed="OnPointerPressed">
+        <Border x:Name="TrackBorder" CornerRadius="12" />
+        <Border
+            x:Name="ThumbBorder"
+            Width="18"
+            Height="18"
+            Margin="2,0,0,0"
+            CornerRadius="9"
+            Background="White"
+            HorizontalAlignment="Left"
+            VerticalAlignment="Center">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="ThumbTransform" X="0" />
+            </Border.RenderTransform>
+        </Border>
+    </Grid>
+</UserControl>

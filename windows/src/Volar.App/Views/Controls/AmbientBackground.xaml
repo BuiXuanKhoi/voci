@@ -1,0 +1,60 @@
+<!--
+  Views/Controls/AmbientBackground.xaml — static v1 port of AmbientBackground.swift (417 lines):
+  per-mode gradient backdrop + custom-image layer. wave4-contract.md Stage B5 + frozen decision 3
+  ("AmbientBackground v1 = static per-mode gradient backdrop + custom-image layer. No particle
+  systems (deferred to backlog)"). views-inventory.md §1.14.
+
+  All brushes are built in AmbientBackground.xaml.cs code-behind from the EXACT hex literals in
+  AmbientBackground.swift (cited there per-brush, per decision 3's "do NOT add them to Colors.xaml"
+  instruction — this is a deliberately separate, view-local palette, matching the Swift file's own
+  "distinct from the Studio Dark UI palette" framing, views-inventory.md §1.14 point 4).
+
+  Hit-test invisible throughout (IsHitTestVisible="False" on every layer) — mirrors
+  AmbientBackground.swift:52 `.allowsHitTesting(false)`.
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.AmbientBackground"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    IsHitTestVisible="False"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Stretch">
+    <Grid IsHitTestVisible="False">
+        <Border x:Name="BackdropBorder" IsHitTestVisible="False" />
+
+        <Image
+            x:Name="CustomImage"
+            Stretch="UniformToFill"
+            IsHitTestVisible="False"
+            Visibility="Collapsed" />
+
+        <!-- AmbientBackground.swift:280 `.brightness(-0.45)` approximated as a flat dimming scrim
+             over the full-brightness decoded image rather than a true per-pixel brightness
+             transform (no WinUI equivalent without a pixel shader/Win2D — frozen decision 2 bars new
+             NuGet packages). `.saturation(0.9)` is not replicated at all (smaller, harder-to-
+             approximate loss). Both flagged as residual v1 simplifications in this task's final
+             report. -->
+        <Border x:Name="CustomImageDimBorder" Background="Black" Opacity="0.45" IsHitTestVisible="False" Visibility="Collapsed" />
+
+        <!-- AmbientBackground.swift:283-291: placeholder shown when `.custom` mode has no image
+             chosen yet. `HatchPattern`'s diagonal-stripe Canvas draw (AmbientBackground.swift:
+             401-417) is not replicated — a decorative-only static texture; the flat #14141A fill +
+             hint text still carries the same "nothing chosen yet" message. Flagged as a residual v1
+             simplification. -->
+        <Grid x:Name="CustomPlaceholder" Background="#FF14141A" Visibility="Collapsed" IsHitTestVisible="False">
+            <TextBlock
+                Text="Choose an image in Settings → Appearance"
+                FontFamily="{StaticResource VolarMonoFontFamily}"
+                FontSize="12"
+                CharacterSpacing="40"
+                Foreground="#47FFFFFF"
+                TextAlignment="Center"
+                TextWrapping="Wrap"
+                MaxWidth="320"
+                HorizontalAlignment="Center"
+                VerticalAlignment="Center" />
+        </Grid>
+
+        <Border x:Name="VignetteBorder" IsHitTestVisible="False" Visibility="Collapsed" />
+    </Grid>
+</UserControl>

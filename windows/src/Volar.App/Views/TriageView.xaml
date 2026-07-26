@@ -1,0 +1,230 @@
+<!--
+  Views/TriageView.xaml — port of TriageView.swift (views-inventory.md §1.9): weekly stale-task
+  triage batch card, 4 IDENTICALLY-styled actions (Keep/Break down/Defer/Drop — FR-036/constitution
+  V anti-shame: no red, no destructive styling singled out on "Drop"). wave4-contract.md §B3.
+
+  Virtualization: `ListView` (not `StackPanel`) per the contract's explicit instruction, mirroring
+  Swift's `ScrollView` + `LazyVStack` bounded-per-frame-work note (TriageView.swift's own header:
+  "perf note ... bounded per-frame work for large batches").
+
+  Hover gating: `TriageRow`'s `.onHover` is gated on `accessibilityReduceMotion`
+  (TriageView.swift:148-154) -> `UISettings.AnimationsEnabled` here (code-behind, per-container
+  PointerEntered/Exited, mirroring Views/Controls/ToolButton.xaml.cs's own hover-handling shape).
+
+  CornerRadius/Thickness literals (gotcha):
+    16 = modal radius (TriageView.swift:49, 6th occurrence per views-inventory.md §1.9 point 4).
+    12 = VolarCornerRadiusGlass (Metrics.xaml) — row card (`.volarHairline(cornerRadius: 12)`).
+    8  = one-off — each action button's corner radius (TriageView.swift:197).
+    0.5 = VolarHairlineThickness (Metrics.xaml).
+-->
+<UserControl
+    x:Class="Volar.App.Views.TriageView"
+    x:Name="RootControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls"
+    xmlns:domain="using:Volar.Domain">
+
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="ScrimBrush" Color="Black" Opacity="0.45" />
+
+        <!-- Color.white.opacity(0.06) -> alpha 0x0F (TriageView.swift:196, action button background). -->
+        <SolidColorBrush x:Key="White06Brush" Color="#0FFFFFFF" />
+
+        <Style x:Key="ActionButtonStyle" TargetType="Button">
+            <Setter Property="Height" Value="28" />
+            <Setter Property="CornerRadius" Value="8" />
+            <Setter Property="BorderThickness" Value="0.5" />
+            <Setter Property="Background" Value="{StaticResource White06Brush}" />
+            <Setter Property="BorderBrush" Value="{StaticResource VolarGlassBorderBrush}" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="{TemplateBinding CornerRadius}">
+                            <ContentPresenter
+                                Content="{TemplateBinding Content}"
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="RowTemplate" x:DataType="domain:TaskItem">
+            <Border
+                x:Name="RowRoot"
+                Margin="0,0,0,8"
+                Padding="12"
+                CornerRadius="12"
+                Background="{StaticResource VolarCardBrush}"
+                BorderBrush="{StaticResource VolarGlassBorderBrush}"
+                BorderThickness="0.5"
+                PointerEntered="OnRowPointerEntered"
+                PointerExited="OnRowPointerExited">
+                <StackPanel Spacing="10">
+                    <Grid ColumnSpacing="8">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <Ellipse Grid.Column="0" Width="5" Height="5" VerticalAlignment="Center" Fill="{x:Bind controls:RowPresentation.PriorityBrush(Priority)}" />
+                        <TextBlock
+                            Grid.Column="1"
+                            Text="{x:Bind Title}"
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="13"
+                            FontWeight="Medium"
+                            Foreground="{StaticResource VolarTextPriBrush}"
+                            TextTrimming="CharacterEllipsis" />
+                        <TextBlock
+                            Grid.Column="2"
+                            Text="{x:Bind controls:RowPresentation.OrEmpty(DurationLabel)}"
+                            Visibility="{x:Bind controls:RowPresentation.VisibleIfNotEmpty(DurationLabel)}"
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="11"
+                            Typography.NumeralAlignment="Tabular"
+                            Foreground="{StaticResource VolarTextMutBrush}" />
+                    </Grid>
+                    <Grid ColumnSpacing="6">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="*" />
+                        </Grid.ColumnDefinitions>
+                        <Button
+                            Grid.Column="0"
+                            Style="{StaticResource ActionButtonStyle}"
+                            Command="{Binding ElementName=RootControl, Path=ViewModel.KeepCommand}"
+                            CommandParameter="{x:Bind}"
+                            AutomationProperties.Name="{x:Bind controls:RowPresentation.ActionAutomationName('Keep', Title)}">
+                            <TextBlock Text="Keep" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                        </Button>
+                        <Button
+                            Grid.Column="1"
+                            Style="{StaticResource ActionButtonStyle}"
+                            Command="{Binding ElementName=RootControl, Path=ViewModel.BreakdownCommand}"
+                            CommandParameter="{x:Bind}"
+                            AutomationProperties.Name="{x:Bind controls:RowPresentation.ActionAutomationName('Break down', Title)}">
+                            <TextBlock Text="Break down" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                        </Button>
+                        <Button
+                            Grid.Column="2"
+                            Style="{StaticResource ActionButtonStyle}"
+                            Command="{Binding ElementName=RootControl, Path=ViewModel.DeferCommand}"
+                            CommandParameter="{x:Bind}"
+                            AutomationProperties.Name="{x:Bind controls:RowPresentation.ActionAutomationName('Defer', Title)}">
+                            <TextBlock Text="Defer" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                        </Button>
+                        <Button
+                            Grid.Column="3"
+                            Style="{StaticResource ActionButtonStyle}"
+                            Command="{Binding ElementName=RootControl, Path=ViewModel.DropCommand}"
+                            CommandParameter="{x:Bind}"
+                            AutomationProperties.Name="{x:Bind controls:RowPresentation.ActionAutomationName('Drop', Title)}">
+                            <TextBlock Text="Drop" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                        </Button>
+                    </Grid>
+                </StackPanel>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid
+        x:Name="Root"
+        Background="{StaticResource ScrimBrush}"
+        Visibility="{x:Bind controls:RowPresentation.VisibleIfTrue(ViewModel.IsVisible), Mode=OneWay}">
+        <controls:GlassPanel
+            Level="Heavy"
+            CornerRadius="16"
+            Width="520"
+            MaxHeight="620"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Padding="16">
+            <Grid RowSpacing="14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Header -->
+                <StackPanel Grid.Row="0" Spacing="4">
+                    <TextBlock
+                        Text="WEEKLY CHECK-IN"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="11"
+                        FontWeight="Medium"
+                        CharacterSpacing="70"
+                        Foreground="{StaticResource VolarTextMutBrush}" />
+                    <TextBlock
+                        Text="A few tasks have been sitting a while"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="16"
+                        FontWeight="Medium"
+                        Foreground="{StaticResource VolarTextPriBrush}" />
+                    <TextBlock
+                        Text="No pressure — keep, break down, defer, or drop each one. Whatever still fits."
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="12"
+                        TextWrapping="Wrap"
+                        Foreground="{StaticResource VolarTextSecBrush}" />
+                </StackPanel>
+
+                <!-- List (virtualized) -->
+                <ListView
+                    Grid.Row="1"
+                    MaxHeight="420"
+                    ItemsSource="{x:Bind ViewModel.Items, Mode=OneWay}"
+                    ItemTemplate="{StaticResource RowTemplate}"
+                    SelectionMode="None"
+                    IsItemClickEnabled="False"
+                    Padding="0">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="Padding" Value="0" />
+                            <Setter Property="Margin" Value="0" />
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="MinHeight" Value="0" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+                </ListView>
+
+                <!-- Footer -->
+                <Grid Grid.Row="2" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock
+                        Grid.Column="0"
+                        VerticalAlignment="Center"
+                        Text="{x:Bind ViewModel.FooterCountText, Mode=OneWay}"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="11"
+                        Typography.NumeralAlignment="Tabular"
+                        Foreground="{StaticResource VolarTextMutBrush}" />
+                    <Button
+                        Grid.Column="1"
+                        Background="Transparent"
+                        BorderThickness="0"
+                        Padding="14,0"
+                        Height="30"
+                        Command="{x:Bind ViewModel.DismissCommand, Mode=OneWay}">
+                        <TextBlock Text="Maybe later" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="13" FontWeight="Medium" Foreground="{StaticResource VolarTextSecBrush}" />
+                    </Button>
+                </Grid>
+            </Grid>
+        </controls:GlassPanel>
+    </Grid>
+</UserControl>

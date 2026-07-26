@@ -1,0 +1,30 @@
+<!--
+  Views/Controls/KeyRecorder.xaml — B4 (Settings + Onboarding). Port of SettingsView.swift's
+  private `KeyRecorder` (lines 881-901): a static key-combo chip row with a trailing "Change"
+  label. DISPLAY-ONLY on Windows (wave4-contract.md's brief explicitly sanctions this: "display-only
+  hotkey chip is fine"): the actual global hotkey is a fixed Ctrl+Alt+M via RegisterHotKey
+  (HotkeyService.cs, not this agent's file) — re-binding it is not wired here, same as Swift's own
+  comment on this exact control ("Re-binding the actual global hotkey is Phase 3
+  (`HotkeyManager`)") — Swift's "Change" text is ALREADY decorative/non-interactive there too (no
+  `.onTapGesture` on it in the source), so this control's own non-interactive "Change" label is a
+  1:1 port, not a fidelity reduction.
+
+  CornerRadius 8 / BorderThickness 0.5 / Background black@0.25 (#40000000, same alpha math as
+  Segmented.xaml) are literal one-offs matching SettingsView.swift:895-899 (Metrics/CornerRadius-
+  Thickness gotcha).
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.KeyRecorder"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border
+        Padding="10,0"
+        Height="28"
+        CornerRadius="8"
+        BorderThickness="0.5"
+        Background="#40000000"
+        BorderBrush="{StaticResource VolarGlassBorderBrush}"
+        HorizontalAlignment="Left">
+        <StackPanel x:Name="KeysPanel" Orientation="Horizontal" Spacing="6" VerticalAlignment="Center" />
+    </Border>
+</UserControl>

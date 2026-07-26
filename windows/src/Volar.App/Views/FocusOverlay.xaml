@@ -1,0 +1,160 @@
+<!--
+  Views/FocusOverlay.xaml — port of FocusOverlay.swift (268 lines): fullscreen single-task Focus
+  overlay. wave4-contract.md Stage B5; views-inventory.md §1.12. Mounted as an overlay Grid layer
+  inside MainWindow by Stage C (frozen decision 5), Visibility driven imperatively by
+  FocusOverlay.xaml.cs's Apply() from FocusViewModel — same imperative "UpdateVisual()" idiom Stage
+  A's controls (ToolButton/KeyBadge/GlassPanel/VolarIcon) already establish, chosen over
+  x:Bind/Binding here too so a freshly-(re)assigned ViewModel repaints deterministically without
+  fighting x:Bind's compile-time path-resolution constraints for a page-level, dynamically-wired VM.
+
+  CornerRadius/Thickness gotcha: every literal below is hand-copied per wave4-contract.md's "Hard
+  gotchas" — cited inline. Countdown FontSize 76 has no Typography.xaml style (one-off, per
+  views-inventory.md §1.12 point 6 — 76pt giant countdown, no matching shared style at that size).
+-->
+<UserControl
+    x:Class="Volar.App.Views.FocusOverlay"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls"
+    IsTabStop="True"
+    HorizontalAlignment="Stretch"
+    VerticalAlignment="Stretch">
+
+    <!-- FocusOverlay.swift:42-49 `.onKeyPress(.leftArrow)`/`.onKeyPress(.rightArrow)`. -->
+    <UserControl.KeyboardAccelerators>
+        <KeyboardAccelerator Key="Left" Invoked="OnPreviousAccelerator" />
+        <KeyboardAccelerator Key="Right" Invoked="OnNextAccelerator" />
+    </UserControl.KeyboardAccelerators>
+
+    <Grid>
+        <!-- Heavy dark glass backdrop — FocusOverlay.swift:56-60: `.ultraThinMaterial` overlaid with
+             `Color(red: 9/255, green: 10/255, blue: 15/255).opacity(0.78)`, a hand-computed
+             near-duplicate of VolarBg (#0B0D11) the inventory flags as literal-vs-token drift
+             (views-inventory.md §1.12 point 4) — reconciled here to the real VolarGlassHeavyBrush
+             (VolarBg-tinted AcrylicBrush, Glass.xaml) rather than reproducing the drift. -->
+        <Border Background="{StaticResource VolarGlassHeavyBrush}" />
+
+        <!-- Center column: state label / countdown / progress / task info / mark-done
+             (FocusOverlay.swift:62-86). -->
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+            <!-- "Focus"/"Paused" — FocusOverlay.swift:63-68: 11pt medium, uppercase,
+                 tracking 1.98 = 0.18em @ 11pt -> CharacterSpacing 180 (1/1000-em units). -->
+            <TextBlock
+                x:Name="StateLabelText"
+                FontFamily="{StaticResource VolarUiFontFamily}"
+                FontSize="11"
+                FontWeight="Medium"
+                CharacterSpacing="180"
+                Foreground="{StaticResource VolarTextMutBrush}"
+                HorizontalAlignment="Center"
+                Margin="0,0,0,10" />
+
+            <!-- Countdown — FocusOverlay.swift:70-76: 76pt semibold mono, tabular digits. -->
+            <TextBlock
+                x:Name="CountdownText"
+                FontFamily="{StaticResource VolarMonoFontFamily}"
+                FontSize="76"
+                FontWeight="SemiBold"
+                Typography.NumeralAlignment="Tabular"
+                HorizontalAlignment="Center" />
+
+            <!-- Progress hairline — FocusOverlay.swift:100-112. Fixed width 240 (literal, matches
+                 the Swift `total: CGFloat = 240`), height 2, cornerRadius 1 (one-off, not a Metrics
+                 key). Track tint Color.white.opacity(0.10) -> alpha 0x1A. Fill width set by
+                 FocusOverlay.xaml.cs's Apply() from ViewModel.ProgressFraction — no per-second
+                 animation in v1 (this task's brief). -->
+            <Grid Width="240" Height="2" Margin="0,20,0,0" HorizontalAlignment="Center">
+                <Border Background="#1AFFFFFF" CornerRadius="1" />
+                <Border x:Name="ProgressFillBorder" CornerRadius="1" HorizontalAlignment="Left" Width="0" />
+            </Grid>
+
+            <!-- Task info — FocusOverlay.swift:114-139. -->
+            <StackPanel HorizontalAlignment="Center" Spacing="10" Margin="0,40,0,0" MaxWidth="480">
+                <!-- 23pt medium, tracking -0.345 = -0.015em @ 23pt -> CharacterSpacing -15. -->
+                <TextBlock
+                    x:Name="TaskTitleText"
+                    FontFamily="{StaticResource VolarUiFontFamily}"
+                    FontSize="23"
+                    FontWeight="Medium"
+                    CharacterSpacing="-15"
+                    TextAlignment="Center"
+                    TextWrapping="Wrap"
+                    Foreground="{StaticResource VolarTextPriBrush}"
+                    HorizontalAlignment="Center" />
+
+                <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Center">
+                    <Ellipse x:Name="PriorityDot" Width="5" Height="5" VerticalAlignment="Center" />
+                    <TextBlock x:Name="PriorityLabelText" FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" VerticalAlignment="Center" />
+                    <TextBlock x:Name="DurationSep" Text="·" Opacity="0.4" FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <TextBlock x:Name="DurationText" FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <TextBlock x:Name="TimeBadgeSep" Text="·" Opacity="0.4" FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
+                    <TextBlock x:Name="TimeBadgeText" FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" VerticalAlignment="Center" Visibility="Collapsed" />
+                </StackPanel>
+            </StackPanel>
+
+            <!-- Mark done — FocusOverlay.swift:141-159. Capsule shape (one-off large CornerRadius,
+                 not a Metrics key); 13pt medium, tracking -0.065 = -0.005em @ 13pt ->
+                 CharacterSpacing -5. Glow shadow (accent.glow @0.25, radius 24) not replicated —
+                 no DropShadow without Win2D/a Composition effect (frozen decision 2 bars new NuGet
+                 packages); flagged as a residual v1 simplification. -->
+            <Button
+                x:Name="MarkDoneButton"
+                Click="OnMarkDoneClick"
+                Margin="0,26,0,0"
+                HorizontalAlignment="Center"
+                Padding="20,9"
+                CornerRadius="20"
+                BorderThickness="0"
+                Background="{StaticResource AccentSolidBrush}">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <controls:VolarIcon IconName="Check" IconSize="13" IconBrush="White" />
+                    <TextBlock
+                        Text="Mark done"
+                        FontSize="13"
+                        FontWeight="Medium"
+                        CharacterSpacing="-5"
+                        Foreground="White" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+
+        <!-- Top-right (pause/end) + bottom nav (prev/index/next) overlay — FocusOverlay.swift:88-96,
+             `.padding(14)`. FocusRoundBtn (FocusOverlay.swift:238-268): 30x30 circle,
+             background Color.white.opacity(0.06) -> #0FFFFFFF, border Color.white.opacity(0.10)
+             stroke 0.5 -> #1AFFFFFF, icon Color.white.opacity(0.7) -> #B3FFFFFF. Hover-swap to
+             opacity(0.12) is NOT replicated — these small round buttons use the stock WinUI Button
+             PointerOver visual state instead (a v1 simplification, flagged in this task's final
+             report, not a silent drop: the stock hover is still a visible, working hover state,
+             just not byte-identical to the Swift opacity value). -->
+        <Grid Margin="14">
+            <StackPanel Orientation="Horizontal" Spacing="6" HorizontalAlignment="Right" VerticalAlignment="Top">
+                <Button x:Name="PauseButton" Click="OnPauseClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5">
+                    <controls:VolarIcon x:Name="PauseIcon" IconSize="12" IconBrush="#B3FFFFFF" />
+                </Button>
+                <Button x:Name="EndButton" Click="OnEndClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5" ToolTipService.ToolTip="End session">
+                    <controls:VolarIcon IconName="X" IconSize="12" IconBrush="#B3FFFFFF" />
+                </Button>
+            </StackPanel>
+
+            <StackPanel HorizontalAlignment="Center" VerticalAlignment="Bottom" Spacing="7">
+                <StackPanel Orientation="Horizontal" Spacing="14" HorizontalAlignment="Center">
+                    <Button x:Name="PrevButton" Click="OnPreviousClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5" ToolTipService.ToolTip="Previous task (←)">
+                        <controls:VolarIcon IconName="Back" IconSize="12" IconBrush="#B3FFFFFF" />
+                    </Button>
+                    <TextBlock
+                        x:Name="IndexText"
+                        FontSize="12"
+                        Typography.NumeralAlignment="Tabular"
+                        Foreground="{StaticResource VolarTextSecBrush}"
+                        MinWidth="52"
+                        TextAlignment="Center"
+                        VerticalAlignment="Center" />
+                    <Button x:Name="NextButton" Click="OnNextClick" Width="30" Height="30" Padding="0" CornerRadius="15" Background="#0FFFFFFF" BorderBrush="#1AFFFFFF" BorderThickness="0.5" ToolTipService.ToolTip="Next task (→)">
+                        <controls:VolarIcon IconName="Chevron" IconSize="12" IconBrush="#B3FFFFFF" />
+                    </Button>
+                </StackPanel>
+                <TextBlock x:Name="TasksLeftText" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" HorizontalAlignment="Center" />
+            </StackPanel>
+        </Grid>
+    </Grid>
+</UserControl>

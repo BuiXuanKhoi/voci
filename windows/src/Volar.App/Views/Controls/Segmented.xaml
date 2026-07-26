@@ -1,0 +1,37 @@
+<!--
+  Views/Controls/Segmented.xaml — B4 (Settings + Onboarding). Generic port of SettingsView.swift's
+  private `Segmented<T>` (SettingsView.swift:817-849): a row of pill-shaped option buttons, one of
+  which is selected. Swift's version is `<T: Hashable>`-generic; a WinUI UserControl cannot itself
+  be generic, so this control operates over boxed `object` ids (see Segmented.xaml.cs's own header
+  note) — exactly the same "bind through a raw id" convention SettingsView.swift ITSELF already
+  falls back to for every non-Hashable enum it drives through this control (SpeechEngineChoice/
+  ParseEnginePreference/Density all bind via `.rawValue`/a hand-picked string id per that file's own
+  comments), so this is not a fidelity loss, just the same trick made structural.
+
+  CornerRadius/Thickness gotcha (wave4-contract.md "Hard gotchas"): outer CornerRadius 8 and the
+  0.5 BorderThickness are hand-copied literals (VolarHairlineThickness's value only, no matching
+  outer-radius Metrics key — SettingsView.swift:846-847 uses a bare `cornerRadius: 8` one-off, same
+  as Swift's own file). Inner option-button CornerRadius 6 matches Metrics.xaml's
+  VolarCornerRadiusSmall VALUE but is still hand-copied (SettingsView.swift:839's own `cornerRadius:
+  6, style: .continuous)` one-off) since CornerRadius cannot bind to a StaticResource.
+
+  Background Color.black.opacity(0.25) (SettingsView.swift:845) -> alpha = round(0.25*255) = 63.75
+  -> 64 = 0x40 -> #40000000 (same math this wave's other views already use for this exact literal —
+  recurs 3x in SettingsView.swift per views-inventory.md SS1.15 point 4: this control's own bg, the
+  long-press chip bg (Hotkeys tab), KeyRecorder's bg).
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.Segmented"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border
+        x:Name="RootBorder"
+        Padding="2"
+        CornerRadius="8"
+        BorderThickness="0.5"
+        Background="#40000000"
+        BorderBrush="{StaticResource VolarGlassBorderBrush}"
+        HorizontalAlignment="Left">
+        <StackPanel x:Name="OptionsPanel" Orientation="Horizontal" Spacing="0" />
+    </Border>
+</UserControl>

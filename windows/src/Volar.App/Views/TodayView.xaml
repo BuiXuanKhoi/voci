@@ -1,0 +1,508 @@
+<!--
+  Views/TodayView.xaml — port of TodayView.swift (views-inventory.md §1.16, CRITICAL SCOPE section):
+  the CURRENT "NOW spotlight / NEXT peek / collapsed Later+Completed drawers" grammar, NOT the stale
+  flat Now/Later/Completed row-list wave4-slice.md describes (that doc predates the 2026-07 "Studio
+  Dark retheme"). wave4-contract.md Stage B1 deliverable.
+
+  STAGE C INSERTION POINTS (do not remove these comments — Stage C mounts these overlays here):
+    - AmbientBackground (B5) — behind everything, gated on ViewModel.IsAmbientBackgroundActive.
+    - Capture-state scrim + CapturePopover (B2) — full-window overlay, gated on capture state.
+    - FocusOverlay (B5) — full-window overlay, gated on ViewModel.FocusActive.
+    - NotificationBanner (B5) — top-trailing overlay, gated on the reminder-banner service state.
+  This view does NOT mount any of those controls itself (wave4-contract.md SCOPE).
+
+  CornerRadius/Thickness literals (hand-copied per the gotcha — StaticResource x:Double cannot back
+  a CornerRadius/Thickness-typed property): NOW spotlight card 22 (TodayView.swift:294,324 — also the
+  "nothing ready" placeholder), NextPeekRow/CollapsibleTaskSection 15 (TodayView.swift:671,746),
+  row/hotkey-footer accents 9-10 (TaskRowControl reuse + hotkey footer dashed border,
+  TodayView.swift:517), hairline 0.5 throughout. Chip/pill capsule radii (13/20) are component-local
+  one-offs approximating SwiftUI's `Capsule()` shape (no native WinUI capsule primitive), same pattern
+  Components.swift's own inline one-offs already establish elsewhere in this port.
+
+  Running-focus pill's pulsing dot (TodayView.swift:404-409, `.repeatForever`): DELIBERATELY rendered
+  STATIC here, not looping — wave4-contract.md's gotcha list only allows repeat-forever loops on
+  "full-window surfaces" (MorningFrog pulse / Spinner / Popover's 3 loops); TodayView's pill lives in
+  the persistent window chrome, not a full-window surface, so this is a scope-narrowing deviation,
+  flagged here and in this task's final report rather than silently ported.
+-->
+<UserControl
+    x:Class="Volar.App.Views.TodayView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls"
+    xmlns:vm="using:Volar.App.ViewModels">
+
+    <UserControl.Resources>
+        <!-- "deep ink stage" (TodayView.swift:147-166, `mainBackground`, non-ambient branch): a faint
+             top-down radial lift over the flat ink base. VolarSurface @0.55 -> Transparent, center
+             top (0.5, -0.15 in Swift's UnitPoint space), matching the RadialGradientBrush relative-
+             space approximation Glass.xaml's NowSpotlightBrush/NowSpotlightVignetteBrush already
+             establish for the same SwiftUI-UnitPoint-to-WinUI-relative-brush conversion. -->
+        <RadialGradientBrush x:Key="MainColumnDepthBrush" Center="0.5,-0.15" RadiusX="1" RadiusY="1">
+            <GradientStop Offset="0.0" Color="{StaticResource VolarSurface}" />
+            <GradientStop Offset="1.0" Color="Transparent" />
+        </RadialGradientBrush>
+        <!-- Color.black.opacity(0.30) (TodayView.swift:153, ambient branch) -> alpha = round(0.30*255)
+             = 76.5 -> 77 = 0x4D. -->
+        <SolidColorBrush x:Key="MainColumnAmbientDimBrush" Color="#4D000000" />
+    </UserControl.Resources>
+
+    <Grid x:Name="RootGrid">
+
+        <!-- STAGE C INSERTION POINT: AmbientBackground (B5) — bind mode to ViewModel.Theme.Ambient,
+             image path to ViewModel.Theme.CustomImagePath. Gate on ViewModel.IsAmbientBackgroundActive.
+             Must render BEHIND everything below (declare it here, before the content Grid). -->
+
+        <Grid x:Name="ContentGrid">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+            </Grid.ColumnDefinitions>
+
+            <controls:SidebarControl x:Name="Sidebar" Grid.Column="0" />
+
+            <Grid x:Name="MainColumn" Grid.Column="1" Background="{StaticResource VolarBgBrush}">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <!-- mainBackground overlay (see UserControl.Resources above) — declared first so it
+                     renders behind every row below by markup order, same trick SidebarControl's
+                     RootBackground uses. -->
+                <Border x:Name="MainColumnOverlay" Grid.Row="0" Grid.RowSpan="3" IsHitTestVisible="False" />
+
+                <!-- Title-bar toolbar row (TodayView.swift:71-87, `.toolbar` primaryAction group). -->
+                <StackPanel
+                    Grid.Row="0"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Spacing="4"
+                    Padding="12,8">
+                    <controls:ToolButton x:Name="AmbientSoundButton" IconName="Volume" Click="OnAmbientSoundClick" />
+                    <controls:ToolButton IconName="Waveform" Click="OnReadDayAloudClick" />
+                    <controls:ToolButton IconName="Search" />
+                    <controls:ToolButton IconName="Plus" Accent="True" Click="OnToggleCaptureClick" />
+                </StackPanel>
+
+                <!-- Greeting header (TodayView.swift:357-392). -->
+                <Grid Grid.Row="1" Padding="28,20,28,8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Bottom">
+                        <TextBlock
+                            Text="Today"
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="26"
+                            FontWeight="Medium"
+                            Foreground="{StaticResource VolarTextPriBrush}" />
+                        <StackPanel Orientation="Horizontal" Spacing="4">
+                            <TextBlock x:Name="TodayDateLabelText" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                            <TextBlock Text="·" FontSize="12.5" Foreground="{StaticResource VolarTextMutBrush}" />
+                            <TextBlock
+                                x:Name="OpenCountText"
+                                FontFamily="{StaticResource VolarMonoFontFamily}"
+                                FontSize="12"
+                                FontWeight="Medium"
+                                Foreground="{StaticResource VolarInstrumentBrush}" />
+                            <TextBlock Text="open" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                            <TextBlock Text="·" FontSize="12.5" Foreground="{StaticResource VolarTextMutBrush}" />
+                            <TextBlock
+                                x:Name="DoneCountText"
+                                FontFamily="{StaticResource VolarMonoFontFamily}"
+                                FontSize="12"
+                                FontWeight="Medium"
+                                Foreground="{StaticResource VolarDoneBrush}" />
+                            <TextBlock Text="done" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <!-- Running-focus pill (TodayView.swift:398-454) OR frog pill (456-498) — mutually
+                         exclusive on ViewModel.FocusActive. -->
+                    <Border
+                        x:Name="RunningFocusPill"
+                        Grid.Column="1"
+                        CornerRadius="20"
+                        BorderThickness="0.5"
+                        Padding="12,5,6,5"
+                        Background="{StaticResource AccentSurfaceBrush}"
+                        BorderBrush="{StaticResource AccentSolidBrush}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <Ellipse Width="5" Height="5" Fill="{StaticResource AccentSolidBrush}" VerticalAlignment="Center" />
+                            <TextBlock
+                                x:Name="RunningFocusTitleText"
+                                FontSize="11.5"
+                                FontWeight="Medium"
+                                MaxWidth="180"
+                                TextTrimming="CharacterEllipsis"
+                                MaxLines="1"
+                                Foreground="{StaticResource VolarTextPriBrush}"
+                                VerticalAlignment="Center" />
+                            <TextBlock
+                                x:Name="FocusClockText"
+                                FontFamily="{StaticResource VolarMonoFontFamily}"
+                                FontSize="13"
+                                FontWeight="SemiBold"
+                                Foreground="{StaticResource AccentSolidBrush}"
+                                VerticalAlignment="Center" />
+                            <Button Width="22" Height="22" Padding="0" BorderThickness="0" CornerRadius="11" Click="OnToggleFocusPauseClick">
+                                <controls:VolarIcon x:Name="FocusPauseIcon" IconSize="10" IconBrush="{StaticResource VolarTextPriBrush}" />
+                            </Button>
+                            <Button Width="22" Height="22" Padding="0" BorderThickness="0" CornerRadius="11" Click="OnEndFocusClick">
+                                <controls:VolarIcon IconName="Stop" IconSize="9" IconBrush="{StaticResource VolarTextSecBrush}" />
+                            </Button>
+                        </StackPanel>
+                    </Border>
+
+                    <Border
+                        x:Name="FrogPill"
+                        Grid.Column="1"
+                        CornerRadius="20"
+                        BorderThickness="0.5"
+                        Padding="10,5,6,5"
+                        BorderBrush="{StaticResource VolarHighBrush}">
+                        <StackPanel Orientation="Horizontal" Spacing="8">
+                            <Ellipse Width="5" Height="5" Fill="{StaticResource VolarHighBrush}" VerticalAlignment="Center" />
+                            <StackPanel Orientation="Horizontal" Spacing="4">
+                                <TextBlock Text="Frog" FontSize="11.5" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                                <TextBlock x:Name="FrogPillTitleText" FontSize="11.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                            </StackPanel>
+                            <Button Padding="9,3" BorderThickness="0" CornerRadius="20" Background="{StaticResource AccentSolidBrush}" Click="OnStartFocusClick">
+                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                    <controls:VolarIcon IconName="Play" IconSize="8" IconBrush="White" />
+                                    <TextBlock Text="Focus" FontSize="11" FontWeight="Medium" Foreground="White" />
+                                </StackPanel>
+                            </Button>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- Body: EmptyTodayCard (TodayView.swift:533-572) OR the scrollable NOW/NEXT/drawer
+                     stack (TodayView.swift:102-140). -->
+                <Grid Grid.Row="2">
+                    <StackPanel x:Name="EmptyTodayCard" Spacing="14" HorizontalAlignment="Center" VerticalAlignment="Center" Padding="40">
+                        <Grid Width="64" Height="64" HorizontalAlignment="Center">
+                            <Border CornerRadius="18" Background="{StaticResource AccentSurfaceBrush}" BorderThickness="0.5" BorderBrush="{StaticResource AccentSolidBrush}" />
+                            <controls:VolarIcon IconName="Mic" IconSize="28" IconBrush="{StaticResource AccentSolidBrush}" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                        </Grid>
+                        <TextBlock
+                            Text="All clear."
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="22"
+                            FontWeight="Medium"
+                            HorizontalAlignment="Center"
+                            Foreground="{StaticResource VolarTextPriBrush}" />
+                        <StackPanel Orientation="Horizontal" Spacing="4" HorizontalAlignment="Center" MaxWidth="300">
+                            <TextBlock Text="Press" FontSize="13.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                            <controls:KeyBadge Text="Ctrl" />
+                            <controls:KeyBadge Text="Alt" />
+                            <controls:KeyBadge Text="M" />
+                            <TextBlock Text="when you need to remember something." FontSize="13.5" TextWrapping="Wrap" Foreground="{StaticResource VolarTextSecBrush}" />
+                        </StackPanel>
+                    </StackPanel>
+
+                    <ScrollViewer x:Name="TaskScrollViewer">
+                        <StackPanel x:Name="TaskStack" Padding="22,8,22,18">
+
+                            <!-- NOW spotlight (TodayView.swift:189-330). -->
+                            <Border
+                                x:Name="NowSpotlightCard"
+                                CornerRadius="22"
+                                BorderThickness="0.5"
+                                BorderBrush="{StaticResource VolarBorderBrush}"
+                                Background="{StaticResource NowSpotlightBrush}"
+                                MinHeight="300"
+                                Tapped="OnNowSpotlightTapped">
+                                <Border.ContextFlyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="Break down into steps…" Click="OnNowBreakdownClick" />
+                                        <MenuFlyoutItem x:Name="NowToggleDoneMenuItem" Text="Mark done" Click="OnNowToggleDoneClick" />
+                                        <MenuFlyoutItem Text="Delegate to Claude…" Click="OnNowDelegateClick" />
+                                        <MenuFlyoutSeparator />
+                                        <MenuFlyoutItem Text="Delete" Click="OnNowDeleteClick" Foreground="{StaticResource VolarDestructBrush}" />
+                                    </MenuFlyout>
+                                </Border.ContextFlyout>
+                                <StackPanel Spacing="16" Padding="40,44" HorizontalAlignment="Center" MaxWidth="560">
+                                    <TextBlock
+                                        Text="◆ NOW"
+                                        FontFamily="{StaticResource VolarMonoFontFamily}"
+                                        FontSize="11"
+                                        FontWeight="SemiBold"
+                                        HorizontalAlignment="Center"
+                                        Foreground="{StaticResource VolarNowAccentBrush}" />
+                                    <TextBlock
+                                        x:Name="NowTitleText"
+                                        FontFamily="{StaticResource VolarUiFontFamily}"
+                                        FontSize="28"
+                                        FontWeight="SemiBold"
+                                        TextAlignment="Center"
+                                        TextWrapping="Wrap"
+                                        MaxLines="3"
+                                        Foreground="{StaticResource VolarTextPriBrush}" />
+
+                                    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" HorizontalScrollMode="Auto" HorizontalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                            <Border x:Name="NowLeftChip" CornerRadius="13" BorderThickness="0.5" Padding="11,6" Background="{StaticResource VolarSurfaceBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}">
+                                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                                    <TextBlock Text="left" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="10.5" Foreground="{StaticResource VolarTextMutBrush}" />
+                                                    <TextBlock x:Name="NowLeftChipValue" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                                                </StackPanel>
+                                            </Border>
+                                            <Border x:Name="NowDueChip" CornerRadius="13" BorderThickness="0.5" Padding="11,6" Background="{StaticResource VolarSurfaceBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}">
+                                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                                    <TextBlock Text="due" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="10.5" Foreground="{StaticResource VolarTextMutBrush}" />
+                                                    <TextBlock x:Name="NowDueChipValue" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
+                                                </StackPanel>
+                                            </Border>
+                                            <Border x:Name="NowFrogChip" CornerRadius="13" BorderThickness="0.5" Padding="11,6" Background="{StaticResource VolarSurfaceBrush}" BorderBrush="{StaticResource NowRingBrush}">
+                                                <TextBlock Text="Hardest task today" FontSize="12.5" Foreground="{StaticResource VolarNowAccentSoftBrush}" />
+                                            </Border>
+                                            <Border x:Name="NowDependencyChip" CornerRadius="13" BorderThickness="0.5" Padding="11,6" Background="{StaticResource VolarSurfaceBrush}" BorderBrush="{StaticResource VolarInstrumentDimBrush}">
+                                                <StackPanel Orientation="Horizontal" Spacing="5">
+                                                    <TextBlock Text="waiting" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="10.5" Foreground="{StaticResource VolarInstrumentBrush}" />
+                                                    <TextBlock Text="on other work" FontSize="12.5" Foreground="{StaticResource VolarTextMutBrush}" />
+                                                </StackPanel>
+                                            </Border>
+                                        </StackPanel>
+                                    </ScrollViewer>
+
+                                    <StackPanel Orientation="Horizontal" Spacing="10" HorizontalAlignment="Center" Margin="0,4,0,0">
+                                        <Button x:Name="StartFocusButton" CornerRadius="9" BorderThickness="0" Padding="16,10" Background="{StaticResource VolarNowAccentBrush}" Click="OnStartFocusClick">
+                                            <TextBlock Text="Start focus" FontSize="13" FontWeight="SemiBold" Foreground="{StaticResource VolarBgBrush}" />
+                                        </Button>
+                                        <Button CornerRadius="9" BorderThickness="0.5" Padding="16,10" Background="{StaticResource VolarSurfaceHiBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}" Click="OnNowToggleDoneClick">
+                                            <TextBlock x:Name="NowDoneButtonText" FontSize="13" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                                        </Button>
+                                        <Button x:Name="DelegateButton" CornerRadius="9" BorderThickness="0.5" Padding="16,10" Background="{StaticResource VolarInstrumentDimBrush}" BorderBrush="{StaticResource VolarInstrumentDimBrush}" Click="OnNowDelegateClick">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <controls:VolarIcon IconName="Bolt" IconSize="11" IconBrush="{StaticResource VolarInstrumentBrush}" />
+                                                <TextBlock Text="Delegate to Claude" FontSize="13" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                                            </StackPanel>
+                                        </Button>
+                                    </StackPanel>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Nothing-ready placeholder (TodayView.swift:313-329). -->
+                            <Border
+                                x:Name="NowEmptyCard"
+                                CornerRadius="22"
+                                BorderThickness="0.5"
+                                Background="{StaticResource VolarSurfaceBrush}"
+                                BorderBrush="{StaticResource VolarBorderBrush}"
+                                MinHeight="140"
+                                Margin="0,0,0,22">
+                                <StackPanel Spacing="8" HorizontalAlignment="Center" VerticalAlignment="Center">
+                                    <TextBlock Text="Nothing ready right now" FontSize="15" FontWeight="Medium" Foreground="{StaticResource VolarTextSecBrush}" />
+                                    <TextBlock Text="Everything open is waiting on something else." FontSize="12.5" Foreground="{StaticResource VolarTextMutBrush}" />
+                                </StackPanel>
+                            </Border>
+
+                            <!-- DelegationAmbientSection (T043, TodayView.swift:796-953). -->
+                            <StackPanel x:Name="DelegationAmbientSection" Spacing="10" Margin="0,22,0,0">
+                                <Border x:Name="WipHintCard" CornerRadius="12" BorderThickness="0.5" Padding="14,10" Background="{StaticResource VolarInstrumentDimBrush}" BorderBrush="{StaticResource VolarInstrumentDimBrush}">
+                                    <Grid ColumnSpacing="10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <controls:VolarIcon Grid.Column="0" IconName="Bolt" IconSize="12" IconBrush="{StaticResource VolarInstrumentBrush}" />
+                                        <TextBlock x:Name="WipHintText" Grid.Column="1" FontSize="12.5" TextWrapping="Wrap" MaxLines="2" Foreground="{StaticResource VolarTextSecBrush}" />
+                                        <Button Grid.Column="2" Padding="0" BorderThickness="0" Background="Transparent" Click="OnDismissWipHintClick">
+                                            <controls:VolarIcon IconName="X" IconSize="9" IconBrush="{StaticResource VolarTextMutBrush}" />
+                                        </Button>
+                                    </Grid>
+                                </Border>
+
+                                <Border x:Name="DisambiguationCard" CornerRadius="12" BorderThickness="0.5" Padding="12" Background="{StaticResource VolarCardBrush}" BorderBrush="{StaticResource VolarInstrumentDimBrush}">
+                                    <StackPanel Spacing="8">
+                                        <TextBlock Text="An AI run finished — which task was it?" FontSize="12.5" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                                        <ItemsControl x:Name="DisambiguationList">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate x:DataType="vm:DisambiguationCandidateViewModel">
+                                                    <Button
+                                                        Margin="0,0,0,6"
+                                                        Height="26"
+                                                        HorizontalContentAlignment="Left"
+                                                        HorizontalAlignment="Stretch"
+                                                        Padding="9,0"
+                                                        Background="{StaticResource VolarCardBrush}"
+                                                        BorderThickness="0.5"
+                                                        BorderBrush="{StaticResource VolarBorderBrush}"
+                                                        CornerRadius="7"
+                                                        Click="OnDisambiguationCandidateClick"
+                                                        Tag="{x:Bind Id}">
+                                                        <TextBlock Text="{x:Bind Title}" FontSize="12.5" FontWeight="Medium" TextTrimming="CharacterEllipsis" MaxLines="1" Foreground="{StaticResource VolarTextPriBrush}" />
+                                                    </Button>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                        <Button Padding="0" BorderThickness="0" Background="Transparent" HorizontalAlignment="Left" Click="OnDismissDisambiguationClick">
+                                            <TextBlock Text="None of these" FontSize="11.5" FontWeight="Medium" Foreground="{StaticResource VolarTextMutBrush}" />
+                                        </Button>
+                                    </StackPanel>
+                                </Border>
+
+                                <ItemsControl x:Name="DueDelegationList">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate x:DataType="vm:DelegationReviewItemViewModel">
+                                            <Border Margin="0,0,0,10" CornerRadius="12" BorderThickness="0.5" Padding="12" Background="{StaticResource VolarCardBrush}" BorderBrush="{StaticResource VolarBorderBrush}">
+                                                <StackPanel Spacing="8">
+                                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                                        <controls:VolarIcon IconName="Clock" IconSize="11" IconBrush="{StaticResource VolarInstrumentBrush}" />
+                                                        <TextBlock FontSize="13" FontWeight="Medium" TextTrimming="CharacterEllipsis" MaxLines="1" Foreground="{StaticResource VolarTextPriBrush}">
+                                                            <Run Text="Check-in: " /><Run Text="{x:Bind Title}" />
+                                                        </TextBlock>
+                                                    </StackPanel>
+                                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                                        <Button Height="28" Padding="12,0" CornerRadius="8" BorderThickness="0" Background="{StaticResource VolarInstrumentBrush}" Click="OnResolveDelegationDoneClick" Tag="{x:Bind Id}">
+                                                            <TextBlock Text="Done" FontSize="12" FontWeight="Medium" Foreground="White" />
+                                                        </Button>
+                                                        <Button Height="28" Padding="12,0" CornerRadius="8" BorderThickness="0.5" Background="{StaticResource VolarSurfaceHiBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}" Click="OnResolveDelegationStillWaitingClick" Tag="{x:Bind Id}">
+                                                            <TextBlock Text="Still waiting" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                                                        </Button>
+                                                        <Button Height="28" Padding="12,0" CornerRadius="8" BorderThickness="0.5" Background="{StaticResource VolarSurfaceHiBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}" Click="OnResolveDelegationCheckLaterClick" Tag="{x:Bind Id}">
+                                                            <TextBlock Text="Check later" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                                                        </Button>
+                                                    </StackPanel>
+                                                </StackPanel>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </StackPanel>
+
+                            <!-- NEXT peek (TodayView.swift:633-703) — bespoke layout, same TaskRowViewModel/actions
+                                 as TaskRowControl (see that control's own header comment). -->
+                            <Border
+                                x:Name="NextPeekRow"
+                                CornerRadius="15"
+                                BorderThickness="0.5"
+                                Padding="20,15"
+                                Opacity="0.62"
+                                Background="{StaticResource VolarSurfaceBrush}"
+                                BorderBrush="{StaticResource VolarBorderBrush}"
+                                Margin="0,22,0,0"
+                                Tapped="OnNextPeekTapped">
+                                <Border.ContextFlyout>
+                                    <MenuFlyout>
+                                        <MenuFlyoutItem Text="Break down into steps…" Click="OnNextPeekBreakdownClick" />
+                                        <MenuFlyoutItem x:Name="NextPeekToggleDoneMenuItem" Text="Mark done" Click="OnNextPeekToggleDoneClick" />
+                                        <MenuFlyoutSeparator />
+                                        <MenuFlyoutItem Text="Delete" Click="OnNextPeekDeleteClick" Foreground="{StaticResource VolarDestructBrush}" />
+                                    </MenuFlyout>
+                                </Border.ContextFlyout>
+                                <Grid ColumnSpacing="14">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <Button Grid.Column="0" Width="15" Height="15" Padding="0" BorderThickness="0" Background="Transparent" Click="OnNextPeekCheckboxClick">
+                                        <Grid Width="15" Height="15">
+                                            <Ellipse x:Name="NextPeekCheckboxRing" Width="15" Height="15" StrokeThickness="1.5" />
+                                            <Ellipse x:Name="NextPeekCheckboxFill" Width="15" Height="15" />
+                                            <controls:VolarIcon x:Name="NextPeekCheckIcon" IconName="Check" IconSize="9" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                                        </Grid>
+                                    </Button>
+                                    <StackPanel Grid.Column="1" Spacing="3">
+                                        <TextBlock Text="NEXT" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="10" FontWeight="Medium" Foreground="{StaticResource VolarTextMutBrush}" />
+                                        <TextBlock x:Name="NextPeekTitleText" FontSize="14.5" TextTrimming="CharacterEllipsis" MaxLines="1" />
+                                    </StackPanel>
+                                    <TextBlock x:Name="NextPeekMetaText" Grid.Column="2" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11.5" Foreground="{StaticResource VolarTextMutBrush}" VerticalAlignment="Center" />
+                                </Grid>
+                            </Border>
+
+                            <!-- Later drawer (TodayView.swift:711-793, `CollapsibleTaskSection`). -->
+                            <Border x:Name="LaterDrawer" CornerRadius="15" BorderThickness="0.5" Background="{StaticResource VolarSurfaceBrush}" BorderBrush="{StaticResource VolarBorderBrush}" Margin="0,22,0,0">
+                                <StackPanel>
+                                    <Grid Padding="18,13" ColumnSpacing="10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="LATER" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11" FontWeight="Medium" Foreground="{StaticResource VolarTextMutBrush}" />
+                                        <TextBlock Grid.Column="1" x:Name="LaterCountText" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                                        <Button Grid.Column="3" Padding="10,5" CornerRadius="7" BorderThickness="0.5" Background="{StaticResource VolarSurfaceHiBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}" Click="OnToggleLaterExpandedClick">
+                                            <TextBlock x:Name="LaterToggleText" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11" FontWeight="Medium" Foreground="{StaticResource VolarTextSecBrush}" />
+                                        </Button>
+                                    </Grid>
+                                    <ScrollViewer x:Name="LaterScrollViewer" Padding="14,4,14,14">
+                                        <ItemsControl x:Name="LaterItemsControl">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <controls:TaskRowControl />
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Completed drawer — same structure as Later (TodayView.swift:125-132). -->
+                            <Border x:Name="CompletedDrawer" CornerRadius="15" BorderThickness="0.5" Background="{StaticResource VolarSurfaceBrush}" BorderBrush="{StaticResource VolarBorderBrush}" Margin="0,22,0,0">
+                                <StackPanel>
+                                    <Grid Padding="18,13" ColumnSpacing="10">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Grid.Column="0" Text="COMPLETED" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11" FontWeight="Medium" Foreground="{StaticResource VolarTextMutBrush}" />
+                                        <TextBlock Grid.Column="1" x:Name="CompletedCountText" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                                        <Button Grid.Column="3" Padding="10,5" CornerRadius="7" BorderThickness="0.5" Background="{StaticResource VolarSurfaceHiBrush}" BorderBrush="{StaticResource VolarBorderHiBrush}" Click="OnToggleCompletedExpandedClick">
+                                            <TextBlock x:Name="CompletedToggleText" FontFamily="{StaticResource VolarMonoFontFamily}" FontSize="11" FontWeight="Medium" Foreground="{StaticResource VolarTextSecBrush}" />
+                                        </Button>
+                                    </Grid>
+                                    <ScrollViewer x:Name="CompletedScrollViewer" Padding="14,4,14,14">
+                                        <ItemsControl x:Name="CompletedItemsControl">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <controls:TaskRowControl />
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                </StackPanel>
+                            </Border>
+
+                            <!-- Hotkey footer (TodayView.swift:502-520). -->
+                            <Border
+                                Margin="0,22,0,0"
+                                CornerRadius="10"
+                                BorderThickness="0.5"
+                                Padding="14,12"
+                                BorderBrush="{StaticResource AccentSolidBrush}">
+                                <StackPanel Orientation="Horizontal" Spacing="10">
+                                    <controls:VolarIcon IconName="Mic" IconSize="13" IconBrush="{StaticResource AccentSolidBrush}" />
+                                    <TextBlock Text="Press" FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" />
+                                    <controls:KeyBadge Text="Ctrl" Accent="True" />
+                                    <controls:KeyBadge Text="Alt" Accent="True" />
+                                    <controls:KeyBadge Text="M" Accent="True" />
+                                    <TextBlock Text="and speak to add a task by voice." FontSize="12" Foreground="{StaticResource VolarTextSecBrush}" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </Grid>
+        </Grid>
+
+        <!-- STAGE C INSERTION POINT: capture-state scrim (Color.Black @0.32, tap -> cancel capture)
+             + CapturePopover (B2) — full-window overlay, gated on capture state != idle. -->
+
+        <!-- STAGE C INSERTION POINT: FocusOverlay (B5) — full-window overlay, gated on
+             ViewModel.FocusActive. -->
+
+        <!-- STAGE C INSERTION POINT: NotificationBanner (B5) — top-trailing overlay
+             (Margin="0,44,20,0"), gated on the reminder-banner service state, 5s auto-dismiss. -->
+
+    </Grid>
+</UserControl>

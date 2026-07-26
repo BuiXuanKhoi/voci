@@ -1,0 +1,231 @@
+<!--
+  Views/MorningFrogView.xaml — port of MorningFrogView.swift (views-inventory.md §1.6): daily
+  "Good morning" pick-a-frog modal. wave4-contract.md §B3.
+
+  BACKDROP (deliberate divergence from the other 4 B3 views' plain black scrim): Swift's own body
+  (MorningFrogView.swift:20-24) paints a full `LinearGradient(VolarColor.bg -> VolarColor.surface,
+  top->bottom)` behind the card, not a translucent scrim over the Today view — this is functionally
+  closer to a full-screen takeover than a floating dialog. Reproduced here as the root Grid's own
+  gradient Background instead of reusing TaskDetailView/TaskBreakdownView/TriageView/SweepView's
+  shared "ScrimBrush" pattern, to stay faithful to the Swift source rather than force uniformity
+  across this wave's 5 modals (hosting decision 5's "scrim + centered card" is a generic shape, not a
+  literal mandate that every scrim be identical).
+
+  Voice CTA pulse (contract point 5, MorningFrogView.swift:99-104): looping glow via a `Storyboard`
+  (`RepeatBehavior="Forever"`, `AutoReverse="True"`) animating the CTA border's `DropShadow`/glow
+  opacity — gated on `UISettings.AnimationsEnabled` (code-behind), matching every other
+  repeat-forever surface this wave's gotcha list allows.
+
+  CornerRadius/Thickness literals (gotcha):
+    16 = modal radius (MorningFrogView.swift:66, per views-inventory.md §1.6 point 4).
+    14 = voice-CTA pill corner radius (MorningFrogView.swift:94).
+    9  = candidate-row corner radius (MorningFrogView.swift:178).
+    0.5 = VolarHairlineThickness (Metrics.xaml) — divider rule height + hairline strokes.
+-->
+<UserControl
+    x:Class="Volar.App.Views.MorningFrogView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls"
+    xmlns:vm="using:Volar.App.ViewModels">
+
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="AccentBorder027Brush" Color="{Binding Color, Source={StaticResource AccentSolidBrush}}" Opacity="0.27" />
+
+        <!-- Color.white.opacity(0.28) -> alpha = round(0.28*255) = 71.4 -> 71 = 0x47
+             (MorningFrogView.swift:147, unselected candidate-row radio ring). -->
+        <SolidColorBrush x:Key="White28Brush" Color="#47FFFFFF" />
+
+        <!-- VolarHigh (#B9705A) @0.12 -> alpha 0x1F (MorningFrogView.swift:171, "urgent" badge
+             background — same math as TaskDetailView.xaml's HighBackground012Brush). -->
+        <SolidColorBrush x:Key="HighBackground012Brush" Color="#1FB9705A" />
+
+        <Style x:Key="PillButtonStyle" TargetType="Button">
+            <Setter Property="BorderThickness" Value="0.5" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border
+                            x:Name="Chrome"
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="{TemplateBinding CornerRadius}">
+                            <ContentPresenter
+                                Content="{TemplateBinding Content}"
+                                Padding="{TemplateBinding Padding}"
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="CandidateTemplate" x:DataType="vm:FrogCandidateViewModel">
+            <Border
+                Margin="0,0,0,2"
+                Padding="12,10"
+                CornerRadius="9"
+                Background="Transparent"
+                Tapped="OnCandidateTapped">
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <Ellipse
+                        Grid.Column="0"
+                        Width="14"
+                        Height="14"
+                        Fill="Transparent"
+                        Stroke="{StaticResource White28Brush}"
+                        StrokeThickness="1.5"
+                        VerticalAlignment="Center" />
+                    <TextBlock
+                        Grid.Column="1"
+                        Text="{x:Bind Title}"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="13"
+                        Foreground="{StaticResource VolarTextPriBrush}"
+                        TextTrimming="CharacterEllipsis"
+                        VerticalAlignment="Center" />
+                    <Border
+                        Grid.Column="2"
+                        VerticalAlignment="Center"
+                        CornerRadius="11"
+                        Padding="7,2"
+                        Background="{StaticResource HighBackground012Brush}"
+                        Visibility="{x:Bind controls:RowPresentation.VisibleIfHighPriority(Priority)}">
+                        <StackPanel Orientation="Horizontal" Spacing="5">
+                            <Ellipse Width="5" Height="5" Fill="{StaticResource VolarHighBrush}" />
+                            <TextBlock
+                                Text="urgent"
+                                FontFamily="{StaticResource VolarUiFontFamily}"
+                                FontSize="10.5"
+                                FontWeight="Medium"
+                                Foreground="{StaticResource VolarHighBrush}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid Visibility="{x:Bind controls:RowPresentation.VisibleIfTrue(ViewModel.IsVisible), Mode=OneWay}">
+        <Grid.Background>
+            <LinearGradientBrush StartPoint="0.5,0" EndPoint="0.5,1">
+                <GradientStop Offset="0" Color="{StaticResource VolarBg}" />
+                <GradientStop Offset="1" Color="{StaticResource VolarSurface}" />
+            </LinearGradientBrush>
+        </Grid.Background>
+
+        <controls:GlassPanel
+            Level="Heavy"
+            CornerRadius="16"
+            MaxWidth="460"
+            Margin="40,0"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Padding="32,36,32,24">
+            <StackPanel Spacing="16">
+                <TextBlock
+                    Text="Good morning."
+                    FontFamily="{StaticResource VolarUiFontFamily}"
+                    FontSize="22"
+                    FontWeight="Medium"
+                    Foreground="{StaticResource VolarTextPriBrush}"
+                    HorizontalAlignment="Center" />
+                <TextBlock
+                    Text="What's the one task that, if you finished it today, would make today a win?"
+                    FontFamily="{StaticResource VolarUiFontFamily}"
+                    FontSize="16"
+                    Foreground="{StaticResource VolarTextPriBrush}"
+                    TextAlignment="Center"
+                    TextWrapping="Wrap"
+                    LineHeight="21" />
+
+                <!-- Voice CTA. `PulseGlow` approximates `.shadow(color: accentColors.glow.opacity(pulse
+                     ? 0.55 : 0), radius: pulse ? 14 : 0)` (MorningFrogView.swift:99) — a slightly
+                     larger, low-opacity accent-glow Border behind the button, standing in for a real
+                     blurred drop-shadow (no Win2D/Composition blur per frozen decision 2); its Opacity
+                     is animated 0<->0.55 forever by MorningFrogView.xaml.cs (code-behind Storyboard,
+                     same hand-rolled-animation shape as Views/Controls/Spinner.cs), gated on
+                     UISettings.AnimationsEnabled. -->
+                <Grid HorizontalAlignment="Center">
+                    <Border
+                        x:Name="PulseGlow"
+                        Height="58"
+                        Width="220"
+                        CornerRadius="18"
+                        Background="{StaticResource AccentGlowBrush}"
+                        Opacity="0" />
+                    <Button
+                        x:Name="VoiceCtaButton"
+                        Style="{StaticResource PillButtonStyle}"
+                        Height="48"
+                        CornerRadius="14"
+                        Padding="22,0"
+                        Background="{StaticResource AccentSurfaceBrush}"
+                        BorderBrush="{StaticResource AccentBorder027Brush}"
+                        Command="{x:Bind ViewModel.VoiceCommand, Mode=OneWay}">
+                        <StackPanel Orientation="Horizontal" Spacing="10">
+                            <controls:VolarIcon IconName="Mic" IconSize="16" IconBrush="{StaticResource AccentSolidBrush}" />
+                            <TextBlock Text="Tap" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="14" FontWeight="Medium" Foreground="{StaticResource AccentSolidBrush}" />
+                            <controls:KeyBadge Text="M" Accent="True" />
+                            <TextBlock Text="to answer" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="14" FontWeight="Medium" Foreground="{StaticResource AccentSolidBrush}" />
+                        </StackPanel>
+                    </Button>
+                </Grid>
+
+                <!-- Divider -->
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <Rectangle Grid.Column="0" Height="0.5" Fill="{StaticResource VolarBorderBrush}" VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1" Text="or" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                    <Rectangle Grid.Column="2" Height="0.5" Fill="{StaticResource VolarBorderBrush}" VerticalAlignment="Center" />
+                </Grid>
+
+                <!-- Candidates -->
+                <StackPanel Spacing="4">
+                    <TextBlock
+                        Text="PICK FROM YOUR LIST"
+                        Margin="8,0,0,2"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="11"
+                        FontWeight="Medium"
+                        CharacterSpacing="70"
+                        Foreground="{StaticResource VolarTextMutBrush}" />
+                    <TextBlock
+                        Margin="8,6"
+                        Text="Nothing open today — enjoy it."
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="13"
+                        Foreground="{StaticResource VolarTextSecBrush}"
+                        Visibility="{x:Bind controls:RowPresentation.VisibleIfFalse(ViewModel.HasCandidates), Mode=OneWay}" />
+                    <ItemsControl
+                        ItemsSource="{x:Bind ViewModel.Candidates, Mode=OneWay}"
+                        ItemTemplate="{StaticResource CandidateTemplate}"
+                        Visibility="{x:Bind controls:RowPresentation.VisibleIfTrue(ViewModel.HasCandidates), Mode=OneWay}" />
+                </StackPanel>
+
+                <Button
+                    HorizontalAlignment="Center"
+                    Background="Transparent"
+                    BorderThickness="0"
+                    Height="32"
+                    Padding="14,0"
+                    Command="{x:Bind ViewModel.SkipCommand, Mode=OneWay}">
+                    <TextBlock Text="Skip today" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="12" FontWeight="Medium" Foreground="{StaticResource VolarTextMutBrush}" />
+                </Button>
+            </StackPanel>
+        </controls:GlassPanel>
+    </Grid>
+</UserControl>

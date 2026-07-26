@@ -1,0 +1,193 @@
+<!--
+  Views/Controls/SidebarControl.xaml — port of Sidebar.swift (views-inventory.md §1.5): capture
+  button, key-badge row, "Focus" section label, Today/Upcoming/Inbox nav rows, on-device privacy
+  footer. wave4-contract.md Stage B1 deliverable. Shares TodayViewModel with TodayView.xaml (no
+  separate SidebarViewModel — the contract's file list names only ViewModels/TodayViewModel.cs) via
+  the ViewModel DependencyProperty below; set from TodayView.xaml as
+  `<controls:SidebarControl ViewModel="{x:Bind ViewModel}"/>`.
+
+  Width 160 = wave4-slice.md's own "Sidebar w=160" spec (Sidebar.swift:50, matches exactly). Corner
+  radii 9 (capture button/footer, VolarCornerRadiusHairline) and 7 (nav-item hover pill,
+  Sidebar.swift:184) are literals per the CornerRadius/Thickness gotcha. Hairline 0.5 =
+  VolarHairlineThickness, literal. `Color.white.opacity(0.03/0.04)` (Sidebar.swift:63,121 — the
+  ambient-mode surface overlay tint and the footer's plain-mode background) are one-off inline
+  literals, same "component-local one-off" pattern Components.swift's own inline opacities use
+  elsewhere in this port (no named Colors.xaml resource exists for these — see views-inventory.md §1.5
+  item 4).
+
+  Today/Upcoming/Inbox nav counts: Today is LIVE (ViewModel.TodayNavCount, mirrors
+  `appState.openTasks.count`); Upcoming/Inbox are the Swift original's own hardcoded placeholder data
+  (12/3, TodayViewModel.UpcomingNavCountPlaceholder/InboxNavCountPlaceholder) — faithfully ported, not
+  a Wave-4 feature gap of this port's own making (views-inventory.md §1.5 item 2 flags this in the
+  Swift source itself). Upcoming/Inbox rows have no click action, matching Sidebar.swift's own empty
+  `{}` action closures.
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.SidebarControl"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls">
+
+    <UserControl.Resources>
+        <!-- accentColor.opacity(0.15) (Sidebar.swift `CaptureButtonStyle`, line 138) -->
+        <SolidColorBrush x:Key="CaptureButtonBackgroundBrush"
+                         Color="{Binding Color, Source={StaticResource AccentSolidBrush}}"
+                         Opacity="0.15" />
+        <!-- accentColor.opacity(0.27) (Sidebar.swift `CaptureButtonStyle`, line 142, idle state) -->
+        <SolidColorBrush x:Key="CaptureButtonBorderBrush"
+                         Color="{Binding Color, Source={StaticResource AccentSolidBrush}}"
+                         Opacity="0.27" />
+    </UserControl.Resources>
+
+    <Grid x:Name="RootGrid" Width="160" Padding="0,0,0,12">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Sidebar background (ambient-conditional glass, per ThemeState.Ambient — Sidebar.swift:58-67).
+             The RootGrid itself only lays out content; RootBackground sits behind it as a full-bleed
+             sibling so ambient glass never clips to the padded content area. -->
+        <!-- Declared first (before any content row below) so it renders behind everything else in
+             this Grid purely by markup/z-order — no ZIndex attached property needed. -->
+        <Border
+            x:Name="RootBackground"
+            Grid.Row="0"
+            Grid.RowSpan="6" />
+        <Rectangle
+            x:Name="TrailingHairline"
+            Grid.Row="0"
+            Grid.RowSpan="6"
+            Width="0.5"
+            HorizontalAlignment="Right"
+            Fill="{StaticResource VolarBorderBrush}" />
+
+        <!-- Capture button (Sidebar.swift:69-84). -->
+        <Button
+            x:Name="CaptureButton"
+            Grid.Row="0"
+            Margin="10,12,10,4"
+            Height="32"
+            Padding="0"
+            Background="{StaticResource CaptureButtonBackgroundBrush}"
+            BorderBrush="{StaticResource CaptureButtonBorderBrush}"
+            BorderThickness="0.5"
+            HorizontalContentAlignment="Stretch"
+            Click="OnCaptureButtonClick">
+            <Button.Template>
+                <ControlTemplate TargetType="Button">
+                    <Border
+                        x:Name="CaptureButtonBorder"
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="{TemplateBinding BorderThickness}"
+                        CornerRadius="9">
+                        <ContentPresenter
+                            Content="{TemplateBinding Content}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center" />
+                    </Border>
+                </ControlTemplate>
+            </Button.Template>
+            <StackPanel Orientation="Horizontal" Spacing="7">
+                <controls:VolarIcon x:Name="CaptureIcon" IconName="Mic" IconSize="13" />
+                <TextBlock x:Name="CaptureButtonText" FontSize="12" FontWeight="Medium" />
+            </StackPanel>
+        </Button>
+
+        <!-- Key badge row (Sidebar.swift:86-93). -->
+        <StackPanel
+            Grid.Row="1"
+            Orientation="Horizontal"
+            Spacing="4"
+            HorizontalAlignment="Center"
+            Margin="0,0,0,4">
+            <controls:KeyBadge Text="Ctrl" />
+            <controls:KeyBadge Text="Alt" />
+            <controls:KeyBadge Text="M" />
+        </StackPanel>
+
+        <!-- "FOCUS" section label (Sidebar.swift:95-105). -->
+        <TextBlock
+            Grid.Row="2"
+            Text="FOCUS"
+            FontFamily="{StaticResource VolarUiFontFamily}"
+            FontSize="10.5"
+            FontWeight="Medium"
+            Foreground="{StaticResource VolarTextMutBrush}"
+            Margin="12,14,0,6" />
+
+        <!-- Nav items (Sidebar.swift:22-42, `SidebarItem`). Today is the only live/active row. -->
+        <StackPanel Grid.Row="3" Spacing="1" Margin="8,0,8,0">
+            <Border x:Name="TodayNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited">
+                <Grid ColumnSpacing="9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <controls:VolarIcon x:Name="TodayNavIcon" Grid.Column="0" IconName="Today" IconSize="14" />
+                    <TextBlock x:Name="TodayNavLabel" Grid.Column="1" Text="Today" FontSize="13" FontWeight="Medium" />
+                    <TextBlock x:Name="TodayNavCountText" Grid.Column="2" FontSize="11" />
+                </Grid>
+            </Border>
+            <Border x:Name="UpcomingNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited">
+                <Grid ColumnSpacing="9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <controls:VolarIcon Grid.Column="0" IconName="Upcoming" IconSize="14" IconBrush="{StaticResource VolarTextSecBrush}" />
+                    <TextBlock Grid.Column="1" Text="Upcoming" FontSize="13" Foreground="{StaticResource VolarTextPriBrush}" />
+                    <TextBlock x:Name="UpcomingNavCountText" Grid.Column="2" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                </Grid>
+            </Border>
+            <Border x:Name="InboxNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited">
+                <Grid ColumnSpacing="9">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <controls:VolarIcon Grid.Column="0" IconName="Inbox" IconSize="14" IconBrush="{StaticResource VolarTextSecBrush}" />
+                    <TextBlock Grid.Column="1" Text="Inbox" FontSize="13" Foreground="{StaticResource VolarTextPriBrush}" />
+                    <TextBlock x:Name="InboxNavCountText" Grid.Column="2" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                </Grid>
+            </Border>
+        </StackPanel>
+
+        <!-- Spacer -->
+        <Grid Grid.Row="4" />
+
+        <!-- On-device privacy footer (Sidebar.swift:107-127). -->
+        <Border
+            x:Name="FooterBorder"
+            Grid.Row="5"
+            Margin="10,0,10,0"
+            Padding="10"
+            CornerRadius="9"
+            BorderThickness="0.5"
+            BorderBrush="{StaticResource VolarBorderBrush}">
+            <StackPanel Spacing="4">
+                <StackPanel Orientation="Horizontal" Spacing="6">
+                    <Ellipse Width="5" Height="5" Fill="{StaticResource AccentSolidBrush}" />
+                    <TextBlock
+                        Text="On-device"
+                        FontSize="11"
+                        FontWeight="Medium"
+                        Foreground="{StaticResource VolarTextPriBrush}" />
+                </StackPanel>
+                <TextBlock
+                    Text="Audio is parsed locally. Nothing leaves your Mac."
+                    FontSize="11"
+                    TextWrapping="Wrap"
+                    Foreground="{StaticResource VolarTextSecBrush}" />
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

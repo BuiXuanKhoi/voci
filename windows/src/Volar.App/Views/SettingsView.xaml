@@ -1,0 +1,81 @@
+<!--
+  Views/SettingsView.xaml — B4 (Settings + Onboarding), Wave 4. Port of
+  Volar/Sources/Views/SettingsView.swift (958 lines, 6 tabs) — see
+  specs/003-windows-port/views-inventory.md SS1.15 for the full per-tab AppState/theme-token
+  inventory this was built against.
+
+  HOSTING: Swift's Settings is a native macOS "Settings scene" (its own window). WinUI 3 has no
+  window-per-scene concept and this port's shell is a single MainWindow — per wave4-contract.md
+  frozen decision 5 ("All sheets/modals = overlay Grid layers inside MainWindow... Scrim + centered
+  card, per-overlay visibility bound to VM"), this view is built as ANOTHER overlay layer (a scrim
+  + a centered glass card with its own close affordance), not a second Window. Stage C mounts/shows/
+  hides it exactly like the Popover/Focus/modal overlays.
+
+  Row shape (SettingsView.swift's private `SettingsRow<Content>`, lines 756-783) and all 6 tabs'
+  actual content are built PROGRAMMATICALLY in SettingsView.xaml.cs rather than declared here as
+  static XAML — this view's content is inherently data-driven (ComboBox items, Segmented options,
+  conditional rows gated on VM booleans) and every row recurs ~20 times across the 6 tabs with only
+  its label/hint/control varying, so a single C# row-builder (mirroring Swift's own `SettingsRow`
+  being a single reusable view) is both DRYer and easier to keep correct than 20 near-duplicate XAML
+  blocks. This XAML file only declares the static shell: scrim, card frame, tab strip host, and the
+  scrollable content host the tab builders populate.
+
+  CornerRadius/Thickness gotcha (wave4-contract.md "Hard gotchas"): the card's CornerRadius 16 and
+  every row's CornerRadius 11 (SettingsView.swift:780/622 — the SAME one-off 11 recurs 3x per
+  views-inventory.md SS1.15 point 4: SettingsRow, claudeCodeCard, and (ported as literal 16 here)
+  the About icon tile) are hand-copied literals, set in code-behind per row since XAML alone can't
+  parametrize them per this file's programmatic-row approach — the discipline itself (never a
+  StaticResource on a CornerRadius/Thickness property) is unchanged.
+-->
+<UserControl
+    x:Class="Volar.App.Views.SettingsView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls">
+    <Grid x:Name="RootGrid">
+        <!-- Scrim — Color.black.opacity(0.6), a plain literal (no named Volar scrim token exists
+             yet; matches every other overlay's own ad hoc scrim per decision 5). -->
+        <Rectangle Fill="#99000000" Tapped="OnScrimTapped" />
+
+        <Border
+            x:Name="CardBorder"
+            Width="760"
+            Height="600"
+            MinWidth="560"
+            MinHeight="460"
+            CornerRadius="16"
+            BorderThickness="0.5"
+            Background="{StaticResource VolarGlassStandardBrush}"
+            BorderBrush="{StaticResource VolarGlassBorderBrush}"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Background="{StaticResource VolarSurfaceBrush}">
+                    <StackPanel
+                        x:Name="TabStripPanel"
+                        Orientation="Horizontal"
+                        Spacing="4"
+                        HorizontalAlignment="Center"
+                        Padding="14,4,14,10" />
+                    <controls:ToolButton
+                        x:Name="CloseButton"
+                        IconName="X"
+                        HorizontalAlignment="Right"
+                        VerticalAlignment="Top"
+                        Margin="0,6,10,0"
+                        Click="OnCloseButtonClick" />
+                    <Rectangle VerticalAlignment="Bottom" Height="0.5" Fill="{StaticResource VolarBorderBrush}" />
+                </Grid>
+
+                <ScrollViewer Grid.Row="1" Padding="22" VerticalScrollBarVisibility="Auto">
+                    <ContentControl x:Name="ContentHost" HorizontalContentAlignment="Stretch" />
+                </ScrollViewer>
+            </Grid>
+        </Border>
+    </Grid>
+</UserControl>

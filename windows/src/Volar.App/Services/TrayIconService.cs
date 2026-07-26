@@ -18,6 +18,21 @@ using static Volar.App.Services.TrayNativeMethods;
 
 namespace Volar.App.Services;
 
+/// <summary>The 3 tray icon states — wave4-contract.md frozen decision 4 ("MenuBarLabel analog =
+/// tray icon state swap (idle/listening/focus-lock icons) + dynamic tooltip"). Mirrors
+/// MenuBarLabel.swift's 3-state switch (idle / `captureState == .recording` / `focusActive`)
+/// 1:1 — Windows has no menu-bar surface to render MenuBarLabel's rich text into (task title, WIP
+/// badge, mono countdown all live in the tooltip string instead, via <see cref="TrayIconService.UpdateState"/>'s
+/// <c>tooltip</c> parameter), so only the 3 STATE identities carry over as icon glyphs; the rest of
+/// MenuBarLabel's content becomes the tooltip text, composed by whichever caller wires this up
+/// (Stage C — this class stays passive, see <see cref="TrayIconService.UpdateState"/>'s own doc comment).</summary>
+public enum TrayState
+{
+    Idle,
+    Listening,
+    Focus,
+}
+
 public sealed class TrayIconService : IDisposable
 {
     private const string ClassName = "VolarTrayIconWindow";
@@ -54,6 +69,12 @@ public sealed class TrayIconService : IDisposable
     private Thread? _pumpThread;
     private nint _hwnd;
     private bool _disposed;
+
+    // Lazily built, cached for the process lifetime — DestroyIcon'd in Dispose(). See
+    // EnsureIcons()/CreateDotIcon() below.
+    private nint _iconIdle;
+    private nint _iconListening;
+    private nint _iconFocus;
 
     public TrayIconService(
         Action onOpen,
@@ -125,7 +146,6 @@ public sealed class TrayIconService : IDisposable
 
     private void AddIcon()
     {
-        var icon = LoadIcon(0, IDI_APPLICATION);
         var data = new NOTIFYICONDATA
         {
             cbSize = Marshal.SizeOf<NOTIFYICONDATA>(),
@@ -133,10 +153,170 @@ public sealed class TrayIconService : IDisposable
             uID = TrayIconId,
             uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP,
             uCallbackMessage = WM_TRAYICON,
-            hIcon = icon,
+            hIcon = IconFor(TrayState.Idle),
             szTip = "Volar",
         };
         Shell_NotifyIcon(NIM_ADD, ref data);
+    }
+
+    /// <summary>Swaps the tray icon glyph for <paramref name="state"/> and, when
+    /// <paramref name="tooltip"/> is supplied, replaces the hover tooltip (<c>NIM_MODIFY</c>'s
+    /// <c>szTip</c>, truncated to <c>NOTIFYICONDATA</c>'s 127-char/128-byte-with-null-terminator
+    /// limit — wave4-contract.md frozen decision 4). PASSIVE by design (this task's brief): this
+    /// class does not subscribe to any service itself, throttle call frequency, or decide WHEN a
+    /// state changed — Stage C is expected to wire <see cref="CaptureFlowService.State"/>/
+    /// <c>FocusSessionService.FocusActive</c>/the 1s focus-countdown tick to this method, including
+    /// the "update the focus tooltip at most 1/s" constraint (a caller-side throttling
+    /// responsibility, not enforced here). Safe to call from any thread — <c>Shell_NotifyIcon</c>
+    /// itself has no thread affinity to the window it targets; a no-op before <see cref="Initialize"/>
+    /// has created the tray icon (or after <see cref="Dispose"/>).</summary>
+    public void UpdateState(TrayState state, string? tooltip)
+    {
+        if (_disposed || _hwnd == 0)
+        {
+            return;
+        }
+
+        var tip = string.IsNullOrEmpty(tooltip) ? "Volar" : tooltip;
+        if (tip.Length > 127)
+        {
+            tip = tip[..127];
+        }
+
+        var data = new NOTIFYICONDATA
+        {
+            cbSize = Marshal.SizeOf<NOTIFYICONDATA>(),
+            hWnd = _hwnd,
+            uID = TrayIconId,
+            uFlags = NIF_ICON | NIF_TIP,
+            hIcon = IconFor(state),
+            szTip = tip,
+        };
+        Shell_NotifyIcon(NIM_MODIFY, ref data);
+    }
+
+    private nint IconFor(TrayState state)
+    {
+        EnsureIcons();
+        return state switch
+        {
+            TrayState.Listening => _iconListening != 0 ? _iconListening : LoadIcon(0, IDI_APPLICATION),
+            TrayState.Focus => _iconFocus != 0 ? _iconFocus : LoadIcon(0, IDI_APPLICATION),
+            _ => _iconIdle != 0 ? _iconIdle : LoadIcon(0, IDI_APPLICATION),
+        };
+    }
+
+    /// <summary>Builds the 3 state icons once. GDI-drawn simple glyph variants, per this task's
+    /// brief ("dot/red dot/ring"): idle = a small muted-grey dot (Colors.xaml <c>VolarTextSec</c>
+    /// #9BA3AE), listening = a small solid red dot (a plain "recording" convention — deliberately
+    /// NOT drawn from the app's anti-shame no-red-for-status palette rule, since a tray REC glyph is
+    /// an activity indicator under normal OS iconography conventions, not an in-app task-status
+    /// color; flagged in this task's final report), focus-lock = a ring in the reserved warm NOW
+    /// spotlight tone (Colors.xaml <c>VolarNowAccent</c> #E8B25A — mirrors MenuBarLabel.swift's own
+    /// choice to badge focus-lock with the NOW-spotlight family, MenuBarLabel.swift:103-113).
+    /// Falls back to <c>LoadIcon(0, IDI_APPLICATION)</c> per-state if generation fails for any
+    /// reason (never let a tray icon glyph failure take down the tray).</summary>
+    private void EnsureIcons()
+    {
+        if (_iconIdle != 0 || _iconListening != 0 || _iconFocus != 0)
+        {
+            return;
+        }
+        _iconIdle = CreateDotIcon(0x9BA3AE, ringOnly: false);
+        _iconListening = CreateDotIcon(0xE0524F, ringOnly: false);
+        _iconFocus = CreateDotIcon(0xE8B25A, ringOnly: true);
+    }
+
+    private static nint CreateDotIcon(uint rgb, bool ringOnly)
+    {
+        const int size = 32;
+        var pixels = new byte[size * size * 4]; // top-down BGRA, opaque where drawn, else 0 = fully transparent.
+        var b = (byte)(rgb & 0xFF);
+        var g = (byte)((rgb >> 8) & 0xFF);
+        var r = (byte)((rgb >> 16) & 0xFF);
+        var center = (size - 1) / 2.0;
+        var outerRadius = size * 0.30;
+        var innerRadius = ringOnly ? outerRadius * 0.55 : 0.0;
+
+        for (var y = 0; y < size; y++)
+        {
+            for (var x = 0; x < size; x++)
+            {
+                var dx = x - center;
+                var dy = y - center;
+                var dist = Math.Sqrt((dx * dx) + (dy * dy));
+                if (dist > outerRadius || dist < innerRadius)
+                {
+                    continue;
+                }
+                var offset = ((y * size) + x) * 4;
+                pixels[offset + 0] = b;
+                pixels[offset + 1] = g;
+                pixels[offset + 2] = r;
+                pixels[offset + 3] = 255;
+            }
+        }
+
+        return BuildHIconFromBgra(pixels, size, size);
+    }
+
+    private static nint BuildHIconFromBgra(byte[] bgraTopDown, int width, int height)
+    {
+        var bmi = new BITMAPINFO
+        {
+            bmiHeader = new BITMAPINFOHEADER
+            {
+                biSize = Marshal.SizeOf<BITMAPINFOHEADER>(),
+                biWidth = width,
+                biHeight = -height, // negative = top-down DIB, matching bgraTopDown's row order.
+                biPlanes = 1,
+                biBitCount = 32,
+                biCompression = BI_RGB,
+            },
+        };
+
+        var screenDC = GetDC(0);
+        if (screenDC == 0)
+        {
+            return 0;
+        }
+        try
+        {
+            var colorBitmap = CreateDIBSection(screenDC, ref bmi, DIB_RGB_COLORS, out var bits, 0, 0);
+            if (colorBitmap == 0 || bits == 0)
+            {
+                return 0;
+            }
+            try
+            {
+                Marshal.Copy(bgraTopDown, 0, bits, bgraTopDown.Length);
+
+                // AND mask — irrelevant with a true-per-pixel-alpha 32bpp color bitmap (supported by
+                // every Windows version this app targets), but ICONINFO still requires one the same
+                // size.
+                var maskBitmap = CreateBitmap(width, height, 1, 1, 0);
+                try
+                {
+                    var iconInfo = new ICONINFO { fIcon = true, hbmColor = colorBitmap, hbmMask = maskBitmap };
+                    return CreateIconIndirect(ref iconInfo);
+                }
+                finally
+                {
+                    if (maskBitmap != 0)
+                    {
+                        DeleteObject(maskBitmap);
+                    }
+                }
+            }
+            finally
+            {
+                DeleteObject(colorBitmap);
+            }
+        }
+        finally
+        {
+            ReleaseDC(0, screenDC);
+        }
     }
 
     private void RemoveIcon()
@@ -263,6 +443,22 @@ public sealed class TrayIconService : IDisposable
             WTSUnRegisterSessionNotification(_hwnd);
             RemoveIcon();
             DestroyWindow(_hwnd);
+        }
+
+        if (_iconIdle != 0)
+        {
+            DestroyIcon(_iconIdle);
+            _iconIdle = 0;
+        }
+        if (_iconListening != 0)
+        {
+            DestroyIcon(_iconListening);
+            _iconListening = 0;
+        }
+        if (_iconFocus != 0)
+        {
+            DestroyIcon(_iconFocus);
+            _iconFocus = 0;
         }
     }
 }

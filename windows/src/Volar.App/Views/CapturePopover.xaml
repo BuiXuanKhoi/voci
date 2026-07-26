@@ -1,0 +1,43 @@
+<!--
+  Views/CapturePopover.xaml — port of PopoverView.swift (views-inventory.md §1.17, full fidelity
+  per wave4-contract.md frozen decision 7: everything except the N/A dictation-consent sub-flow).
+
+  Deliberately a nearly-empty skeleton: this card's content is highly dynamic (variable draft count,
+  variable chip/condition count per draft, 7 distinct capture states) — CapturePopover.xaml.cs
+  rebuilds `RootStack`'s children imperatively from CapturePopoverViewModel on every state change,
+  the same code-behind-driven pattern Views/Controls/GlassPanel.cs and VolarIcon.cs already
+  establish in this codebase (an XAML ItemsControl/DataTemplate tree would need to duplicate most of
+  this same branching logic in converters instead of C#, for no fidelity benefit).
+
+  CornerRadius="18" is a one-off literal (wave4-contract.md CornerRadius/Thickness gotcha) — NOT one
+  of Metrics.xaml's 3 named radii (VolarCornerRadiusGlass 12 / Hairline 9 / Small 6); views-
+  inventory.md §1.17 point 4 calls this out explicitly: "an 8th distinct one-off radius — 18, only
+  used here" (PopoverView.swift:71, `.volarGlass(level: .heavy, cornerRadius: 18)`).
+
+  Padding "14,14,14,12" = PopoverView.swift 67-69 (`.padding(.horizontal,14).padding(.top,14)
+  .padding(.bottom,12)`, Left/Top/Right/Bottom order). Width 380 = PopoverView.swift's `width:
+  CGFloat = 380` (24).
+-->
+<UserControl
+    x:Class="Volar.App.Views.CapturePopover"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls"
+    HorizontalAlignment="Left"
+    VerticalAlignment="Top">
+    <UserControl.KeyboardAccelerators>
+        <!-- Popover-root-level dispatch (wave4-contract.md Stage B/B2 brief): do NOT port Swift's
+             invisible-button FIX-D hack (PopoverView.swift 134-145) — Escape/Enter route through
+             CapturePopoverViewModel.HandleEscape()/HandlePrimaryEnter(), which already encode the
+             exact per-state table PopoverView.swift's various `.keyboardShortcut(...)` attachments
+             describe (see that method's own doc comments for the full citation). -->
+        <KeyboardAccelerator Key="Escape" Invoked="OnEscapeAccelerator" />
+        <KeyboardAccelerator Key="Enter" Invoked="OnEnterAccelerator" />
+    </UserControl.KeyboardAccelerators>
+
+    <controls:GlassPanel x:Name="RootGlass" Level="Heavy" CornerRadius="18" Width="380">
+        <Border Padding="14,14,14,12">
+            <StackPanel x:Name="RootStack" Spacing="0" />
+        </Border>
+    </controls:GlassPanel>
+</UserControl>

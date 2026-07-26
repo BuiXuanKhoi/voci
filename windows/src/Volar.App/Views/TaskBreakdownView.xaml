@@ -1,0 +1,264 @@
+<!--
+  Views/TaskBreakdownView.xaml — port of TaskBreakdownView.swift (views-inventory.md §1.8): AI
+  task-breakdown preview modal, 5 hardcoded sample steps, "Save all as tasks" PERMANENTLY disabled
+  (FIX G — see TaskBreakdownViewModel.cs, do not "helpfully" re-enable). wave4-contract.md §B3.
+
+  HOSTING: same self-contained scrim+card overlay pattern as TaskDetailView.xaml (frozen decision 5).
+
+  CornerRadius/Thickness literals (gotcha):
+    16 = modal radius (TaskBreakdownView.swift:42, 5th occurrence per views-inventory.md §1.8 point 4).
+    12 = VolarCornerRadiusGlass (Metrics.xaml) — steps card (`.volarHairline(cornerRadius: 12)`).
+    9  = VolarCornerRadiusHairline (Metrics.xaml) — Edit/Cancel buttons.
+    11 = one-off — step-number circle badge is Capsule-shaped at a fixed 22x22 frame
+         (TaskBreakdownView.swift:103-106), radius = 22/2 = 11 (same shape math PriorityBadge/
+         TimeBadge already use for their own pills).
+    0.5 = VolarHairlineThickness (Metrics.xaml).
+-->
+<UserControl
+    x:Class="Volar.App.Views.TaskBreakdownView"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Volar.App.Views.Controls"
+    xmlns:vm="using:Volar.App.ViewModels">
+
+    <UserControl.Resources>
+        <SolidColorBrush x:Key="ScrimBrush" Color="Black" Opacity="0.45" />
+
+        <!-- Color.white.opacity(0.06) -> alpha 0x0F (see TaskDetailView.xaml's identical brush;
+             duplicated locally per this wave's file-disjoint-view convention). -->
+        <SolidColorBrush x:Key="White06Brush" Color="#0FFFFFFF" />
+
+        <!-- Color.white.opacity(0.04) -> alpha = round(0.04*255) = 10.2 -> 10 = 0x0A
+             (TaskBreakdownView.swift:121, duration pill background — distinct from VolarCard's
+             own 0x0A, same value, kept local/explicit since the Swift source names it as a plain
+             literal rather than VolarColor.card at that call site). -->
+        <SolidColorBrush x:Key="White04Brush" Color="#0AFFFFFF" />
+
+        <SolidColorBrush x:Key="AccentBorder02Brush" Color="{Binding Color, Source={StaticResource AccentSolidBrush}}" Opacity="0.2" />
+
+        <Style x:Key="PillButtonStyle" TargetType="Button">
+            <Setter Property="Padding" Value="14,0" />
+            <Setter Property="BorderThickness" Value="0.5" />
+            <Setter Property="HorizontalContentAlignment" Value="Center" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border
+                            Background="{TemplateBinding Background}"
+                            BorderBrush="{TemplateBinding BorderBrush}"
+                            BorderThickness="{TemplateBinding BorderThickness}"
+                            CornerRadius="{TemplateBinding CornerRadius}"
+                            Opacity="{TemplateBinding Opacity}">
+                            <ContentPresenter
+                                Content="{TemplateBinding Content}"
+                                Padding="{TemplateBinding Padding}"
+                                HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                VerticalAlignment="{TemplateBinding VerticalContentAlignment}" />
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <DataTemplate x:Key="StepRowTemplate" x:DataType="vm:BreakdownStepViewModel">
+            <Grid ColumnSpacing="12" Padding="10">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <!-- Drag-handle glyph: 3 stacked hairlines (TaskBreakdownView.swift:92-97). -->
+                <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Center" Opacity="0.35">
+                    <Rectangle Width="12" Height="1" Fill="{StaticResource VolarTextSecBrush}" />
+                    <Rectangle Width="12" Height="1" Fill="{StaticResource VolarTextSecBrush}" />
+                    <Rectangle Width="12" Height="1" Fill="{StaticResource VolarTextSecBrush}" />
+                </StackPanel>
+                <Border
+                    Grid.Column="1"
+                    Width="22"
+                    Height="22"
+                    CornerRadius="11"
+                    Background="{StaticResource AccentSurfaceBrush}"
+                    BorderBrush="{StaticResource AccentBorder02Brush}"
+                    BorderThickness="0.5">
+                    <TextBlock
+                        Text="{x:Bind Number}"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="11"
+                        FontWeight="Medium"
+                        Typography.NumeralAlignment="Tabular"
+                        Foreground="{StaticResource AccentSolidBrush}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                </Border>
+                <TextBlock
+                    Grid.Column="2"
+                    Text="{x:Bind Label}"
+                    FontFamily="{StaticResource VolarUiFontFamily}"
+                    FontSize="13"
+                    Foreground="{StaticResource VolarTextPriBrush}"
+                    TextTrimming="CharacterEllipsis"
+                    VerticalAlignment="Center" />
+                <Border
+                    Grid.Column="3"
+                    CornerRadius="9"
+                    Padding="8,2"
+                    Background="{StaticResource White04Brush}"
+                    BorderBrush="{StaticResource VolarBorderBrush}"
+                    BorderThickness="0.5"
+                    VerticalAlignment="Center">
+                    <TextBlock
+                        Text="{x:Bind Duration}"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="11"
+                        Typography.NumeralAlignment="Tabular"
+                        Foreground="{StaticResource VolarTextSecBrush}" />
+                </Border>
+            </Grid>
+        </DataTemplate>
+    </UserControl.Resources>
+
+    <Grid
+        Background="{StaticResource ScrimBrush}"
+        Visibility="{x:Bind controls:RowPresentation.VisibleIfTrue(ViewModel.IsVisible), Mode=OneWay}">
+        <controls:GlassPanel
+            Level="Heavy"
+            CornerRadius="16"
+            Width="480"
+            Height="540"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center"
+            Padding="16">
+            <Grid RowSpacing="12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <!-- Header: BREAKING DOWN + title, AI pill -->
+                <Grid Grid.Row="0" ColumnSpacing="12">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Spacing="4">
+                        <TextBlock
+                            Text="BREAKING DOWN"
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="11"
+                            FontWeight="Medium"
+                            CharacterSpacing="70"
+                            Foreground="{StaticResource VolarTextMutBrush}" />
+                        <TextBlock
+                            Text="&#8220;Launch landing page&#8221;"
+                            FontFamily="{StaticResource VolarUiFontFamily}"
+                            FontSize="16"
+                            FontWeight="Medium"
+                            Foreground="{StaticResource VolarTextPriBrush}"
+                            MaxLines="2"
+                            TextTrimming="CharacterEllipsis" />
+                    </StackPanel>
+                    <Border
+                        Grid.Column="1"
+                        VerticalAlignment="Top"
+                        CornerRadius="11"
+                        Padding="9,3"
+                        Background="{StaticResource AccentSurfaceBrush}"
+                        BorderBrush="{StaticResource AccentBorder02Brush}"
+                        BorderThickness="0.5">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <controls:VolarIcon IconName="Sparkle" IconSize="11" IconBrush="{StaticResource AccentSolidBrush}" />
+                            <TextBlock
+                                Text="AI"
+                                FontFamily="{StaticResource VolarUiFontFamily}"
+                                FontSize="11"
+                                FontWeight="Medium"
+                                Foreground="{StaticResource AccentSolidBrush}" />
+                        </StackPanel>
+                    </Border>
+                </Grid>
+
+                <!-- Steps card -->
+                <Border
+                    Grid.Row="1"
+                    CornerRadius="12"
+                    Padding="6"
+                    Background="{StaticResource VolarCardBrush}"
+                    BorderBrush="{StaticResource VolarGlassBorderBrush}"
+                    BorderThickness="0.5">
+                    <ItemsControl ItemsSource="{x:Bind ViewModel.Steps, Mode=OneWay}" ItemTemplate="{StaticResource StepRowTemplate}" />
+                </Border>
+
+                <!-- Summary: "Total: 40 min · 5 sub-tasks" (mixed Run styles) + "Drag to reorder..." -->
+                <Grid Grid.Row="2" Padding="6,0" ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="12">
+                        <Run Text="Total: " Foreground="{StaticResource VolarTextSecBrush}" />
+                        <Run Text="{x:Bind ViewModel.TotalLabel, Mode=OneWay}" Foreground="{StaticResource VolarTextPriBrush}" />
+                        <Run Text=" &#183; " Foreground="{StaticResource VolarTextSecBrush}" />
+                        <Run Text="{x:Bind ViewModel.StepCountText, Mode=OneWay}" Foreground="{StaticResource VolarTextSecBrush}" />
+                        <Run Text=" sub-tasks" Foreground="{StaticResource VolarTextSecBrush}" />
+                    </TextBlock>
+                    <TextBlock
+                        Grid.Column="1"
+                        Text="Drag to reorder &#183; click to edit"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="12"
+                        Foreground="{StaticResource VolarTextMutBrush}" />
+                </Grid>
+
+                <!-- Row 3 (*) is a spacer, matching Swift's Spacer(minLength: 0) -->
+
+                <!-- Actions: Edit · Cancel · Save all as tasks (permanently disabled) + caption -->
+                <StackPanel Grid.Row="4" Spacing="6" HorizontalAlignment="Right">
+                    <StackPanel Orientation="Horizontal" Spacing="8">
+                        <Button
+                            Style="{StaticResource PillButtonStyle}"
+                            Height="34"
+                            CornerRadius="9"
+                            Background="{StaticResource White06Brush}"
+                            BorderBrush="{StaticResource VolarGlassBorderBrush}"
+                            Command="{x:Bind ViewModel.EditCommand, Mode=OneWay}">
+                            <TextBlock Text="Edit" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="13" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                        </Button>
+                        <Button
+                            Style="{StaticResource PillButtonStyle}"
+                            Height="34"
+                            CornerRadius="9"
+                            Background="{StaticResource White06Brush}"
+                            BorderBrush="{StaticResource VolarGlassBorderBrush}"
+                            Command="{x:Bind ViewModel.CancelCommand, Mode=OneWay}">
+                            <TextBlock Text="Cancel" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="13" FontWeight="Medium" Foreground="{StaticResource VolarTextPriBrush}" />
+                        </Button>
+                        <Button
+                            Style="{StaticResource PillButtonStyle}"
+                            Height="34"
+                            CornerRadius="9"
+                            Background="{StaticResource AccentSolidBrush}"
+                            BorderBrush="{StaticResource AccentSolidBrush}"
+                            IsEnabled="{x:Bind ViewModel.IsSaveEnabled, Mode=OneWay}"
+                            Command="{x:Bind ViewModel.SaveAllCommand, Mode=OneWay}">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <TextBlock Text="Save all as tasks" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="13" FontWeight="Medium" Foreground="White" />
+                                <TextBlock Text="&#8617;" Opacity="0.85" FontFamily="{StaticResource VolarUiFontFamily}" FontSize="13" FontWeight="Medium" Foreground="White" />
+                            </StackPanel>
+                        </Button>
+                    </StackPanel>
+                    <TextBlock
+                        Text="Breakdown generator coming soon"
+                        FontFamily="{StaticResource VolarUiFontFamily}"
+                        FontSize="11"
+                        Foreground="{StaticResource VolarTextMutBrush}" />
+                </StackPanel>
+            </Grid>
+        </controls:GlassPanel>
+    </Grid>
+</UserControl>
