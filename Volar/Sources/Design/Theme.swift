@@ -1,17 +1,24 @@
 // Sources/Design/Theme.swift — frozen design tokens: palette, accents, density, glass (spec §3)
 //
-// RETHEME — "Studio Dark / One Lit Thing" (2026-07). Values ported 1:1 from the source-of-truth
-// prototype tokens (`volar-redesign/foundations.html`, `volar-redesign/menubar-now.html`). Every
-// token NAME below already existed before this pass and is unchanged, so every call site
-// (`VolarColor.*`, `VolarAccent.*`, `VolarMotion.*`, `Density.*`, `GlassLevel.*`) keeps compiling —
-// only the underlying VALUES moved to the new palette. New tokens added for the spotlight/NOW
-// system are called out below with `// NEW`.
+// RETHEME 2 — "Volar Twilight" (2026-07-26). Values taken from the design board of that name
+// (claude.ai/design, project "Voci voice command app design", `Volar Twilight.dc.html`), which is
+// now the source of truth for palette and tone; it supersedes the earlier "Studio Dark / One Lit
+// Thing" pass whose prototype files (`volar-redesign/foundations.html`, `menubar-now.html`) the
+// comments below still cite for PROVENANCE of each token's role. Token NAMES are unchanged again,
+// so every call site keeps compiling — only values moved.
 //
-// THE ONE RULE: warm amber (`nowAccent` family) is a spotlight, not a brand color — it is reserved
-// for the single active/NOW task (spotlight glow, NOW label, NOW focus ring) and must never be the
-// app-wide accent. `VolarAccent`'s default (`.indigo`) and every other general-purpose "accent" token
-// in this file resolve to the COOL instrument blue family instead. Views adopt `nowAccent`/`nowGlow`
-// /`.volarSpotlight()` for the active task in a later pass — this file only prepares the tokens.
+// What changed vs. Studio Dark, and why: the key light is now MINT, matching the logo mark
+// (assets/…design.zip -> export-logo/README.txt: "nón sáng rọi xuống đúng một chấm"; the lit dot is
+// mint and is the brand's whole identity). Warm amber was the key light when the palette had no
+// logo to answer to; keeping it would have left the app's single brightest element a different hue
+// from the mark on its own icon. The neutral graphite ink also moves to the board's three night-blue
+// layers so the mint reads as a light source in a blue room rather than a green chip on gray.
+//
+// THE ONE RULE (unchanged in spirit, new hue): mint (`nowAccent` family) is a spotlight, not a
+// brand-everywhere color — reserved for the single active/NOW task (spotlight glow, NOW label, NOW
+// focus ring). The board states it as "bạc hà = NOW duy nhất · xanh băng = thông tin". So the
+// app-wide accent (`VolarAccent.indigo`, the default) and every informational token resolve to the
+// ICE BLUE instrument family instead. If two things on a screen are mint, one of them is wrong.
 import SwiftUI
 
 extension Color {
@@ -32,39 +39,41 @@ extension Color {
 /// `--tx-*`, `--sage`, etc). Dark-only; this app is dark-first Studio Dark (see §"Support
 /// light+dark?" — no light variant exists here, so none needs preserving).
 enum VolarColor {
-    // --- Ink / depth (foundations.html §01 "Color") ---
-    /// `--ink-0` — base bg, deepest.
-    static let bg = Color(volar: 0x0B0D11)
-    /// `--surface-1` — raised surface. NOTE: name predates the retheme; maps to the spec's
-    /// "raised surface" layer, one step up from `bg`/`--ink-1`.
-    static let surface = Color(volar: 0x15181E)
-    /// `--surface-2` — raised surface, higher.
-    static let surfaceHi = Color(volar: 0x1B1F26)
-    /// Low-key translucent card fill over whichever surface it sits on — tuned down from the old
-    /// graphite value so cards read as quiet ink, not gray plastic.
-    static let card = Color.white.opacity(0.04)
-    static let cardHover = Color.white.opacity(0.07)
-    /// `--hairline` (rgba(255,255,255,.07)).
-    static let border = Color.white.opacity(0.07)
-    /// `--hairline-strong` (rgba(255,255,255,.11)).
-    static let borderHi = Color.white.opacity(0.11)
+    // --- Ink / depth — Twilight's "3 tầng xanh đêm" (three night-blue layers) ---
+    /// `--ink-0` — base bg, deepest. Twilight page ground.
+    static let bg = Color(volar: 0x07090E)
+    /// `--surface-1` — raised surface, one step up from `bg`. NOTE: name predates the retheme.
+    static let surface = Color(volar: 0x0A101C)
+    /// `--surface-2` — raised surface, higher. Top of the Mac window's own gradient on the board.
+    static let surfaceHi = Color(volar: 0x101827)
+    /// Low-key translucent card fill over whichever surface it sits on. Tinted with the same cool
+    /// blue as the hairlines rather than pure white: over night-blue ink a white veil greys the
+    /// surface out, which is what made the old chrome read as gray plastic.
+    static let card = Color(volar: 0x94B2E0, opacity: 0.05)
+    static let cardHover = Color(volar: 0x94B2E0, opacity: 0.08)
+    /// `--hairline` — Twilight draws every divider/edge as `rgba(148,178,224,.10)`, a cool blue
+    /// hairline, NOT white. This is what keeps window edges from reading as a bright white line.
+    static let border = Color(volar: 0x94B2E0, opacity: 0.10)
+    /// `--hairline-strong` — the board's stronger edge, `rgba(148,178,224,.18)`.
+    static let borderHi = Color(volar: 0x94B2E0, opacity: 0.18)
 
     // --- Text (foundations.html --tx-1/2/3) ---
-    /// `--tx-1` primary. Contrast vs `bg` (#0B0D11) ≈ 15.6:1 — passes WCAG AAA for body text.
-    static let textPri = Color(volar: 0xEAECEF)
-    /// `--tx-2` secondary. Contrast vs `bg` ≈ 7.6:1 — passes WCAG AA (and AAA) for body text.
-    static let textSec = Color(volar: 0x9BA3AE)
+    /// `--tx-1` primary. Contrast vs `bg` (#07090E) ≈ 16.9:1 — passes WCAG AAA for body text.
+    static let textPri = Color(volar: 0xEDF2F9)
+    /// `--tx-2` secondary. Contrast vs `bg` ≈ 7.9:1 — passes WCAG AA (and AAA) for body text.
+    static let textSec = Color(volar: 0x9AA7BC)
     /// `--tx-3` tertiary / muted. Contrast vs `bg` ≈ 3.3:1 — intentionally BELOW body-text AA per
     /// the source spec (this token is for de-emphasized/tertiary labels, never body copy).
-    static let textMut = Color(volar: 0x5D646E)
+    static let textMut = Color(volar: 0x57637C)
 
     // --- Priority / status dots & badges ---
-    // No red, ever (anti-shame rule, foundations.html §01 rule-callout) and no amber (amber is
+    // No red, ever (anti-shame rule, foundations.html §01 rule-callout) and no mint (mint is
     // reserved exclusively for `nowAccent`/the NOW spotlight — see file header). Priority hierarchy
-    // is instead expressed as a warm-neutral clay → taupe → cool-gray ramp so "High" still reads as
-    // warmer than "Low" without touching either reserved hue.
-    /// High priority — muted clay/terracotta. Deliberately NOT the signature amber (more
-    /// red-brown, less gold) and NOT alarm red.
+    // is expressed as a warm-neutral clay → taupe → cool-gray ramp, which stays clear of the
+    // reserved hue by construction: nothing in this ramp is green.
+    /// High priority — muted clay/terracotta. Deliberately NOT alarm red. (Pre-Twilight this also
+    /// had to dodge the amber NOW spotlight; amber is no longer reserved, but the ramp is unchanged
+    /// — it reads correctly against night-blue ink and re-tuning it is not this pass's business.)
     static let high = Color(volar: 0xB9705A)
     /// Medium priority — muted warm taupe, between `high` and `low`.
     static let med = Color(volar: 0x9C8C6B)
@@ -78,29 +87,32 @@ enum VolarColor {
     /// `--sage` — success. Muted, not neon.
     static let done = Color(volar: 0x7FA88C)
 
-    // MARK: - NEW: NOW / spotlight tokens (foundations.html §01, §03; menubar-now.html)
+    // MARK: - NOW / spotlight tokens (foundations.html §01, §03; hues from the Twilight board)
 
-    /// `--amber` — THE key light. Warm. Used ONLY on the one NOW task (spotlight glow, NOW label,
-    /// NOW focus ring, NOW primary action). Never the general/app-wide accent.
-    static let nowAccent = Color(volar: 0xE8B25A)
-    /// `--amber-soft` — lighter warm, used for NOW title text / primary-button gradient top.
-    static let nowAccentSoft = Color(volar: 0xF0C67E)
-    /// `--amber-deep` — darker warm, gradient bottom / pressed states.
-    static let nowAccentDeep = Color(volar: 0xB9832F)
-    /// `--amber-glow` — the spotlight pool's inner glow.
-    static let nowGlow = Color(volar: 0xE8B25A, opacity: 0.20)
-    /// `--amber-glow-soft` — the spotlight pool's outer falloff.
-    static let nowGlowSoft = Color(volar: 0xE8B25A, opacity: 0.10)
-    /// `--amber-ring` — NOW-specific focus ring / hairline accent (e.g. `m-chip.warm` border).
-    static let nowRing = Color(volar: 0xE8B25A, opacity: 0.55)
+    /// `--mint` — THE key light, and the same mint as the lit dot in the logo mark. Used ONLY on
+    /// the one NOW task (spotlight glow, NOW label, NOW focus ring, NOW primary action). Never the
+    /// general/app-wide accent.
+    static let nowAccent = Color(volar: 0x8FEDCB)
+    /// `--mint-soft` — lighter mint, NOW title text / primary-button gradient top. Top stop of the
+    /// logo mark's own gradient.
+    static let nowAccentSoft = Color(volar: 0xA9F5DA)
+    /// `--mint-deep` — deeper mint, gradient bottom / pressed states. Bottom stop of that same
+    /// logo gradient, so a NOW button and the app icon are cut from one ramp.
+    static let nowAccentDeep = Color(volar: 0x74DDB6)
+    /// `--mint-glow` — the spotlight pool's inner glow.
+    static let nowGlow = Color(volar: 0x8FEDCB, opacity: 0.20)
+    /// `--mint-glow-soft` — the spotlight pool's outer falloff.
+    static let nowGlowSoft = Color(volar: 0x8FEDCB, opacity: 0.10)
+    /// `--mint-ring` — NOW-specific focus ring / hairline accent (e.g. `m-chip` border).
+    static let nowRing = Color(volar: 0x8FEDCB, opacity: 0.55)
 
-    // MARK: - NEW: instrument tokens (foundations.html §05 "Instrument readouts")
+    // MARK: - Instrument tokens (foundations.html §05 "Instrument readouts")
 
-    /// `--cool` — cool instrument accent. Informational only, sparing: WIP counter, timers,
-    /// links, dependency dots. Never used for the NOW spotlight.
-    static let instrument = Color(volar: 0x5B8DEF)
-    /// `--cool-dim` — dimmed cool, for dashed dependency chips / secondary instrument marks.
-    static let instrumentDim = Color(volar: 0x40557F)
+    /// `--cool` — ice-blue instrument accent ("xanh băng = thông tin"). Informational only,
+    /// sparing: WIP counter, timers, links, dependency dots. Never used for the NOW spotlight.
+    static let instrument = Color(volar: 0x86B9FF)
+    /// `--cool-dim` — dimmed ice blue, for dashed dependency chips / secondary instrument marks.
+    static let instrumentDim = Color(volar: 0x3A4E75)
 
     /// `--reschedule` — calm neutral "needs rescheduling" tone. This is what overdue uses INSTEAD
     /// of red (anti-shame rule) — provided here so a later per-view pass has a token ready rather
@@ -116,12 +128,16 @@ struct Accent: Sendable {
     let glow: Color
 }
 
-/// Selectable accent families (`VOLAR_ACCENTS`). Default is `.indigo`, which now resolves to the
-/// same cool instrument blue as `VolarColor.instrument` (`--cool`) — the general-purpose/app-wide
-/// accent (active states, capture button, selection) is COOL, never the reserved warm `nowAccent`.
-/// `.amber` is a legacy user-selectable option (was already selectable pre-retheme); its hex was
-/// shifted off the exact NOW hue (copper/burnt-orange vs. NOW's honey-gold) so a user who opts
-/// into it doesn't produce a second "amber thing" that visually competes with the NOW spotlight.
+/// Selectable accent families (`VOLAR_ACCENTS`). Default is `.indigo`, whose NAME is now a
+/// misnomer kept for wire/settings compatibility (it is persisted by rawValue): it resolves to the
+/// same ice blue as `VolarColor.instrument` (`--cool`), because the general-purpose/app-wide accent
+/// (active states, capture button, selection) must never be the reserved mint `nowAccent`.
+///
+/// `.teal` (#3DBFAF) is the one family that now sits uncomfortably close to the reserved mint — a
+/// user who selects it gets a second green-ish signal competing with the NOW spotlight, the same
+/// problem `.amber` had before Twilight moved the spotlight off amber. Left as-is deliberately:
+/// it is opt-in and off by default, and re-picking a user-facing palette entry is a design decision
+/// of its own rather than a mechanical consequence of this retheme (tracked in backlog.md).
 enum VolarAccent: String, CaseIterable, Identifiable, Sendable, Equatable, Hashable {
     case indigo, teal, amber, magenta
 
@@ -130,15 +146,16 @@ enum VolarAccent: String, CaseIterable, Identifiable, Sendable, Equatable, Hasha
     var accent: Accent {
         switch self {
         case .indigo:
-            // Cool instrument blue (`--cool`) — the app-wide default. NOT warm.
-            let solid = Color(volar: 0x5B8DEF)
-            return Accent(solid: solid, hover: Color(volar: 0x7FA5F5), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
+            // Ice blue (`--cool`) — the app-wide default. NOT mint.
+            let solid = Color(volar: 0x86B9FF)
+            return Accent(solid: solid, hover: Color(volar: 0xB3D2FF), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
         case .teal:
             let solid = Color(volar: 0x3DBFAF)
             return Accent(solid: solid, hover: Color(volar: 0x63D6C7), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
         case .amber:
-            // Deliberately NOT `VolarColor.nowAccent` — copper/burnt-orange, not honey-gold, so it
-            // never gets mistaken for the reserved NOW spotlight color.
+            // Copper/burnt-orange. Was shaped this way to dodge the old amber NOW spotlight; since
+            // Twilight moved the spotlight to mint it no longer has to, but the hex stays put so
+            // anyone already using it doesn't wake up to a different accent.
             let solid = Color(volar: 0xD9853D)
             return Accent(solid: solid, hover: Color(volar: 0xE9A165), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
         case .magenta:
@@ -262,12 +279,12 @@ enum VolarMotion {
 // MARK: - NEW: Spotlight primitive (foundations.html §03 "The spotlight — the signature";
 // menubar-now.html `.pool` + `.vignette`)
 
-/// The reusable warm radial pool + vignette-into-cool-shadow that sits behind exactly ONE (the
+/// The reusable mint radial pool + vignette-into-night-shadow that sits behind exactly ONE (the
 /// active/NOW) task. Theme-level only — no view currently adopts this; it's prepared here so a
 /// later per-view pass can drop `.volarSpotlight()` onto the NOW task's container without
 /// reinventing the gradient math. Two layers, matching the prototype 1:1:
-///   1. `.pool` — a soft warm radial glow (`nowGlow` → `nowGlowSoft` → clear), blurred.
-///   2. `.vignette` — a dark radial overlay that settles the pool's edges into cool shadow.
+///   1. `.pool` — a soft mint radial glow (`nowGlow` → `nowGlowSoft` → clear), blurred.
+///   2. `.vignette` — a dark radial overlay that settles the pool's edges into night-blue shadow.
 /// UNVERIFIED: not build-checked on this machine (Windows, no Xcode) — `RadialGradient`,
 /// `ZStack`, and `.blur(radius:)` are all macOS 10.15+ SwiftUI API, so this should compile
 /// cleanly on the macOS 14 floor, but the composited visual result hasn't been rendered/verified.
@@ -310,9 +327,9 @@ struct SpotlightBackground: ViewModifier {
 }
 
 extension View {
-    /// Applies the warm spotlight pool + vignette behind this view. Intended for exactly one
-    /// (the NOW) task container at a time — "if two things on a screen are amber, one of them is
-    /// wrong" (foundations.html §01 rule-callout).
+    /// Applies the mint spotlight pool + vignette behind this view. Intended for exactly one
+    /// (the NOW) task container at a time — if two things on a screen are mint, one of them is
+    /// wrong (foundations.html §01 rule-callout; Twilight's "bạc hà = NOW duy nhất").
     func volarSpotlight(isActive: Bool = true) -> some View {
         modifier(SpotlightBackground(isActive: isActive))
     }
