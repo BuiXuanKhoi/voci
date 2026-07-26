@@ -68,7 +68,12 @@ struct VolarApp: App {
                         f.dateFormat = "yyyy-MM-dd"
                         return f.string(from: Date())
                     }()
-                    if hasOnboarded, frogLastShown != day, !appState.openTasks.isEmpty {
+                    // Guided tour (`Sources/Views/Tour/*`): `!appState.tourActive` added to every
+                    // sheet gate below (morning frog / weekly triage / evening sweep) so a modal
+                    // sheet can never stack on top of the tour's own full-window overlay — without
+                    // it, a fresh install's very first launch could pop the morning-frog sheet
+                    // right in the middle of `TourOverlay`'s spotlight walkthrough.
+                    if hasOnboarded, !appState.tourActive, frogLastShown != day, !appState.openTasks.isEmpty {
                         appState.showMorningFrog = true
                         frogLastShown = day
                     }
@@ -83,7 +88,7 @@ struct VolarApp: App {
                         let comps = cal.dateComponents([.yearForWeekOfYear, .weekOfYear], from: Date())
                         return "\(comps.yearForWeekOfYear ?? 0)-W\(comps.weekOfYear ?? 0)"
                     }()
-                    if hasOnboarded, triageLastShownWeek != weekKey, !appState.staleTasks.isEmpty {
+                    if hasOnboarded, !appState.tourActive, triageLastShownWeek != weekKey, !appState.staleTasks.isEmpty {
                         appState.showTriage = true
                         triageLastShownWeek = weekKey
                     }
@@ -94,7 +99,7 @@ struct VolarApp: App {
                     // own — only offer the sweep in the evening (hour >= 18), so it's never sprung
                     // on someone opening the window at 9am.
                     let hour = Calendar.current.component(.hour, from: Date())
-                    if hasOnboarded, hour >= 18 {
+                    if hasOnboarded, !appState.tourActive, hour >= 18 {
                         appState.maybeShowEveningSweep()
                     }
                 }
@@ -111,12 +116,32 @@ struct VolarApp: App {
                 // the onboarding/frog/triage/sweep gates below — genuinely needs a visible window.
                 .sheet(isPresented: Binding(
                     get: { !hasOnboarded },
-                    set: { presented in if !presented { hasOnboarded = true } }
+                    // Guided tour (`Sources/Views/Tour/*`): `appState.startTourIfNeeded()` is
+                    // ALSO called from `OnboardingView`'s own `onComplete:` below — that covers the
+                    // normal "Start using Volar"/"Skip for now" tap, which sets `hasOnboarded =
+                    // true` directly and lets SwiftUI's diffing notice `get()` now reads `false`.
+                    // This binding's `set:` is the FRAMEWORK's own dismissal path (used when
+                    // SwiftUI itself decides to tear the sheet down, e.g. a future change that
+                    // drops `.interactiveDismissDisabled(true)` below) — calling it here too, not
+                    // just in `onComplete:`, is what makes "the tour starts however onboarding
+                    // ends" true regardless of which of the two paths actually fires for a given
+                    // dismissal. `startTourIfNeeded()` itself is idempotent (no-op once
+                    // `hasSeenTour` is `true`), so both call sites firing for the same completion
+                    // is harmless, not a double-start.
+                    set: { presented in
+                        if !presented {
+                            hasOnboarded = true
+                            appState.startTourIfNeeded()
+                        }
+                    }
                 )) {
-                    OnboardingView(onComplete: { hasOnboarded = true })
-                        .environment(appState)
-                        .interactiveDismissDisabled(true)
-                        .frame(minWidth: 640, minHeight: 440)
+                    OnboardingView(onComplete: {
+                        hasOnboarded = true
+                        appState.startTourIfNeeded()
+                    })
+                    .environment(appState)
+                    .interactiveDismissDisabled(true)
+                    .frame(minWidth: 640, minHeight: 440)
                 }
                 .sheet(isPresented: Binding(
                     get: { appState.showMorningFrog },

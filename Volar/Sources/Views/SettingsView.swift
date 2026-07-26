@@ -52,7 +52,6 @@ struct SettingsView: View {
     @State private var hyperfocusInterrupt = 90
     @State private var showMorningFrog = true
     @State private var captureAppContext = true
-    @State private var calendarIntegration = false
 
     @State private var showReminders = true
     @State private var notifSound = true
@@ -70,6 +69,11 @@ struct SettingsView: View {
     @State private var showDeleteAccountConfirm = false
 
     @Environment(AppState.self) private var appState
+    // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
+    // VolarApp.swift) — the guided-tour overlay (agent A, Views/Tour/*) lives IN the main window,
+    // so "Show tour" below must explicitly bring that window forward or the click appears to do
+    // nothing while Settings just sits there.
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         @Bindable var appState = appState
@@ -252,23 +256,158 @@ struct SettingsView: View {
             SettingsRow(label: "Show morning frog prompt", hint: "A daily question at first launch: what's the ONE task that matters most?") {
                 VolarToggle(isOn: $showMorningFrog)
             }
+            SettingsRow(label: "Guided tour", hint: "Walk through capture, the task list, and focus mode again.") {
+                Button("Show tour") {
+                    appState.replayTour()
+                    // Load-bearing: Settings is a separate `Window` scene from the main window
+                    // (see the `openWindow` doc comment on this view's property), and the tour
+                    // overlay is drawn inside the main window's view tree — without this call the
+                    // tour would start invisibly behind Settings and the click would look like a
+                    // no-op.
+                    openWindow(id: "main")
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(VolarColor.veil(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .volarHairline(cornerRadius: 7)
+            }
             SettingsRow(label: "Capture foreground app context", hint: "Tags new tasks with the app you were in when you captured them.") {
                 VolarToggle(isOn: $captureAppContext)
             }
-            SettingsRow(label: "Calendar integration", hint: "Mirror tasks with scheduled times into your Mac Calendar.") {
-                HStack(spacing: 10) {
-                    VolarToggle(isOn: $calendarIntegration)
-                    Button("Open in Calendar") {}
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(VolarColor.textPri)
-                        .padding(.horizontal, 12)
-                        .frame(height: 26)
-                        .background(VolarColor.veil(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .volarHairline(cornerRadius: 7)
+            calendarAccessRow
+            if appState.calendarAccess.status == .granted {
+                calendarMirrorRow
+            }
+        }
+    }
+
+    /// Real EventKit permission status — replaces a former dead prototype toggle ("Calendar
+    /// integration" / "Mirror tasks... into your Mac Calendar") that had no backing implementation
+    /// at all (a local `@State` bool wired to nothing, and an "Open in Calendar" button with an
+    /// empty action). `appState.calendarAccess` (agent A's addition to `AppState`, per this
+    /// feature's cross-agent contract) is the single source of truth for status — this row never
+    /// keeps its own copy of it. This row is just PERMISSION status; whether Volar actually WRITES
+    /// anything is a separate, opt-in decision surfaced in `calendarMirrorRow` below (shown only
+    /// once access is granted — asking about mirroring before Volar can even read the calendar
+    /// would be premature).
+    @ViewBuilder
+    private var calendarAccessRow: some View {
+        SettingsRow(
+            label: "Calendar access",
+            hint: "Volar reads your calendar to see which blocks are actually free, and — once you turn on mirroring below — writes tasks into a calendar it creates called \"Volar\". It never touches your other calendars, and nothing leaves your Mac."
+        ) {
+            VStack(alignment: .trailing, spacing: 4) {
+                calendarAccessControl
+                if let lastError = appState.calendarAccess.lastError {
+                    Text(lastError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(VolarColor.textMut)
+                        .lineLimit(2)
                 }
             }
+        }
+    }
+
+    /// One-way (Volar → Calendar) mirroring opt-in. `appState.calendarSync` owns `mirrorEnabled` —
+    /// bound here via an explicit `Binding(get:set:)` rather than a raw `$appState.calendarSync...`
+    /// path, matching this file's existing convention for every other enum/nested-object-backed
+    /// control (`speechEngineChoice`/`parseEnginePreference`/etc. above) instead of introducing a
+    /// new binding idiom for just this one row. `mirrorEnabled` is `private(set)` on `CalendarSync`
+    /// (turning it off deletes real calendar events — a destructive action deliberately kept behind
+    /// a named method, not a raw property set), so the setter here calls
+    /// `AppState.setCalendarMirror(_:)` — which calls `CalendarSync.setMirrorEnabled(_:)` and then
+    /// immediately reconciles — rather than assigning `appState.calendarSync.mirrorEnabled`
+    /// directly (which no longer compiles).
+    @ViewBuilder
+    private var calendarMirrorRow: some View {
+        SettingsRow(
+            label: "Mirror tasks to Calendar",
+            hint: "Tasks with a scheduled time appear as events in a separate calendar named \"Volar\" — Volar never touches your other calendars. Turning this off removes the events it created."
+        ) {
+            VStack(alignment: .trailing, spacing: 4) {
+                VolarToggle(isOn: Binding(
+                    get: { appState.calendarSync.mirrorEnabled },
+                    set: { appState.setCalendarMirror($0) }
+                ))
+                if let lastError = appState.calendarSync.lastError {
+                    Text(lastError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(VolarColor.textMut)
+                        .lineLimit(2)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var calendarAccessControl: some View {
+        switch appState.calendarAccess.status {
+        case .notDetermined:
+            Button("Enable Calendar") {
+                // FIX 6: routes through `AppState.enableCalendarAccess()` (awaits the real
+                // EventKit prompt, then immediately reconciles the calendar mirror) instead of
+                // calling `calendarAccess.requestAccess()` directly, so a fresh grant here takes
+                // effect right away rather than waiting for the next task edit.
+                Task { await appState.enableCalendarAccess() }
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(VolarColor.textPri)
+            .padding(.horizontal, 12)
+            .frame(height: 26)
+            .background(VolarColor.veil(0.06))
+            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .volarHairline(cornerRadius: 7)
+
+        case .granted:
+            HStack(spacing: 10) {
+                HStack(spacing: 6) {
+                    Circle().fill(VolarColor.done).frame(width: 7, height: 7)
+                    Text("Connected · \(appState.calendarAccess.calendarCount) calendars")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VolarColor.textSec)
+                }
+                Button("Refresh") {
+                    appState.calendarAccess.refreshStatus()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(VolarColor.veil(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .volarHairline(cornerRadius: 7)
+            }
+
+        case .denied, .restricted:
+            // Hard "no red for status" rule (this project's convention) — calm neutral text, not
+            // an alarm color, even though access is off.
+            HStack(spacing: 10) {
+                Text("Access is off")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(VolarColor.textSec)
+                Button("Open System Settings") {
+                    appState.calendarAccess.openSystemSettings()
+                }
+                .buttonStyle(.plain)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+                .padding(.horizontal, 12)
+                .frame(height: 26)
+                .background(VolarColor.veil(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                .volarHairline(cornerRadius: 7)
+            }
+
+        case .unavailable:
+            Text("Unavailable on this Mac")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(VolarColor.textSec)
         }
     }
 

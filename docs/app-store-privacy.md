@@ -141,9 +141,66 @@ State these as "No" across the board in App Store Connect:
   correlate the user across unrelated apps/companies for ads. Answer "No" to the top-level App
   Tracking Transparency-adjacent question in App Store Connect.
 - **Location:** Not collected — no CoreLocation/`CLLocationManager` usage anywhere in the app.
-- **Contacts / Calendar (via Contacts.framework/EventKit):** Not collected — grepped for
-  `Contacts.framework`, `CNContact`, `EventKit`; no matches. (Volar's own reminders/task model is
-  self-contained SwiftData, not a device Contacts/Calendar integration.)
+- **Contacts (via Contacts.framework):** Not collected — grepped for `Contacts.framework`,
+  `CNContact`; no matches. (Volar's own reminders/task model is self-contained SwiftData, not a
+  device Contacts integration.)
+- **Calendar (via EventKit):** **Data Not Collected** (reasoning below — read this whole entry,
+  the answer is not as simple as "unused" anymore). EventKit is linked
+  (`Sources/Integrations/CalendarAccess.swift`, `Sources/Integrations/CalendarSync.swift`) and, as
+  of this revision, Volar uses it for **both read and write** — this entry previously said
+  read-only / "never writes"; that changed, and every claim below reflects the current code, not
+  the old one.
+  - **Why full access is requested:** `EKEventStore.requestFullAccessToEvents()` — macOS 14 has no
+    read-only request API (`requestWriteOnlyAccessToEvents` grants write, not read), so full access
+    is the only call that grants read at all. Volar now genuinely uses both halves of that grant.
+  - **What Volar reads:** a **count** of the user's calendars (`store.calendars(for: .event).count`,
+    `CalendarAccess.swift`) to show connection status in Settings. No event titles, times,
+    locations, attendees, notes, or any other event content from the user's EXISTING calendars is
+    ever read, stored, cached, logged, or transmitted.
+  - **What Volar writes:** with the user's explicit opt-in (`CalendarSync.mirrorEnabled`, persisted
+    UserDefaults key `volar.calendarMirrorEnabled`, **default off**), Volar creates its own calendar
+    titled **"Volar"** and mirrors the user's own scheduled tasks into it as events — title, start
+    time (`task.deadline`), and end time (deadline + duration, default 30 min). This is Volar's OWN
+    data (the user's own tasks) being written into Volar's OWN calendar, not third-party event
+    content being collected.
+  - **Blast-radius containment — the two ownership guards (`CalendarSync.reconcile(tasks:)` and
+    `removeAllMirroredEvents()`):** before touching (updating OR deleting) any existing `EKEvent`,
+    the code checks (1) the event's `calendar.calendarIdentifier` equals the identifier of the
+    calendar Volar itself created, and (2) the event's `url` equals a marker Volar stamped on it,
+    `volar://task/<task-uuid>`, set at creation time. Either check failing means "not an event Volar
+    created," and the code creates a fresh replacement rather than ever calling `save`/`remove` on
+    it. This makes it structurally impossible — not just a policy statement — for Volar to modify or
+    delete an event in any calendar it did not create, even if its own bookkeeping
+    (`eventMap`/`volarCalendarID`, both in UserDefaults) is stale, lost, or tampered with. Volar
+    never selects an existing calendar to reuse for this purpose either:
+    `CalendarSync.ensureVolarCalendar()` explicitly refuses (throws) rather than falling back to a
+    `.subscribed` or `.birthdays` source, or any source it can't confirm is genuinely writable —
+    there is no code path where the "Volar" calendar could silently become an existing calendar the
+    user already had.
+  - **Sync direction:** strictly one-way, Volar's own tasks → the "Volar" calendar. Reading events
+    FROM the calendar to create or modify tasks is explicitly out of scope and not implemented —
+    `reconcile(tasks:)` never feeds anything back into `TaskItem`/`TaskStore`.
+  - **Nothing leaves the device either way:** there is no network call anywhere in
+    `CalendarAccess.swift` or `CalendarSync.swift`. Calendar data (read or written) never crosses
+    off-device.
+  - Calendar data is still not wired into the task-scheduling engine itself —
+    `AppState.busyIntervals` stays hardcoded `[]` — mirroring OUT and reading busy-time IN are two
+    separate, independently-gated features, and only the former exists today; see §2 below for what
+    changes when the latter lands.
+  - Backing entitlement: `com.apple.security.personal-information.calendars` (`Volar.entitlements`).
+    Backing usage-description keys: `NSCalendarsFullAccessUsageDescription` (macOS 14+) and
+    `NSCalendarsUsageDescription` (legacy fallback), both in `Info.plist` — both now describe read
+    AND write, matching this entry.
+  - **Nutrition-label reasoning:** Apple's "Data Collected" categories are about data gathered BY
+    the developer (transmitted off-device, linked to identity, used for tracking/analytics/etc.),
+    not simply "does the app read or write this data locally for its own on-device functionality."
+    Volar's calendar read is a local status count; Volar's calendar write is the user's own task
+    data, written locally, into a calendar Volar itself owns, with zero network transmission either
+    direction. Under that definition the answer stays **"Data Not Collected"** for calendar data —
+    but unlike the old read-only version of this entry, that conclusion now rests on "nothing is
+    transmitted off-device," not on "Volar doesn't write anything." If a future revision adds any
+    server-side sync of calendar/event data, this conclusion must be re-derived from scratch, not
+    assumed to still hold.
 - **Health & Fitness, Financial Info (beyond Purchases), Sensitive Info, Browsing History, Search
   History:** Not collected — nothing in the app's scope touches any of these categories.
 - **Device ID / App Attest / DeviceCheck:** Removed entirely, see the Identifiers row above.
@@ -157,6 +214,25 @@ State these as "No" across the board in App Store Connect:
   rows.
 - **Reintroduce DeviceCheck/App Attest, or any device-fingerprint-based rate limiting** → add back
   an "Identifiers › Device ID" row.
+- **Wire calendar data into the task engine** (e.g. `AppState.busyIntervals` stops being hardcoded
+  `[]` and starts reading real event start/end times from the user's OWN existing calendars, for
+  scheduling suggestions — a materially different feature from `CalendarSync`'s mirror-OUT, which
+  only ever writes into the app-created "Volar" calendar and reads nothing from any other one) → the
+  Calendar entry above changes from "reads only a count from other calendars" to "reads event
+  start/end times from other calendars" — even though start/end times without titles/attendees may
+  still be low-risk, re-check whether the nutrition label answer changes from "Data Not Collected"
+  to "Data Used but Not Linked to You" or similar, and update the Calendar entry's wording
+  accordingly.
+- **Add any server-side sync of calendar/event data, or any code path that transmits Volar's
+  mirrored "Volar" calendar events off-device** → the Calendar entry's nutrition-label reasoning
+  ("nothing is transmitted off-device") becomes false the moment this ships; re-derive the label
+  answer from scratch per that entry's own closing note, do not assume "Data Not Collected" still
+  holds.
+- **Widen `CalendarSync`'s write scope beyond the app-created "Volar" calendar** (e.g. letting it
+  update an event in a calendar it didn't create) → this would break the entire "structurally
+  impossible to touch a foreign calendar" claim in the Calendar entry above; treat any such change
+  as requiring a full re-review of that entry, the two ownership guards it describes, and probably
+  a re-think of whether the feature is safe to ship at all.
 - **Change the LLM provider behind `/parse`, or that provider's data-retention/training terms** →
   re-verify the "not used to train a shared model" claim in the User Content section; that claim
   was NOT independently verified against the provider's DPA as part of this task.

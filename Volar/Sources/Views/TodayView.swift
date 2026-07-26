@@ -50,6 +50,9 @@ struct TodayView: View {
                 FocusOverlay()
             }
         }
+        // Reminder banner (`NotificationView`): a plain `.overlay`, attached BEFORE the guided
+        // tour's `.overlayPreferenceValue` below — see that block's own comment for why ORDER
+        // (not `.zIndex`) is what actually decides which of the two draws on top here.
         .overlay(alignment: .topTrailing) {
             if let banner = appState.reminderBanner {
                 NotificationView(
@@ -71,6 +74,32 @@ struct TodayView: View {
             }
         }
         .animation(VolarMotion.state, value: appState.reminderBanner)
+        // Guided tour (`Sources/Views/Tour/*`): every `.tourAnchor(_:)` call site this feature adds
+        // (Sidebar's capture button + key badges, `mainColumn`'s task-list region, the two
+        // "Start focus"/"Focus" buttons above) lives inside the `HStack`/`ZStack` above, so
+        // attaching `.overlayPreferenceValue(TourAnchorKey.self)` HERE — on that same `ZStack` — is
+        // what lets `TourAnchorKey.reduce` collect every one of them into a single `anchors`
+        // dictionary before `TourOverlay` ever reads it. FIX 5 (z-order): `.zIndex` only orders
+        // SIBLINGS within the same container — it does nothing across two separately-chained view
+        // modifiers like this `.overlayPreferenceValue` and the reminder banner's `.overlay`
+        // above, each of which wraps the accumulated view in a NEW view with its own content drawn
+        // on top. What actually decides stacking order between the two is ATTACHMENT ORDER: this
+        // block must be the LAST overlay-producing modifier in the chain (after both `if
+        // appState.focusActive { FocusOverlay() }` above AND the reminder-banner `.overlay` right
+        // above this comment) so the tour is unconditionally the topmost layer — otherwise a
+        // reminder banner can render on top of the tour's own scrim, which previously happened
+        // because this block was attached BEFORE the banner's `.overlay`. Keep this LAST among the
+        // overlay-producing modifiers on this view if anything else is ever added here.
+        .overlayPreferenceValue(TourAnchorKey.self) { anchors in
+            if appState.tourActive {
+                GeometryReader { proxy in
+                    TourOverlay(anchors: anchors, proxy: proxy)
+                }
+                .transition(.opacity)
+                .zIndex(60)
+            }
+        }
+        .animation(VolarMotion.state, value: appState.tourActive)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
                 // FIX E: used to only flip a local `@State` flag, never actually starting/stopping
@@ -104,52 +133,135 @@ struct TodayView: View {
                 .padding(.top, 20)
                 .padding(.bottom, 8)
 
-            if appState.openTasks.isEmpty {
-                EmptyTodayCard()
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: appState.density.sectionGap) {
-                        nowSpotlight
-
-                        // T043 (phase6-contract.md §C): ambient needs-review / WIP soft-limit /
-                        // ai-done disambiguation — renders nothing when there's genuinely nothing
-                        // to show (glance-and-dismiss, constitution V), so it's always safe to
-                        // include unconditionally here.
-                        DelegationAmbientSection()
-
-                        if let peek = peekTask {
-                            NextPeekRow(task: peek)
-                        }
-
-                        if !laterListTasks.isEmpty {
-                            CollapsibleTaskSection(
-                                title: "Later",
-                                tasks: laterListTasks,
-                                rowGap: appState.density.rowGap,
-                                expanded: $laterExpanded
-                            )
-                        }
-
-                        if !appState.doneTasks.isEmpty {
-                            CollapsibleTaskSection(
-                                title: "Completed",
-                                tasks: appState.doneTasks,
-                                rowGap: appState.density.rowGap,
-                                expanded: $completedExpanded
-                            )
-                        }
-
-                        hotkeyFooter
+            // Guided tour, stop 2 (`Sources/Views/Tour/*`): tagged as ONE `Group` wrapping every
+            // branch — rather than tagging only the `ScrollView` branch — so the anchor still
+            // resolves for a brand-new user with zero tasks (`EmptyTodayCard`), which is exactly
+            // the audience this stop most needs to reach. `Group` adds no layout of its own, so
+            // this changes nothing about how any branch renders; `.tourAnchor` sits on `Group`
+            // itself (not inside the `switch`) so it reads unambiguously as "this whole region is
+            // the anchor," and so it stays outside the switch's own brace nesting.
+            //
+            // Section switch (2026-07-27, port of Windows TodayView.xaml.cs's own "Section switch"
+            // comment): the main column now hosts three sections, not just Today. Upcoming/Inbox
+            // reuse the same `TaskRow` every drawer below already uses — no new row view — and get
+            // their own plain-text empty state (`sectionEmptyView`), distinct from Today's
+            // mic-icon `EmptyTodayCard`.
+            Group {
+                switch appState.selectedSection {
+                case .today:
+                    if appState.openTasks.isEmpty {
+                        EmptyTodayCard()
+                    } else {
+                        todayScrollView
                     }
-                    .padding(.horizontal, 22)
-                    .padding(.top, 8)
-                    .padding(.bottom, 18)
-                    .animation(VolarMotion.list, value: appState.tasks)
+                case .upcoming, .inbox:
+                    if isSectionEmpty {
+                        sectionEmptyView
+                    } else {
+                        sectionScrollView
+                    }
                 }
             }
+            .tourAnchor(.taskList)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(mainBackground)
+    }
+
+    /// Today's NOW/NEXT/Later/Completed stack — unchanged content, just extracted out of
+    /// `mainColumn`'s body so the new Upcoming/Inbox branches (`sectionScrollView`) can sit
+    /// alongside it in the section `switch` above without duplicating this scroll view's shape.
+    private var todayScrollView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: appState.density.sectionGap) {
+                nowSpotlight
+
+                // T043 (phase6-contract.md §C): ambient needs-review / WIP soft-limit /
+                // ai-done disambiguation — renders nothing when there's genuinely nothing
+                // to show (glance-and-dismiss, constitution V), so it's always safe to
+                // include unconditionally here.
+                DelegationAmbientSection()
+
+                if let peek = peekTask {
+                    NextPeekRow(task: peek)
+                }
+
+                if !laterListTasks.isEmpty {
+                    CollapsibleTaskSection(
+                        title: "Later",
+                        tasks: laterListTasks,
+                        rowGap: appState.density.rowGap,
+                        expanded: $laterExpanded
+                    )
+                }
+
+                if !appState.doneTasks.isEmpty {
+                    CollapsibleTaskSection(
+                        title: "Completed",
+                        tasks: appState.doneTasks,
+                        rowGap: appState.density.rowGap,
+                        expanded: $completedExpanded
+                    )
+                }
+
+                hotkeyFooter
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 8)
+            .padding(.bottom, 18)
+            .animation(VolarMotion.list, value: appState.tasks)
+        }
+    }
+
+    /// Upcoming/Inbox body — same `TaskRow` every Today drawer already uses, so a task looks and
+    /// behaves identically wherever it appears (checkbox, hover, context menu, open-detail).
+    /// Upcoming adds a day-header per group (`AppState.upcomingGroups`); Inbox is a flat list —
+    /// nothing to group by, see `TaskSections.swift`'s header comment. Mirrors Windows
+    /// TodayView.xaml's `SectionScrollViewer` (`UpcomingGroupsItemsControl`/`InboxItemsControl`).
+    @ViewBuilder
+    private var sectionScrollView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: appState.density.sectionGap) {
+                switch appState.selectedSection {
+                case .upcoming:
+                    ForEach(appState.upcomingGroups) { group in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text(group.header)
+                                .font(Font.volarMono(size: 11, weight: .medium))
+                                .foregroundStyle(VolarColor.textMut)
+                            VStack(spacing: appState.density.rowGap) {
+                                ForEach(group.tasks) { task in
+                                    TaskRow(task: task, isActive: false)
+                                }
+                            }
+                        }
+                    }
+                case .inbox:
+                    VStack(spacing: appState.density.rowGap) {
+                        ForEach(appState.inboxTasks) { task in
+                            TaskRow(task: task, isActive: false)
+                        }
+                    }
+                case .today:
+                    EmptyView()
+                }
+            }
+            .padding(.horizontal, 22)
+            .padding(.top, 8)
+            .padding(.bottom, 18)
+        }
+    }
+
+    /// Upcoming/Inbox empty state — plain centered text, distinct from Today's mic-icon
+    /// `EmptyTodayCard` (neither section has anything to illustrate beyond the copy itself).
+    /// Mirrors Windows TodayView.xaml's `SectionEmptyText`.
+    private var sectionEmptyView: some View {
+        Text(sectionEmptyText)
+            .font(.system(size: 13.5))
+            .foregroundStyle(VolarColor.textSec)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 320)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     /// NEW (retheme): "deep ink stage" — a faint top-down radial lift over the flat ink base so the
@@ -241,6 +353,12 @@ struct TodayView: View {
                             )
                         )
                         .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        // Guided tour, stop 3 primary anchor (`Sources/Views/Tour/*`): only ever
+                        // rendered while `!appState.focusActive` (this whole `Button` sits inside
+                        // that guard, immediately above), i.e. only while there's an eligible NOW
+                        // task to focus on — see `TourAnchorID.focusPrimary`'s doc comment for why
+                        // `frogPill`'s "Focus" button below is tagged as this stop's fallback.
+                        .tourAnchor(.focusPrimary)
                     }
 
                     Button {
@@ -365,30 +483,44 @@ struct TodayView: View {
     private var greetingHeader: some View {
         HStack(alignment: .bottom) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Today")
+                // Section switch (2026-07-27, port of Windows TodayView.xaml.cs's own "Section
+                // switch" comment): title now tracks `appState.selectedSection`.
+                Text(sectionTitle)
                     .font(.system(size: 26, weight: .medium))
                     .tracking(-0.52)
                     .foregroundStyle(VolarColor.textPri)
-                // Counts are instrument readouts (mono, per the retheme brief) — same
-                // `appState.openTasks.count`/`appState.doneTasks.count` bindings as before, just
-                // split into separate `Text` fragments so the numbers can take `Font.volarMono`.
-                HStack(spacing: 4) {
-                    Text(todayDateLabel)
-                    Text("·").foregroundStyle(VolarColor.textMut)
-                    Text("\(appState.openTasks.count)")
-                        .font(Font.volarMono(size: 12, weight: .medium))
-                        .foregroundStyle(VolarColor.instrument)
-                    Text("open")
-                    Text("·").foregroundStyle(VolarColor.textMut)
-                    Text("\(appState.doneTasks.count)")
-                        .font(Font.volarMono(size: 12, weight: .medium))
-                        .foregroundStyle(VolarColor.done)
-                    Text("done")
+                // Today keeps its own date + open/done counters; Upcoming/Inbox have no
+                // "date · N open · N done" shape to fill, so they show `sectionSubtitleText`
+                // instead (mirrors Windows `TodaySubtitleRow`/`SectionSubtitleText`'s mutually
+                // exclusive visibility in TodayView.xaml.cs's `UpdateVisual`).
+                if appState.selectedSection == .today {
+                    // Counts are instrument readouts (mono, per the retheme brief) — same
+                    // `appState.openTasks.count`/`appState.doneTasks.count` bindings as before, just
+                    // split into separate `Text` fragments so the numbers can take `Font.volarMono`.
+                    HStack(spacing: 4) {
+                        Text(todayDateLabel)
+                        Text("·").foregroundStyle(VolarColor.textMut)
+                        Text("\(appState.openTasks.count)")
+                            .font(Font.volarMono(size: 12, weight: .medium))
+                            .foregroundStyle(VolarColor.instrument)
+                        Text("open")
+                        Text("·").foregroundStyle(VolarColor.textMut)
+                        Text("\(appState.doneTasks.count)")
+                            .font(Font.volarMono(size: 12, weight: .medium))
+                            .foregroundStyle(VolarColor.done)
+                        Text("done")
+                    }
+                    .font(.system(size: 12.5))
+                    .tracking(-0.0625)
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineLimit(1)
+                } else if let subtitle = sectionSubtitleText {
+                    Text(subtitle)
+                        .font(.system(size: 12.5))
+                        .tracking(-0.0625)
+                        .foregroundStyle(VolarColor.textSec)
+                        .lineLimit(1)
                 }
-                .font(.system(size: 12.5))
-                .tracking(-0.0625)
-                .foregroundStyle(VolarColor.textSec)
-                .lineLimit(1)
             }
             Spacer(minLength: 12)
             if appState.focusActive {
@@ -396,6 +528,50 @@ struct TodayView: View {
             } else {
                 frogPill
             }
+        }
+    }
+
+    // MARK: - Section switch (2026-07-27): Today/Upcoming/Inbox — port of Windows
+    // TodayViewModel.SectionTitle/SectionSubtitle/SectionEmptyText/IsSectionEmpty
+    // (ViewModels/TodayViewModel.cs:364-396). Copy is byte-for-byte identical to that source.
+
+    private var sectionTitle: String {
+        switch appState.selectedSection {
+        case .today: return "Today"
+        case .upcoming: return "Upcoming"
+        case .inbox: return "Inbox"
+        }
+    }
+
+    private var sectionSubtitleText: String? {
+        switch appState.selectedSection {
+        case .today:
+            return nil
+        case .upcoming:
+            return appState.upcomingNavCount == 0
+                ? "Nothing scheduled after today"
+                : "\(appState.upcomingNavCount) scheduled after today"
+        case .inbox:
+            return appState.inboxNavCount == 0
+                ? "Nothing waiting to be sorted"
+                : "\(appState.inboxNavCount) with no date yet"
+        }
+    }
+
+    private var sectionEmptyText: String {
+        switch appState.selectedSection {
+        case .upcoming:
+            return "Nothing scheduled after today. Say a task with a date and it lands here."
+        default:
+            return "Inbox is empty. Anything you capture without a date waits here."
+        }
+    }
+
+    private var isSectionEmpty: Bool {
+        switch appState.selectedSection {
+        case .upcoming: return appState.upcomingGroups.isEmpty
+        case .inbox: return appState.inboxTasks.isEmpty
+        case .today: return false
         }
     }
 
@@ -488,6 +664,12 @@ struct TodayView: View {
             .buttonStyle(.plain)
             .background(accentColors.solid)
             .clipShape(Capsule())
+            // Guided tour, stop 3 fallback anchor: `frogPill` (unlike `nowSpotlight`'s "Start
+            // focus" button above) has no `appState.activeTask`/`focusActive` guard, so this
+            // "Focus" button is always on screen whenever the running-focus pill isn't — including
+            // a brand-new user's empty-task state, which is exactly the case `.focusPrimary` can't
+            // cover.
+            .tourAnchor(.focusFallback)
         }
         .font(.system(size: 11.5))
         .foregroundStyle(VolarColor.textSec)

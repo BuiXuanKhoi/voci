@@ -169,6 +169,32 @@ struct VoiceDoneConfirm: Identifiable, Equatable {
     let candidates: [VoiceMatch]
 }
 
+// MARK: - Sidebar navigation sections (2026-07-27 — port of the Windows reference:
+// voci-windows/windows/src/Volar.App/ViewModels/NavSection.cs)
+//
+// The sidebar's three rows (Sidebar.swift) existed since Wave 1 but only Today did anything;
+// Upcoming/Inbox rendered hardcoded counts (12/3) with empty `{}` actions. This enum is what makes
+// them navigation rather than decoration. Membership rules live in `Sources/Model/TaskSections.swift`
+// — deliberately NOT here, same separation the Windows original draws between `NavSection.cs` and
+// `TaskSections.cs`.
+enum NavSection: Sendable, Equatable {
+    case today, upcoming, inbox
+}
+
+/// One day's worth of Upcoming rows. `header` is pre-formatted ("Tomorrow" / "Wed, Mar 18") so
+/// `TodayView` stays free of date formatting, matching how `todayDateLabel` is already handed over
+/// ready to render there. Mirrors Windows `UpcomingDayGroup` (NavSection.cs:19-26) — `tasks` stands
+/// in for that type's `Rows` of row view-models, since this app reuses `TaskItem`/`TaskRow` directly
+/// rather than a separate row view-model layer.
+struct UpcomingDayGroup: Identifiable, Equatable {
+    /// The header text is unique per computation (one entry per calendar day) and stable across
+    /// re-renders of the same day, unlike a freshly-minted `UUID()` would be — using it as `id`
+    /// keeps SwiftUI's diffing from treating every recompute as an all-new list.
+    var id: String { header }
+    let header: String
+    let tasks: [TaskItem]
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -269,6 +295,32 @@ final class AppState {
     /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
     var detailTaskID: UUID?
 
+    // MARK: - Guided tour (coach-mark walkthrough shown right after onboarding; `TourOverlay`,
+    // `TourModel`, `TourAnchor` — `Sources/Views/Tour/*`). Same "additive, not part of the frozen
+    // §4 surface" category as the modal/banner state directly above.
+
+    /// True while `TourOverlay` is mounted over the real `TodayView`. `VolarApp.swift`'s main-
+    /// window `.task` also reads this as an extra guard on the morning-frog/triage/evening-sweep
+    /// sheet gates, so a modal sheet can never stack on top of a running tour.
+    var tourActive = false
+    /// Index into `TourStop.all` (`TourModel.swift`). `private(set)` — `tourNext()`/`tourBack()`/
+    /// `endTour()` below are the only mutators, mirroring `focusIndex`'s own single-writer
+    /// convention elsewhere in this file (clamped only through its own dedicated methods).
+    private(set) var tourStepIndex = 0
+    /// Persisted under `hasSeenTourKey`. The tour auto-starts (`startTourIfNeeded()`) at most once
+    /// per install unless the user explicitly re-runs it (`replayTour()`, Settings → "Replay guided
+    /// tour").
+    private(set) var hasSeenTour: Bool
+
+    // MARK: - Sidebar navigation (2026-07-27) — see the `NavSection`/`UpcomingDayGroup` doc comments
+    // above this class for the port note. Same "additive, not part of the frozen §4 surface"
+    // category as `tourActive`/`showTriage` above.
+
+    /// Which sidebar section `TodayView`'s main column shows. Today until the user picks otherwise;
+    /// deliberately NEVER persisted — reopening the app lands on Today, which is the whole point of
+    /// the app (mirrors Windows `TodayViewModel.SelectedSection`'s own doc comment).
+    var selectedSection: NavSection = .today
+
     // MARK: - Collaborators (implementation detail, not part of the frozen §4 surface)
 
     /// Replaces the v1 `NLParser` direct call (contract "Confirm + materialize" / T025: "Replace
@@ -291,7 +343,12 @@ final class AppState {
     // MARK: - Phase 3: real service instances (VoicePlayback / AmbientSound / HotkeyManager /
     // SpeechCapture are all `@MainActor` classes with no-arg inits — see `Sources/Speech/*` and
     // `Sources/Audio/AmbientSound.swift`).
-    let voice = VoicePlayback()
+    /// Bare type annotation, NOT a declaration-site default (`= VoicePlayback()`) — `voiceChannel`
+    /// further down needs to be built from this instance, and Swift's two-phase init rule forbids
+    /// reading ANY `self.` stored property (even one with its own default expression) until every
+    /// stored property of the class has been assigned. Constructed into a local constant in `init`
+    /// instead — see that section's comment for why.
+    let voice: VoicePlayback
     let ambientSound = AmbientSound()
     let hotkey = HotkeyManager()
     let speech = SpeechCapture()
@@ -300,6 +357,23 @@ final class AppState {
     let whisper = WhisperKitEngine()
     /// Paid cloud tier.
     let groq = GroqEngine()
+    /// Read-only EventKit access (feature: guided-tour "Enable Calendar" step,
+    /// `Sources/Views/Tour/TourOverlay.swift`'s final stop). Owned/implemented in
+    /// `Sources/Integrations/CalendarAccess.swift` (sibling-owned) — bare type annotation rather
+    /// than a declaration-site default (`= CalendarAccess()`) because `calendarSync` below is built
+    /// FROM this instance, and a stored property's own default-value expression can't reference a
+    /// sibling instance property. Constructed into a local constant in `init` instead (same reason
+    /// as `voice` above) so `SettingsView` and `TourOverlay` are still guaranteed to observe the
+    /// exact same access/status instance rather than two independently drifting ones.
+    let calendarAccess: CalendarAccess
+    /// One-way (Volar → Calendar) task mirroring into an app-created "Volar" calendar. Owned/
+    /// implemented in `Sources/Integrations/CalendarSync.swift` (sibling-owned) — shares this
+    /// exact `calendarAccess` instance (constructed on the line directly above) rather than each
+    /// holding its own, so there is exactly one source of truth for EventKit authorization status
+    /// across the app. See `syncCalendarMirror()`/`setCalendarMirror(_:)`/`enableCalendarAccess()`
+    /// below for how this gets driven — `reconcile(tasks:)` itself is never called from a property
+    /// observer or timer, only from explicit choke points after a task-list mutation.
+    let calendarSync: CalendarSync
 
     // MARK: - Account & Entitlements (specs/002-workflow-command-center/contracts/account-auth.md)
     //
@@ -445,6 +519,11 @@ final class AppState {
     /// same values, same default-to-`.comfy` fallback — so this is the established convention,
     /// not a new one.
     private static let densityKey = "volar.density"
+    /// Guided-tour "seen" flag (`Sources/Views/Tour/*`). `V1` suffix mirrors `VolarApp.swift`'s own
+    /// `hasOnboardedV1` `@AppStorage` key versioning convention, so a future tour redesign can force
+    /// everyone through it again just by bumping the suffix, without touching this file's read/write
+    /// call sites (`init` below / `endTour()` further down).
+    private static let hasSeenTourKey = "volar.hasSeenTourV1"
 
     init(
         store: TaskStore? = nil,
@@ -509,6 +588,10 @@ final class AppState {
         } else {
             self.triageKeptAt = [:]
         }
+        // Guided tour: read-only override, same shape as every other persisted-choice read above —
+        // absent means "never run before" (the honest default for a fresh install), so `Bool` here
+        // needs no fallback expression the way `speechEngineChoice`/`voiceDeliveryMode` do.
+        self.hasSeenTour = UserDefaults.standard.bool(forKey: Self.hasSeenTourKey)
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -519,15 +602,44 @@ final class AppState {
         self.focusIndex = 0
         self.router = router
         self.clock = clock
-        // Phase 4 (T033): construct the reminder subsystem once `self.store` (assigned at the
-        // very top of this init) is settled. `self.voice` is safe to read here even though it
-        // isn't assigned inside this init body — like every other stored property with a default
-        // expression (`let voice = VoicePlayback()`), it's already initialized as part of this
-        // instance's construction before any of this init's own statements run.
-        self.voiceChannel = VoiceReminderChannel(playback: self.voice)
-        self.reminderGate = ReminderContextGate()
+        // FIX 6: `calendarSync` takes `calendarAccess` as a constructor argument, so — same
+        // reasoning as the `voice`/`voiceChannel`/`reminderGate` locals a few lines below — it
+        // must be assigned here inside `init`'s body rather than at its own declaration site
+        // (`let calendarSync = CalendarSync(access: calendarAccess)` right next to
+        // `calendarAccess`'s declaration would not compile: a stored property's own default-value
+        // expression cannot reference a sibling instance property, since `self` isn't fully
+        // available yet at that point).
+        //
+        // 2026-07-27 FIX: this used to read `self.calendarAccess` directly here, on the theory that
+        // a stored property with its own declaration-site default expression is "already
+        // initialized" and therefore safe to read early. That's wrong — Swift's two-phase init
+        // rule (the compiler's "safety check 4") forbids reading ANY `self.` stored property, no
+        // matter how it's initialized, until EVERY stored property of the class has been assigned;
+        // at this point `voiceChannel`/`reminderGate`/`scheduler`/`delegation`/`appLinkHandler`
+        // (all assigned further down this same init) are still unset, so the read was illegal and
+        // would fail to compile the first time this file was ever built on a Mac (it never had
+        // been — see backlog.md). Fixed by building `calendarAccess` into a LOCAL constant first
+        // and passing the LOCAL (never `self.calendarAccess`) into `CalendarSync`.
+        let calendarAccess = CalendarAccess()
+        self.calendarAccess = calendarAccess
+        self.calendarSync = CalendarSync(access: calendarAccess)
+        // Phase 4 (T033): construct the reminder subsystem once `store` (the init parameter,
+        // already mirrored into `self.store` at the very top of this init) is settled.
+        //
+        // 2026-07-27 FIX: same bug and same fix as `calendarAccess` immediately above — `voice`,
+        // `voiceChannel`, and `reminderGate` are all built into LOCAL constants and passed as
+        // locals (never as `self.voice` / `self.voiceChannel` / `self.reminderGate`) into whatever
+        // needs them, because at this point in `init` the class's stored properties are still only
+        // partially assigned (`delegation`/`appLinkHandler` come later), so no `self.` property
+        // read is legal yet regardless of whether that particular property already holds a value.
+        let voice = VoicePlayback()
+        self.voice = voice
+        let voiceChannel = VoiceReminderChannel(playback: voice)
+        self.voiceChannel = voiceChannel
+        let reminderGate = ReminderContextGate()
+        self.reminderGate = reminderGate
         if let store {
-            let realScheduler = ReminderScheduler(store: store, voice: self.voiceChannel, gate: self.reminderGate)
+            let realScheduler = ReminderScheduler(store: store, voice: voiceChannel, gate: reminderGate)
             self.scheduler = realScheduler
         } else {
             self.scheduler = nil
@@ -751,6 +863,73 @@ final class AppState {
         return tasks.first { $0.id == winner.id }
     }
 
+    // MARK: - Sidebar sections (Upcoming/Inbox) — 2026-07-27, port of Windows
+    // `TodayViewModel.RefreshSections` (ViewModels/TodayViewModel.cs:609-647). Membership itself
+    // lives in `TaskSections` (Sources/Model/TaskSections.swift); everything here is just deriving
+    // the sidebar's live counts + `TodayView`'s Upcoming/Inbox bodies from the same `openTasks`
+    // snapshot Today already uses, so the three sections can never disagree about what exists.
+
+    /// Local-midnight-tomorrow cutoff, recomputed from the live clock on every access (same
+    /// no-cached-state convention as `activeTask` above) — `TimeZone.current`, since "after today"
+    /// is inherently a LOCAL calendar concept (mirrors Windows `TodayViewModel`'s own
+    /// `TimeZoneInfo.Local` default, wired at the same call-site layer rather than baked into the
+    /// pure `TaskSections` functions themselves).
+    private var startOfTomorrow: Date {
+        TaskSections.startOfTomorrow(now: clock(), timeZone: .current)
+    }
+
+    /// Upcoming's rows, grouped by local calendar day and ordered earliest-first — the sidebar
+    /// nav count is `dated.count` (`upcomingNavCount` below), not `upcomingGroups.count` (one per
+    /// GROUP, not per task).
+    var upcomingGroups: [UpcomingDayGroup] {
+        let cutoff = startOfTomorrow
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+
+        let dated: [(date: Date, task: TaskItem)] = openTasks.compactMap { task in
+            guard let date = TaskSections.upcomingDate(task, startOfTomorrow: cutoff) else { return nil }
+            return (date, task)
+        }
+
+        // Bucket by local calendar day while preserving ascending date order within (and across)
+        // buckets — `order` records first-seen-day order so groups themselves come out earliest-day
+        // first, matching the Windows `OrderBy(...).GroupBy(...)` pipeline this ports.
+        var order: [Date] = []
+        var buckets: [Date: [TaskItem]] = [:]
+        for entry in dated.sorted(by: { $0.date < $1.date }) {
+            let day = calendar.startOfDay(for: entry.date)
+            if buckets[day] == nil {
+                buckets[day] = []
+                order.append(day)
+            }
+            buckets[day]?.append(entry.task)
+        }
+
+        let tomorrow = calendar.startOfDay(for: cutoff)
+        return order.map { day in
+            let header = day == tomorrow
+                ? "Tomorrow"
+                : day.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
+            return UpcomingDayGroup(header: header, tasks: buckets[day] ?? [])
+        }
+    }
+
+    /// Sidebar nav count for Upcoming — one per TASK, not per day group (a day with 3 tasks counts
+    /// as 3, mirroring Windows `UpcomingNavCount = dated.Count`).
+    var upcomingNavCount: Int {
+        openTasks.filter { TaskSections.isUpcoming($0, startOfTomorrow: startOfTomorrow) }.count
+    }
+
+    /// Inbox's rows — a flat list, deliberately: the whole definition of Inbox is "has no date and
+    /// no dependency", so there is nothing to group BY. Newest first, because in a voice-first app
+    /// the thing you just said is the thing you are still thinking about (mirrors Windows
+    /// `InboxTasks`'s own `OrderByDescending(CreatedAt)`).
+    var inboxTasks: [TaskItem] {
+        openTasks.filter { TaskSections.isInbox($0) }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    var inboxNavCount: Int { inboxTasks.count }
+
     // MARK: - Task CRUD
 
     func addTask(_ t: TaskItem) {
@@ -761,6 +940,9 @@ final class AppState {
         // scheduled — a no-op for an undated task (`ReminderRecord.derive` returns empty).
         scheduler?.scheduleReminders(taskId: t.id)
         notifyEligibilityAndScheduleResurface(before: before, now: clock())
+        // FIX 6: a new task can carry a deadline from the moment it's created (membership change
+        // + possible new deadline) — keep the calendar mirror in step.
+        syncCalendarMirror()
     }
 
     /// Mirrors `volar-mac.jsx`'s `toggleTask`: marking a task done always bumps it to `.later`
@@ -797,6 +979,9 @@ final class AppState {
             if !wasDone {
                 tasks[index].when = .later
             }
+            // FIX 6: done-state just flipped (the exact field `isDesired` filters on) — no-store
+            // fallback (previews/tests) still needs this so `calendarSync`'s self-guards see it.
+            syncCalendarMirror()
             return
         }
         let before = tasks
@@ -817,6 +1002,11 @@ final class AppState {
             }
         }
         notifyEligibilityAndScheduleResurface(before: before, now: now)
+        // FIX 6: done-state changed (T037's completion funnel — `confirmVoiceDone`'s `.complete`,
+        // `sweepComplete`, and the plain UI toggle all route through here), and `TaskStore.toggle`
+        // can also reset a recurring task back to `.todo` with a FRESH deadline in place — both are
+        // exactly the fields `CalendarSync.isDesired`/`eventWindow` key off of.
+        syncCalendarMirror()
     }
 
     /// Store-backed path: `TaskStore.delete` strips the id from every other task's `.taskDone`
@@ -826,6 +1016,9 @@ final class AppState {
     func deleteTask(_ id: UUID) {
         guard let store else {
             tasks.removeAll { $0.id == id }
+            // FIX 6: membership change (no-store fallback) — see `toggleDone`'s own no-store
+            // branch for why this still needs calling even without a real `TaskStore`.
+            syncCalendarMirror()
             return
         }
         let now = clock()
@@ -844,6 +1037,10 @@ final class AppState {
             scheduler?.notifyUnblocked(taskIds: newlyEligible)
         }
         scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: now)
+        // FIX 6: membership change — `reconcile(tasks:)`'s own "no longer desired" pass (which a
+        // deleted task's id will now fall into, since it's not in `tasks` at all anymore) is what
+        // actually removes its mirrored event, if any.
+        syncCalendarMirror()
     }
 
     /// WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done" action calls
@@ -859,6 +1056,42 @@ final class AppState {
     func refreshFromStore() {
         guard let store else { return }
         tasks = store.fetchAll()
+        // FIX 6: `tasks` just changed (possibly, if `refreshFromStore` picked up an out-of-band
+        // mutation — see this method's own doc comment above) — keep the mirror in step. Cheap/
+        // safe even when nothing actually changed: `reconcile(tasks:)` self-guards on
+        // `mirrorEnabled`/access and diffs against `eventMap`, so a no-op refresh costs one
+        // `isDesired` filter pass and nothing else.
+        syncCalendarMirror()
+    }
+
+    // MARK: - Calendar mirroring wiring (FIX 6: nothing called `CalendarSync.reconcile(tasks:)`
+    // before this — the mirror was constructed but never actually driven).
+
+    /// Thin wrapper around `calendarSync.reconcile(tasks:)` — the single seam every task-list
+    /// mutation choke point below calls through, so there is exactly one line to read to see what
+    /// "keep the calendar mirror in sync" means. Safe to call often: `reconcile(tasks:)` itself
+    /// never throws, and no-ops almost immediately when access isn't granted or mirroring is off
+    /// (see that method's own early guards, `CalendarSync.swift`).
+    private func syncCalendarMirror() {
+        calendarSync.reconcile(tasks: tasks)
+    }
+
+    /// Settings' mirror toggle routes here (never straight to `calendarSync.setMirrorEnabled(_:)`)
+    /// so flipping it ON mirrors immediately — persisting the flag alone wouldn't create any
+    /// events until whatever task mutation happens to come next, which could be a while for a user
+    /// who just enabled the feature and is now looking at their calendar for the first result.
+    func setCalendarMirror(_ enabled: Bool) {
+        calendarSync.setMirrorEnabled(enabled)
+        syncCalendarMirror()
+    }
+
+    /// The tour's "Enable Calendar" button and Settings' permission button both call this instead
+    /// of `calendarAccess.requestAccess()` directly, for the same "don't wait for the next
+    /// coincidental task edit" reasoning as `setCalendarMirror(_:)` above: a fresh grant should let
+    /// an already-enabled mirror populate the calendar right away, not just update `status`.
+    func enableCalendarAccess() async {
+        await calendarAccess.requestAccess()
+        syncCalendarMirror()
     }
 
     // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
@@ -1675,6 +1908,8 @@ final class AppState {
             notifyEligibilityAndScheduleResurface(before: before, now: now)
             scheduleRemindersForSavedItems(itemsToSave) // no-op: `scheduler` is nil without a store
             finishSaveUI(titles: itemsToSave.map(\.title))
+            // FIX 6: membership change (new tasks, possibly with new deadlines).
+            syncCalendarMirror()
             return
         }
 
@@ -1702,6 +1937,9 @@ final class AppState {
             notifyEligibilityAndScheduleResurface(before: before, now: now)
             scheduleRemindersForSavedItems(itemsToSave)
             finishSaveUI(titles: itemsToSave.map(\.title))
+            // FIX 6: membership change (new tasks, possibly with new deadlines) — every chunk
+            // committed successfully by this point.
+            syncCalendarMirror()
         } catch {
             // Cycle rejection / batch-too-large / any other `TaskStoreError` surfaces its
             // human-readable message instead of crashing; `confirmDrafts` is left intact so the
@@ -1714,6 +1952,10 @@ final class AppState {
             scheduleRemindersForSavedItems(itemsToSave)
             captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             captureState = .error
+            // FIX 6: an earlier chunk may have committed successfully before this failure (see the
+            // comment above `tasks = store.fetchAll()` just above) — keep the mirror in step with
+            // whatever partial state actually persisted, same as every other refresh in this catch.
+            syncCalendarMirror()
         }
     }
 
@@ -2482,6 +2724,12 @@ final class AppState {
         if speechEngineChoice == .whisperKit, WhisperKitEngine.isSupported {
             _Concurrency.Task { await whisper.prepare() }
         }
+        // FIX 6 (launch/window-reopen path): nothing else runs `reconcile(tasks:)` at launch
+        // otherwise — a Mac that slept through a task's deadline changing (e.g. a reminder
+        // reschedule while the app wasn't running) would show a stale "Volar" calendar until the
+        // next in-app mutation. Idempotent for the same reason every other call site here is: a
+        // no-op reconcile costs one filter pass when nothing actually changed.
+        syncCalendarMirror()
     }
 
     // MARK: - Phase 4: overdue-reschedule scan (WG-3, FR-016)
@@ -2637,6 +2885,67 @@ final class AppState {
     func dismissAppLinkDisambiguation() {
         appLinkHandler?.dismissDisambiguation()
         pendingDisambiguationTaskIDs = []
+    }
+
+    // MARK: - Guided tour actions (`TourOverlay.swift`)
+
+    /// The stop currently on screen, or `nil` if `tourStepIndex` ever drifted out of
+    /// `TourStop.all`'s bounds. Defensive rather than load-bearing: every mutator below
+    /// (`startTourIfNeeded`/`replayTour`/`tourNext`/`tourBack`/`endTour`) keeps `tourStepIndex` in
+    /// range by construction, so this should never actually read `nil` while `tourActive` is
+    /// `true` — but `TourOverlay` reads THIS instead of subscripting `TourStop.all` directly, so a
+    /// future bug here degrades to "the overlay quietly renders nothing" instead of a crash.
+    var tourStop: TourStop? {
+        TourStop.all.indices.contains(tourStepIndex) ? TourStop.all[tourStepIndex] : nil
+    }
+
+    /// Called once, right after onboarding completes (`VolarApp.swift`'s `OnboardingView
+    /// onComplete:` and its sheet-dismissal binding) — a no-op if the tour has already run this
+    /// install (or a previous one; `hasSeenTour` is persisted), so a relaunch never re-triggers it
+    /// uninvited. `replayTour()` below is the explicit, always-runs Settings re-entry point.
+    func startTourIfNeeded() {
+        guard !hasSeenTour else { return }
+        tourStepIndex = 0
+        tourActive = true
+    }
+
+    /// Settings' "Replay guided tour" row (agent-B-owned call site, `SettingsView.swift`) — always
+    /// restarts from the first stop, unconditionally, even though `hasSeenTour` is necessarily
+    /// already `true` by the time a user can reach this row at all.
+    func replayTour() {
+        tourStepIndex = 0
+        tourActive = true
+    }
+
+    /// "Next →" on every non-final stop. Advances one stop, or — if already on the last stop —
+    /// ends the tour exactly like Skip/Esc would. In practice `TourOverlay` never shows a "Next →"
+    /// button on the final stop (its footer swaps in the calendar-connect actions instead, each of
+    /// which calls `endTour()` directly), so the "past the last stop" branch here is a defensive
+    /// fallback, not a normally-reached path.
+    func tourNext() {
+        let next = tourStepIndex + 1
+        if TourStop.all.indices.contains(next) {
+            tourStepIndex = next
+        } else {
+            endTour()
+        }
+    }
+
+    /// "Back". Clamped at 0 — mirrors `FocusOverlay`'s own `goToPrevious()` clamp (`AppState`
+    /// itself has no analogous clamp today since `focusIndex` is clamped view-side; this one lives
+    /// here instead so `Tests/TourFlowTests.swift` can exercise it without a view).
+    func tourBack() {
+        tourStepIndex = max(0, tourStepIndex - 1)
+    }
+
+    /// Skip / Esc / the final stop's "Maybe later"/"Finish" — ends the tour and marks it seen for
+    /// good, so `startTourIfNeeded()` never auto-starts it again this install. `replayTour()` is
+    /// the only way back in once this has run.
+    func endTour() {
+        tourActive = false
+        tourStepIndex = 0
+        hasSeenTour = true
+        UserDefaults.standard.set(true, forKey: Self.hasSeenTourKey)
     }
 }
 

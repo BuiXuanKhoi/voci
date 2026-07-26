@@ -9,35 +9,52 @@ struct Sidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            captureButton
-                .padding(.horizontal, 10)
-                .padding(.top, 12)
-                .padding(.bottom, 4)
+            // Grouped in their own `VStack(spacing: 0)` — identical to being direct children of
+            // the outer `VStack` above (same individual paddings, same spacing) — purely so a
+            // single `.tourAnchor(.capture)` can cover both the "Tap to speak" button AND the
+            // ⌃⌥M key badges together (guided tour, stop 1: `Sources/Views/Tour/*`). Regrouping
+            // rather than tagging `captureButton` alone, per that feature's own instruction to
+            // prefer covering both over a tighter single-button hole, as long as doing so doesn't
+            // shift any existing layout — and it doesn't, since nesting a zero-spacing `VStack`
+            // changes nothing about how its children are laid out.
+            VStack(spacing: 0) {
+                captureButton
+                    .padding(.horizontal, 10)
+                    .padding(.top, 12)
+                    .padding(.bottom, 4)
 
-            keyBadgeRow
-                .padding(.bottom, 4)
+                keyBadgeRow
+                    .padding(.bottom, 4)
+            }
+            .tourAnchor(.capture)
 
             focusSectionLabel
 
+            // Today/Upcoming/Inbox are LIVE as of 2026-07-27 (port of the Windows reference —
+            // SidebarControl.xaml.cs's `ApplyNavRow`/`OnNavRowTapped`). Before that, only Today was
+            // real: Upcoming/Inbox rendered hardcoded counts (12/3) and had empty `{}` actions.
+            // Membership/counts come from `AppState.upcomingNavCount`/`inboxNavCount`
+            // (`Sources/Model/TaskSections.swift`); `active` now reflects `appState.selectedSection`
+            // instead of the old `true`/`false` literals.
             VStack(spacing: 1) {
                 SidebarItem(
                     icon: .today,
                     label: "Today",
                     count: appState.openTasks.count,
-                    active: true
-                ) {}
+                    active: appState.selectedSection == .today
+                ) { appState.selectedSection = .today }
                 SidebarItem(
                     icon: .upcoming,
                     label: "Upcoming",
-                    count: 12,
-                    active: false
-                ) {}
+                    count: appState.upcomingNavCount,
+                    active: appState.selectedSection == .upcoming
+                ) { appState.selectedSection = .upcoming }
                 SidebarItem(
                     icon: .inbox,
                     label: "Inbox",
-                    count: 3,
-                    active: false
-                ) {}
+                    count: appState.inboxNavCount,
+                    active: appState.selectedSection == .inbox
+                ) { appState.selectedSection = .inbox }
             }
             .padding(.horizontal, 8)
 

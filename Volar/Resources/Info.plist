@@ -37,6 +37,29 @@
 	<key>NSSpeechRecognitionUsageDescription</key>
 	<string>Volar uses on-device speech recognition to turn what you say into a task title, due date, priority, and duration. Nothing is sent to a server.</string>
 	<!--
+	  Calendar access — read AND write (updated: Volar now mirrors scheduled tasks into a calendar
+	  it creates; it used to be read-only, this key's string changed accordingly, keep it truthful).
+	  macOS 14+ has no read-only EventKit request API — the only call that grants read access is
+	  `requestFullAccessToEvents()` (see CalendarAccess.swift's file header for the full
+	  explanation), so this key is the one macOS shows in the TCC prompt for that call — and Volar
+	  now genuinely uses both halves of that grant: it reads calendar metadata to see which time
+	  blocks are free, and it writes into a calendar it creates itself, called "Volar", to mirror
+	  scheduled tasks as events (opt-in, `CalendarSync.mirrorEnabled`, default off). Volar never
+	  touches any calendar it did not create (`CalendarSync.swift`'s two ownership guards enforce
+	  this in code, not just in this description). Calendar data stays on this Mac and is never
+	  uploaded.
+	-->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Volar reads your calendar to see which time blocks are genuinely free, and — if you turn on calendar mirroring in Settings — adds your scheduled tasks as events in a calendar it creates called "Volar". It only ever modifies events it created itself, never your other calendars, and nothing leaves your Mac.</string>
+	<!--
+	  Legacy key, kept alongside the one above purely as a fallback for any older EventKit code
+	  path that still consults it instead of the macOS-14 key (Apple has not documented removing
+	  the legacy key's relevance, and it costs nothing to keep it truthful and in sync). Same claim,
+	  same behavior as the key above.
+	-->
+	<key>NSCalendarsUsageDescription</key>
+	<string>Volar reads your calendar to see which time blocks are genuinely free, and — if you turn on calendar mirroring in Settings — adds your scheduled tasks as events in a calendar it creates called "Volar". It only ever modifies events it created itself, never your other calendars, and nothing leaves your Mac.</string>
+	<!--
 	  feature 002 (contracts/app-links.md): registers the `volar://` app-link scheme, sandbox-safe
 	  (no listening port). NOTE: this is declared directly in this physical Info.plist rather than
 	  via xcodegen's `target.info.properties` mechanism, because this target already sets

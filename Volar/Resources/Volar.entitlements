@@ -10,8 +10,9 @@
 	  (Sources/Speech/HotkeyManager.swift) now uses Carbon RegisterEventHotKey, which needs no
 	  Accessibility permission and is sandbox-legal, so that blocker is gone.
 
-	  Minimal set only — five keys, nothing else. No temporary-exception entitlements, no Apple
-	  Events, no broader file access than user-selected read-write + its bookmark counterpart.
+	  Minimal set only — six keys, nothing else (was five before calendar read-only access was
+	  added). No temporary-exception entitlements, no Apple Events, no broader file access than
+	  user-selected read-write + its bookmark counterpart.
 	-->
 	<key>com.apple.security.app-sandbox</key>
 	<true/>
@@ -48,6 +49,17 @@
 	     picked-file access is revoked the moment the app quits and every bookmark resolve would
 	     fail on next launch. -->
 	<key>com.apple.security.files.bookmarks.app-scope</key>
+	<true/>
+
+	<!-- CRITICAL, same failure mode as com.apple.security.device.audio-input above: under App
+	     Sandbox this entitlement is mandatory or the TCC prompt never appears and EventKit calls
+	     (CalendarAccess.swift's `requestFullAccessToEvents`/`authorizationStatus`) silently fail —
+	     the request just resolves to "denied"-equivalent with no prompt ever shown, and there is
+	     no error message pointing back at the missing entitlement. NSCalendarsFullAccessUsage-
+	     Description / NSCalendarsUsageDescription (Info.plist) alone are not sufficient without
+	     this. Read-only in practice (see CalendarAccess.swift's header for why the grant is
+	     nominally "full" access even though nothing in this app writes). -->
+	<key>com.apple.security.personal-information.calendars</key>
 	<true/>
 </dict>
 </plist>
