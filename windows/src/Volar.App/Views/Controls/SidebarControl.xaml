@@ -15,12 +15,12 @@
   elsewhere in this port (no named Colors.xaml resource exists for these — see views-inventory.md §1.5
   item 4).
 
-  Today/Upcoming/Inbox nav counts: Today is LIVE (ViewModel.TodayNavCount, mirrors
-  `appState.openTasks.count`); Upcoming/Inbox are the Swift original's own hardcoded placeholder data
-  (12/3, TodayViewModel.UpcomingNavCountPlaceholder/InboxNavCountPlaceholder) — faithfully ported, not
-  a Wave-4 feature gap of this port's own making (views-inventory.md §1.5 item 2 flags this in the
-  Swift source itself). Upcoming/Inbox rows have no click action, matching Sidebar.swift's own empty
-  `{}` action closures.
+  Today/Upcoming/Inbox nav counts are all LIVE as of 2026-07-27 (ViewModel.TodayNavCount /
+  UpcomingNavCount / InboxNavCount, defined by Volar.Domain.TaskSections). Before that, only Today
+  was real: Upcoming/Inbox rendered the Swift original's hardcoded 12/3 and had empty `{}` click
+  actions (views-inventory.md §1.5 item 2 flagged it in the Swift source itself). The three rows are
+  now radio-style navigation — see OnNavRowTapped and TodayViewModel.SelectedSection.
+
 -->
 <UserControl
     x:Class="Volar.App.Views.Controls.SidebarControl"
@@ -123,7 +123,7 @@
 
         <!-- Nav items (Sidebar.swift:22-42, `SidebarItem`). Today is the only live/active row. -->
         <StackPanel Grid.Row="3" Spacing="1" Margin="8,0,8,0">
-            <Border x:Name="TodayNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited">
+            <Border x:Name="TodayNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited" Tapped="OnNavRowTapped">
                 <Grid ColumnSpacing="9">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
@@ -135,28 +135,28 @@
                     <TextBlock x:Name="TodayNavCountText" Grid.Column="2" FontSize="11" />
                 </Grid>
             </Border>
-            <Border x:Name="UpcomingNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited">
+            <Border x:Name="UpcomingNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited" Tapped="OnNavRowTapped">
                 <Grid ColumnSpacing="9">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <controls:VolarIcon Grid.Column="0" IconName="Upcoming" IconSize="14" IconBrush="{StaticResource VolarTextSecBrush}" />
-                    <TextBlock Grid.Column="1" Text="Upcoming" FontSize="13" Foreground="{StaticResource VolarTextPriBrush}" />
-                    <TextBlock x:Name="UpcomingNavCountText" Grid.Column="2" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                    <controls:VolarIcon x:Name="UpcomingNavIcon" Grid.Column="0" IconName="Upcoming" IconSize="14" />
+                    <TextBlock x:Name="UpcomingNavLabel" Grid.Column="1" Text="Upcoming" FontSize="13" FontWeight="Medium" />
+                    <TextBlock x:Name="UpcomingNavCountText" Grid.Column="2" FontSize="11" />
                 </Grid>
             </Border>
-            <Border x:Name="InboxNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited">
+            <Border x:Name="InboxNavRow" CornerRadius="7" Padding="10,6" PointerEntered="OnNavRowPointerEntered" PointerExited="OnNavRowPointerExited" Tapped="OnNavRowTapped">
                 <Grid ColumnSpacing="9">
                     <Grid.ColumnDefinitions>
                         <ColumnDefinition Width="Auto" />
                         <ColumnDefinition Width="*" />
                         <ColumnDefinition Width="Auto" />
                     </Grid.ColumnDefinitions>
-                    <controls:VolarIcon Grid.Column="0" IconName="Inbox" IconSize="14" IconBrush="{StaticResource VolarTextSecBrush}" />
-                    <TextBlock Grid.Column="1" Text="Inbox" FontSize="13" Foreground="{StaticResource VolarTextPriBrush}" />
-                    <TextBlock x:Name="InboxNavCountText" Grid.Column="2" FontSize="11" Foreground="{StaticResource VolarTextMutBrush}" />
+                    <controls:VolarIcon x:Name="InboxNavIcon" Grid.Column="0" IconName="Inbox" IconSize="14" />
+                    <TextBlock x:Name="InboxNavLabel" Grid.Column="1" Text="Inbox" FontSize="13" FontWeight="Medium" />
+                    <TextBlock x:Name="InboxNavCountText" Grid.Column="2" FontSize="11" />
                 </Grid>
             </Border>
         </StackPanel>

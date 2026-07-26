@@ -281,10 +281,30 @@ public sealed partial class TodayView : UserControl
         FocusPauseIcon.IconName = vm?.FocusPaused == true ? VolarIconName.Play : VolarIconName.Pause;
         FrogPillTitleText.Text = vm?.FrogPillTitle ?? "Ship the auth fix";
 
-        // Empty state vs task stack.
+        // Section switch (2026-07-27): the main column now hosts three sections, not just Today.
+        // Everything below this block belongs to Today's own body and keeps running even while
+        // another section is showing — it is all writing into collapsed elements, which is cheap and
+        // keeps Today's state warm for the switch back.
+        var section = vm?.SelectedSection ?? NavSection.Today;
+        var isToday = section == NavSection.Today;
+
+        SectionTitleText.Text = vm?.SectionTitle ?? "Today";
+        TodaySubtitleRow.Visibility = isToday ? Visibility.Visible : Visibility.Collapsed;
+        SectionSubtitleText.Visibility = isToday ? Visibility.Collapsed : Visibility.Visible;
+        SectionSubtitleText.Text = vm?.SectionSubtitle ?? string.Empty;
+
+        var sectionEmpty = vm?.IsSectionEmpty ?? false;
+        SectionScrollViewer.Visibility = !isToday && !sectionEmpty ? Visibility.Visible : Visibility.Collapsed;
+        SectionEmptyText.Visibility = !isToday && sectionEmpty ? Visibility.Visible : Visibility.Collapsed;
+        SectionEmptyText.Text = vm?.SectionEmptyText ?? string.Empty;
+
+        UpcomingGroupsItemsControl.ItemsSource = section == NavSection.Upcoming ? vm?.UpcomingGroups : null;
+        InboxItemsControl.ItemsSource = section == NavSection.Inbox ? vm?.InboxTasks : null;
+
+        // Empty state vs task stack (Today only — both stay collapsed in the other sections).
         var hasOpenTasks = vm?.HasOpenTasks ?? false;
-        EmptyTodayCard.Visibility = hasOpenTasks ? Visibility.Collapsed : Visibility.Visible;
-        TaskScrollViewer.Visibility = hasOpenTasks ? Visibility.Visible : Visibility.Collapsed;
+        EmptyTodayCard.Visibility = isToday && !hasOpenTasks ? Visibility.Visible : Visibility.Collapsed;
+        TaskScrollViewer.Visibility = isToday && hasOpenTasks ? Visibility.Visible : Visibility.Collapsed;
 
         // NOW spotlight.
         var now = vm?.NowSpotlight;

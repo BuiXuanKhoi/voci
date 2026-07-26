@@ -101,12 +101,16 @@
                     </Grid.ColumnDefinitions>
                     <StackPanel Grid.Column="0" Spacing="2" VerticalAlignment="Bottom">
                         <TextBlock
+                            x:Name="SectionTitleText"
                             Text="Today"
                             FontFamily="{StaticResource VolarUiFontFamily}"
                             FontSize="26"
                             FontWeight="Medium"
                             Foreground="{StaticResource VolarTextPriBrush}" />
-                        <StackPanel Orientation="Horizontal" Spacing="4">
+                        <!-- Today's own date + open/done counters. Upcoming/Inbox hide this row and
+                             show SectionSubtitleText instead — neither has a "date · N open · N done"
+                             shape to fill. -->
+                        <StackPanel x:Name="TodaySubtitleRow" Orientation="Horizontal" Spacing="4">
                             <TextBlock x:Name="TodayDateLabelText" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
                             <TextBlock Text="·" FontSize="12.5" Foreground="{StaticResource VolarTextMutBrush}" />
                             <TextBlock
@@ -125,6 +129,11 @@
                                 Foreground="{StaticResource VolarDoneBrush}" />
                             <TextBlock Text="done" FontSize="12.5" Foreground="{StaticResource VolarTextSecBrush}" />
                         </StackPanel>
+                        <TextBlock
+                            x:Name="SectionSubtitleText"
+                            FontSize="12.5"
+                            Visibility="Collapsed"
+                            Foreground="{StaticResource VolarTextSecBrush}" />
                     </StackPanel>
 
                     <!-- Running-focus pill (TodayView.swift:398-454) OR frog pill (456-498) — mutually
@@ -210,6 +219,54 @@
                             <TextBlock Text="when you need to remember something." FontSize="13.5" TextWrapping="Wrap" Foreground="{StaticResource VolarTextSecBrush}" />
                         </StackPanel>
                     </StackPanel>
+
+                    <!-- Upcoming/Inbox body. Same TaskRowControl rows as Today's own drawers, so a
+                         task looks and behaves identically wherever it appears; Upcoming adds a day
+                         header per group, Inbox is a flat list (nothing to group by — see
+                         Volar.Domain.TaskSections). -->
+                    <ScrollViewer x:Name="SectionScrollViewer" Visibility="Collapsed">
+                        <StackPanel Padding="22,8,22,18">
+                            <ItemsControl x:Name="UpcomingGroupsItemsControl">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="vm:UpcomingDayGroup">
+                                        <StackPanel Spacing="6" Margin="0,0,0,16">
+                                            <TextBlock
+                                                Text="{x:Bind Header}"
+                                                FontFamily="{StaticResource VolarMonoFontFamily}"
+                                                FontSize="11"
+                                                FontWeight="Medium"
+                                                Foreground="{StaticResource VolarTextMutBrush}" />
+                                            <ItemsControl ItemsSource="{x:Bind Rows}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <controls:TaskRowControl />
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                            <ItemsControl x:Name="InboxItemsControl">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <controls:TaskRowControl />
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <TextBlock
+                        x:Name="SectionEmptyText"
+                        Visibility="Collapsed"
+                        MaxWidth="320"
+                        TextWrapping="Wrap"
+                        TextAlignment="Center"
+                        FontSize="13.5"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Foreground="{StaticResource VolarTextSecBrush}" />
 
                     <ScrollViewer x:Name="TaskScrollViewer">
                         <StackPanel x:Name="TaskStack" Padding="22,8,22,18">

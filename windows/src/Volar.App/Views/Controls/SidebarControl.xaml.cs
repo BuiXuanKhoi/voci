@@ -65,13 +65,19 @@ public sealed partial class SidebarControl : UserControl
         }
     }
 
-    // Mirrors Sidebar.swift's `SidebarItem`'s `.onHover` (Sidebar.swift:185-186) — Upcoming/Inbox get
-    // the same hover tint even though their `action` is a no-op, matching the Swift original exactly.
+    // Mirrors Sidebar.swift's `SidebarItem`'s `.onHover` (Sidebar.swift:185-186). The SELECTED row is
+    // skipped in both handlers: its accent-surface fill is state, and letting hover paint over it (or
+    // clear it on exit) would make the current section flicker away under the cursor.
     private void OnNavRowPointerEntered(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (sender is Border { Name: "TodayNavRow" })
+        if (sender is Border row && row.Name == (ViewModel?.SelectedSection ?? NavSection.Today) switch
         {
-            return; // Today's background is accent-surface (active), never hover-tinted.
+            NavSection.Upcoming => "UpcomingNavRow",
+            NavSection.Inbox => "InboxNavRow",
+            _ => "TodayNavRow",
+        })
+        {
+            return; // Selected row keeps its accent-surface fill.
         }
         if (sender is Border border)
         {
@@ -81,7 +87,12 @@ public sealed partial class SidebarControl : UserControl
 
     private void OnNavRowPointerExited(object sender, Microsoft.UI.Xaml.Input.PointerRoutedEventArgs e)
     {
-        if (sender is Border { Name: "TodayNavRow" })
+        if (sender is Border row && row.Name == (ViewModel?.SelectedSection ?? NavSection.Today) switch
+        {
+            NavSection.Upcoming => "UpcomingNavRow",
+            NavSection.Inbox => "InboxNavRow",
+            _ => "TodayNavRow",
+        })
         {
             return;
         }
@@ -126,15 +137,45 @@ public sealed partial class SidebarControl : UserControl
         CaptureIcon.IconBrush = accentSolid;
         CaptureButtonText.Foreground = accentSolid;
 
-        // Today nav (Sidebar.swift:23-28) — always active.
-        TodayNavIcon.IconBrush = accentSolid;
-        TodayNavLabel.Foreground = accentSolid;
-        TodayNavCountText.Foreground = accentSolid;
-        TodayNavCountText.Text = (vm?.TodayNavCount ?? 0).ToString(System.Globalization.CultureInfo.InvariantCulture);
-        TodayNavRow.Background = (Brush)appResources["AccentSurfaceBrush"];
+        // Nav rows (Sidebar.swift:23-40). All three are live as of 2026-07-27 — Upcoming and Inbox
+        // used to render hardcoded 12/3 and Today was hardcoded as the active row.
+        var selected = vm?.SelectedSection ?? NavSection.Today;
+        ApplyNavRow(TodayNavRow, TodayNavIcon, TodayNavLabel, TodayNavCountText, vm?.TodayNavCount ?? 0, selected == NavSection.Today, appResources);
+        ApplyNavRow(UpcomingNavRow, UpcomingNavIcon, UpcomingNavLabel, UpcomingNavCountText, vm?.UpcomingNavCount ?? 0, selected == NavSection.Upcoming, appResources);
+        ApplyNavRow(InboxNavRow, InboxNavIcon, InboxNavLabel, InboxNavCountText, vm?.InboxNavCount ?? 0, selected == NavSection.Inbox, appResources);
+    }
 
-        // Upcoming/Inbox nav (Sidebar.swift:29-40) — static placeholder counts, never active.
-        UpcomingNavCountText.Text = TodayViewModel.UpcomingNavCountPlaceholder.ToString(System.Globalization.CultureInfo.InvariantCulture);
-        InboxNavCountText.Text = TodayViewModel.InboxNavCountPlaceholder.ToString(System.Globalization.CultureInfo.InvariantCulture);
+    /// <summary>Selected row: accent icon/label/count over the accent surface. Unselected: secondary
+    /// icon, primary label, muted count, no fill — the exact contrast Sidebar.swift drew by hand for
+    /// its one hardcoded-active row, now driven by <see cref="TodayViewModel.SelectedSection"/>.</summary>
+    private static void ApplyNavRow(
+        Border row,
+        Controls.VolarIcon icon,
+        TextBlock label,
+        TextBlock count,
+        int value,
+        bool isSelected,
+        ResourceDictionary appResources)
+    {
+        var accentSolid = (Brush)appResources["AccentSolidBrush"];
+        icon.IconBrush = isSelected ? accentSolid : (Brush)appResources["VolarTextSecBrush"];
+        label.Foreground = isSelected ? accentSolid : (Brush)appResources["VolarTextPriBrush"];
+        count.Foreground = isSelected ? accentSolid : (Brush)appResources["VolarTextMutBrush"];
+        count.Text = value.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        row.Background = isSelected ? (Brush)appResources["AccentSurfaceBrush"] : TransparentBrush;
+    }
+
+    private void OnNavRowTapped(object sender, Microsoft.UI.Xaml.Input.TappedRoutedEventArgs e)
+    {
+        if (sender is not Border border)
+        {
+            return;
+        }
+        ViewModel?.SelectSection(border.Name switch
+        {
+            "UpcomingNavRow" => NavSection.Upcoming,
+            "InboxNavRow" => NavSection.Inbox,
+            _ => NavSection.Today,
+        });
     }
 }

@@ -73,17 +73,16 @@ public sealed class TodayViewModel : INotifyPropertyChanged
     /// TodayView.swift:811).</summary>
     private const int WipSoftLimit = 4;
 
-    /// <summary>Swift's hardcoded `Upcoming`/`Inbox` nav counts (Sidebar.swift:32,38) — static
-    /// placeholder data, not backed by any service yet. Ported as-is (flagged, not silently invented)
-    /// per this task's "faithful port" mandate; a real Upcoming/Inbox feature is out of Wave 4 scope.</summary>
-    public const int UpcomingNavCountPlaceholder = 12;
-    public const int InboxNavCountPlaceholder = 3;
+    // The Upcoming/Inbox nav counts were hardcoded 12/3 placeholders here (ported from Sidebar.swift's
+    // own literals, where the rows had empty `{}` actions). They are live as of 2026-07-27 — see
+    // UpcomingNavCount/InboxNavCount below and Volar.Domain.TaskSections for what each section means.
 
     private readonly ITaskListService _taskList;
     private readonly FocusSessionService _focus;
     private readonly CaptureFlowService _capture;
     private readonly DelegationOrchestratorService _delegation;
     private readonly ITimeProvider _clock;
+    private readonly TimeZoneInfo _timeZone;
     private readonly DispatcherQueue? _dispatcherQueue;
 
     private bool _wipHintDismissed;
@@ -97,7 +96,8 @@ public sealed class TodayViewModel : INotifyPropertyChanged
         DelegationOrchestratorService delegation,
         ThemeState theme,
         ITimeProvider clock,
-        DispatcherQueue? dispatcherQueue = null)
+        DispatcherQueue? dispatcherQueue = null,
+        TimeZoneInfo? timeZone = null)
     {
         _taskList = taskList ?? throw new ArgumentNullException(nameof(taskList));
         _focus = focus ?? throw new ArgumentNullException(nameof(focus));
@@ -106,6 +106,9 @@ public sealed class TodayViewModel : INotifyPropertyChanged
         Theme = theme ?? throw new ArgumentNullException(nameof(theme));
         _clock = clock ?? throw new ArgumentNullException(nameof(clock));
         _dispatcherQueue = dispatcherQueue;
+        // Upcoming's "after today" boundary is a LOCAL calendar day, so it needs a zone. Injectable
+        // (defaulted, not required) so tests can pin one instead of inheriting the build agent's.
+        _timeZone = timeZone ?? TimeZoneInfo.Local;
 
         LaterTasks = new ObservableCollection<TaskRowViewModel>();
         CompletedTasks = new ObservableCollection<TaskRowViewModel>();
@@ -342,6 +345,66 @@ public sealed class TodayViewModel : INotifyPropertyChanged
 
     public int TodayNavCount => OpenTaskCount;
 
+    /// <summary>Which nav section the main column is showing. Today until the user picks otherwise;
+    /// never persisted — reopening the app lands on Today, which is the whole point of the app.</summary>
+    public NavSection SelectedSection { get; private set; } = NavSection.Today;
+
+    public int UpcomingNavCount { get; private set; }
+
+    public int InboxNavCount { get; private set; }
+
+    /// <summary>Upcoming's rows, already grouped by local day and ordered earliest-first.</summary>
+    public IReadOnlyList<UpcomingDayGroup> UpcomingGroups { get; private set; } = Array.Empty<UpcomingDayGroup>();
+
+    /// <summary>Inbox's rows — a flat list, deliberately: the whole definition of Inbox is "has no
+    /// date and no dependency", so there is nothing to group BY. Newest first, because in a
+    /// voice-first app the thing you just said is the thing you are still thinking about.</summary>
+    public ObservableCollection<TaskRowViewModel> InboxTasks { get; } = new();
+
+    public string SectionTitle => SelectedSection switch
+    {
+        NavSection.Upcoming => "Upcoming",
+        NavSection.Inbox => "Inbox",
+        _ => "Today",
+    };
+
+    /// <summary>Sub-header under the section title. Today keeps its own date + open/done counters
+    /// (rendered separately by the view); these two describe what the section holds, in the same
+    /// plain register.</summary>
+    public string SectionSubtitle => SelectedSection switch
+    {
+        NavSection.Upcoming => UpcomingNavCount == 0
+            ? "Nothing scheduled after today"
+            : $"{UpcomingNavCount} scheduled after today",
+        NavSection.Inbox => InboxNavCount == 0
+            ? "Nothing waiting to be sorted"
+            : $"{InboxNavCount} with no date yet",
+        _ => string.Empty,
+    };
+
+    public string SectionEmptyText => SelectedSection switch
+    {
+        NavSection.Upcoming => "Nothing scheduled after today. Say a task with a date and it lands here.",
+        _ => "Inbox is empty. Anything you capture without a date waits here.",
+    };
+
+    public bool IsSectionEmpty => SelectedSection switch
+    {
+        NavSection.Upcoming => UpcomingGroups.Count == 0,
+        NavSection.Inbox => InboxTasks.Count == 0,
+        _ => false,
+    };
+
+    public void SelectSection(NavSection section)
+    {
+        if (SelectedSection == section)
+        {
+            return;
+        }
+        SelectedSection = section;
+        Raise(nameof(SelectedSection), nameof(SectionTitle), nameof(SectionSubtitle), nameof(SectionEmptyText), nameof(IsSectionEmpty));
+    }
+
     // ------------------------------------------------------------------------------------------
     // MARK: DelegationAmbientSection (T043, phase6-contract.md §C)
     // ------------------------------------------------------------------------------------------
@@ -452,6 +515,8 @@ public sealed class TodayViewModel : INotifyPropertyChanged
         LaterDrawerMaxHeight = DrawerMaxHeight(LaterTasks.Count);
         CompletedDrawerMaxHeight = DrawerMaxHeight(CompletedTasks.Count);
 
+        RefreshSections(openTasks, now);
+
         FocusActive = _focus.FocusActive;
         FocusPaused = _focus.FocusPaused;
         FocusSecondsLeft = _focus.FocusSecondsLeft;
@@ -535,6 +600,63 @@ public sealed class TodayViewModel : INotifyPropertyChanged
 
     private void OnThemeChanged(object? sender, EventArgs e) => PostRefresh();
 
+    /// <summary>
+    /// Rebuilds Upcoming/Inbox from the same open-task snapshot Today just used, so the three
+    /// sections can never disagree about what exists. Sorting: Upcoming ascending by date (the next
+    /// thing you have to care about first); Inbox newest-first, because in a voice-first app the
+    /// capture you just made is the one still in your head.
+    /// </summary>
+    private void RefreshSections(IReadOnlyList<TaskItem> openTasks, DateTimeOffset now)
+    {
+        var startOfTomorrow = TaskSections.StartOfTomorrow(now, _timeZone);
+
+        var dated = new List<(DateTimeOffset Date, TaskItem Task)>();
+        var inbox = new List<TaskItem>();
+        foreach (var task in openTasks)
+        {
+            if (TaskSections.UpcomingDate(task, startOfTomorrow) is DateTimeOffset date)
+            {
+                dated.Add((date, task));
+            }
+            else if (TaskSections.IsInbox(task))
+            {
+                inbox.Add(task);
+            }
+        }
+
+        var groups = new List<UpcomingDayGroup>();
+        foreach (var dayGroup in dated
+            .OrderBy(entry => entry.Date)
+            .GroupBy(entry => TimeZoneInfo.ConvertTime(entry.Date, _timeZone).Date))
+        {
+            groups.Add(new UpcomingDayGroup
+            {
+                Header = UpcomingGroupHeader(dayGroup.Key, now),
+                Rows = dayGroup.Select(entry => CreateRowViewModel(entry.Task, isActive: false)).ToList(),
+            });
+        }
+        UpcomingGroups = groups;
+        UpcomingNavCount = dated.Count;
+
+        InboxTasks.Clear();
+        foreach (var task in inbox.OrderByDescending(task => task.CreatedAt))
+        {
+            InboxTasks.Add(CreateRowViewModel(task, isActive: false));
+        }
+        InboxNavCount = InboxTasks.Count;
+    }
+
+    /// <summary>"Tomorrow" for the next day and a weekday-qualified date after that. Deliberately no
+    /// "in 3 days"-style relative phrasing beyond tomorrow: past that, a weekday is what people
+    /// actually plan against.</summary>
+    private string UpcomingGroupHeader(DateTime localDay, DateTimeOffset now)
+    {
+        var today = TimeZoneInfo.ConvertTime(now, _timeZone).Date;
+        return localDay == today.AddDays(1)
+            ? "Tomorrow"
+            : localDay.ToString("ddd, MMM d", CultureInfo.InvariantCulture);
+    }
+
     private void RaiseAllChanged()
     {
         foreach (var name in new[]
@@ -545,6 +667,8 @@ public sealed class TodayViewModel : INotifyPropertyChanged
             nameof(HasLaterTasks), nameof(HasCompletedTasks), nameof(LaterDrawerMaxHeight),
             nameof(CompletedDrawerMaxHeight), nameof(IsAmbientSoundPlaying), nameof(IsAmbientBackgroundActive),
             nameof(IsCapturing), nameof(CaptureButtonLabel), nameof(TodayNavCount), nameof(WipCount),
+            nameof(SelectedSection), nameof(UpcomingNavCount), nameof(InboxNavCount), nameof(UpcomingGroups),
+            nameof(SectionTitle), nameof(SectionSubtitle), nameof(SectionEmptyText), nameof(IsSectionEmpty),
             nameof(ShowWipHint), nameof(HasDisambiguationCandidates),
         })
         {
@@ -553,4 +677,12 @@ public sealed class TodayViewModel : INotifyPropertyChanged
     }
 
     private void Raise(string propertyName) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+
+    private void Raise(params string[] propertyNames)
+    {
+        foreach (var name in propertyNames)
+        {
+            Raise(name);
+        }
+    }
 }
