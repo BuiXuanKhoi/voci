@@ -404,6 +404,23 @@ public class NLParserTests
         Assert.Equal(new DateTime(2026, 3, 17, 2, 0, 0), local.DateTime); // 09:00 now -> already passed -> tomorrow
     }
 
+    [Fact]
+    public void DetectDeadline_Khuya_CapitalizedMarker_StillRollsToTomorrow()
+    {
+        // Speech-to-text can capitalize the marker; the rule must not depend on casing.
+        var deadline = Parse("nhắc tôi lúc 2h Khuya").Deadline;
+        var local = TimeZoneInfo.ConvertTime(deadline!.Value.Value, Ict);
+        Assert.Equal(new DateTime(2026, 3, 17, 2, 0, 0), local.DateTime);
+    }
+
+    [Fact]
+    public void DetectDeadline_Toi_CapitalizedMarker_StillAddsTwelve()
+    {
+        var deadline = Parse("họp lúc 9h Tối").Deadline;
+        var local = TimeZoneInfo.ConvertTime(deadline!.Value.Value, Ict);
+        Assert.Equal(new DateTime(2026, 3, 16, 21, 0, 0), local.DateTime); // not 09:00
+    }
+
     // MARK: - Defer condition (afterDate) — takes priority over deadline for the same date token
 
     [Fact]

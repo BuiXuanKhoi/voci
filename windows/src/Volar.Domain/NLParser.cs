@@ -470,7 +470,10 @@ public sealed partial class HeuristicNLParser : INLParser
         {
             return null;
         }
-        var marker = match.Groups[3].Success ? match.Groups[3].Value : null;
+        // Lower-cased because the regexes are IgnoreCase but the marker comparisons below are exact:
+        // speech-to-text output can capitalize ("2h Khuya", "9h Tối"), and an unmatched marker would
+        // silently drop both the +12 offset and the late-night rollover.
+        var marker = match.Groups[3].Success ? match.Groups[3].Value.ToLowerInvariant() : null;
         var isLateNight = string.Equals(marker, "khuya", StringComparison.Ordinal);
         return (ApplyVietnameseTimeOfDay(hour, marker), minute, isLateNight);
     }
