@@ -1,0 +1,62 @@
+<!--
+  Views/Controls/ToolButton.xaml — port of Components.swift's `ToolButton` (lines 131-184): the
+  small square icon button used in the title bar/sidebar. wave4-contract.md Stage A deliverable 2.
+  Required (via TodayView's toolbar) per views-inventory.md §2 item 1.
+
+  CornerRadius 7 (Components.swift:170) is a one-off literal — not one of Metrics.xaml's 3 named
+  radii (12/9/6) — hand-copied per the CornerRadius/Thickness gotcha. 28x28 frame
+  (Components.swift:166) likewise literal.
+
+  Hover/press split (see ToolButton.xaml.cs for the full reasoning): the press-down 0.96 scale
+  (Components.swift's private `ToolButtonStyle`, lines 178-184) is uniform across all 3 visual
+  modes (accent/tint/plain) so it lives here as a VisualStateManager `Pressed` state on the
+  template. The hover BACKGROUND swap is mode-dependent (plain mode fades in a tint; accent mode
+  swaps solid->hover; tint mode doesn't change at all on hover — Components.swift:157-161) so that
+  branch is computed in code-behind's `PointerEntered`/`PointerExited` handlers instead of being
+  force-fit into static VisualState setters.
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.ToolButton"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:Volar.App.Views.Controls">
+    <Button
+        x:Name="InnerButton"
+        Width="28"
+        Height="28"
+        Padding="0"
+        BorderThickness="0"
+        Background="Transparent"
+        Click="OnInnerButtonClick"
+        PointerEntered="OnPointerEntered"
+        PointerExited="OnPointerExited">
+        <Button.Template>
+            <ControlTemplate TargetType="Button">
+                <Grid x:Name="RootGrid" Background="{TemplateBinding Background}" CornerRadius="7">
+                    <Grid.RenderTransformOrigin>0.5,0.5</Grid.RenderTransformOrigin>
+                    <Grid.RenderTransform>
+                        <ScaleTransform x:Name="PressScale" ScaleX="1" ScaleY="1" />
+                    </Grid.RenderTransform>
+                    <ContentPresenter
+                        Content="{TemplateBinding Content}"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center" />
+                    <VisualStateManager.VisualStateGroups>
+                        <VisualStateGroup x:Name="CommonStates">
+                            <VisualState x:Name="Normal" />
+                            <VisualState x:Name="PointerOver" />
+                            <VisualState x:Name="Pressed">
+                                <VisualState.Setters>
+                                    <Setter Target="PressScale.ScaleX" Value="0.96" />
+                                    <Setter Target="PressScale.ScaleY" Value="0.96" />
+                                </VisualState.Setters>
+                            </VisualState>
+                            <VisualState x:Name="Disabled" />
+                        </VisualStateGroup>
+                    </VisualStateManager.VisualStateGroups>
+                </Grid>
+            </ControlTemplate>
+        </Button.Template>
+        <local:VolarIcon x:Name="Icon" IconSize="14" />
+    </Button>
+</UserControl>

@@ -78,4 +78,35 @@
          style chip border. -->
     <SolidColorBrush x:Key="NowRingBrush" Color="{StaticResource VolarNowRing}" />
 
+    <!-- ============================================================
+         NEW (Wave 4 Stage A — wave4-contract.md deliverable 5 / views-inventory.md §0 & §2 item 6):
+         the SpotlightBackground `.overlay` half (Theme.swift:296-308) — a dark radial vignette,
+         off-axis at UnitPoint(0.5, 0.32), that settles the `.pool` gradient's edges into cool
+         shadow. Consumers: TodayView's NOW spotlight card, PopoverView's transcript-region
+         spotlight (both per views-inventory.md §0's flagged gap — neither view was buildable with
+         full visual fidelity until this brush existed).
+
+         SwiftUI's `RadialGradient(colors: [.clear, VolarColor.bg.opacity(0.45)], center:
+         UnitPoint(0.5, 0.32), startRadius: 140, endRadius: 320)` uses ABSOLUTE point radii;
+         WinUI's RadialGradientBrush (like NowSpotlightBrush above) maps gradient-stop offsets to a
+         RELATIVE 0..1 space over the element's own bounding box. Converted the two radii to a
+         stop-offset ratio instead: startRadius/endRadius = 140/320 = 0.4375 -> the first (Transparent)
+         stop sits at offset 0.4375 (everything inside that radius stays unpainted/transparent, same
+         as SwiftUI's "nothing renders before startRadius" behavior), and the second (bg @0.45) stop
+         sits at offset 1.0 (RadiusX/RadiusY = 1, i.e. the element's own edge = SwiftUI's endRadius).
+         This is a relative-vs-absolute approximation, same structural caveat already called out for
+         GlassLevel.blur/NowSpotlightBrush above — exact only when the hosting element's bounding box
+         happens to be square-ish and sized so its edge roughly lines up with 320pt; visually close
+         enough for a vignette (a soft, low-frequency gradient) that exact pixel radii don't matter.
+
+         VolarColor.bg (#0B0D11) @0.45 -> alpha = round(0.45*255) = 114.75 -> 115 = 0x73 -> #730B0D11.
+         No pre-existing named color for this exact alpha exists in Colors.xaml (bg's other alpha
+         variants are all accent/priority tokens, not this one), so it's inlined here rather than
+         inventing a new Colors.xaml key used nowhere else — same "component-local one-off" pattern
+         Components.swift's own inline `Color.white.opacity(...)` literals already establish. -->
+    <RadialGradientBrush x:Key="NowSpotlightVignetteBrush" Center="0.5,0.32" RadiusX="1" RadiusY="1">
+        <GradientStop Offset="0.4375" Color="Transparent" />
+        <GradientStop Offset="1.0" Color="#730B0D11" />
+    </RadialGradientBrush>
+
 </ResourceDictionary>

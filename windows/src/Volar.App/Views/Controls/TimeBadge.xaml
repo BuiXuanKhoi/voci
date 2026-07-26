@@ -1,0 +1,33 @@
+<!--
+  Views/Controls/TimeBadge.xaml — port of Components.swift's `TimeBadge` (lines 74-99): accent time
+  pill, with `filled` mirroring TaskRow's solid-fill "isActive" variant. wave4-contract.md Stage A
+  deliverable 2. Required by TaskRow's trailing time pill and Popover's "When" parse-row per
+  views-inventory.md §1.11/§2 item 1 — this control must exist before either can compile.
+
+  Capsule -> CornerRadius = height/2 = 11 (height fixed 22, Components.swift:95), same one-off as
+  PriorityBadge. `.monospacedDigit()` (Components.swift:92) -> `Typography.NumeralAlignment="Tabular"`
+  attached property (Microsoft.UI.Xaml.Documents.Typography), same fidelity mapping Typography.xaml's
+  own header comment documents for `VolarInstrumentMonoTextStyle` — this control stays on the
+  regular UI font family (not mono), only the digit-tabular-spacing behavior is ported.
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.TimeBadge"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Border
+        x:Name="RootBorder"
+        Height="22"
+        Padding="9,0"
+        CornerRadius="11"
+        HorizontalAlignment="Left"
+        VerticalAlignment="Center">
+        <TextBlock
+            x:Name="LabelText"
+            FontFamily="{StaticResource VolarUiFontFamily}"
+            FontSize="11.5"
+            FontWeight="Medium"
+            Typography.NumeralAlignment="Tabular"
+            HorizontalAlignment="Center"
+            VerticalAlignment="Center" />
+    </Border>
+</UserControl>

@@ -1,0 +1,52 @@
+<!--
+  Views/Controls/SectionHeader.xaml — port of Components.swift's `SectionHeader` (lines 186-223):
+  "NOW" / "LATER TODAY" / "COMPLETED" section label + hairline rule + optional count.
+  wave4-contract.md Stage A deliverable 2.
+
+  `.tracking(0.735)` (Components.swift:207, "0.07em at 10.5pt") -> `CharacterSpacing="70"`
+  (WinUI's CharacterSpacing is in 1/1000-em units, so 0.07em = 70). `.textCase(.uppercase)`
+  (Components.swift:208) has no WinUI TextBlock equivalent — SectionHeader.xaml.cs uppercases the
+  displayed string directly (display-only transform, same as SwiftUI's — the `Title` property
+  itself is left untouched).
+
+  The hairline `Rectangle().fill(VolarColor.border).frame(height: 0.5)` (Components.swift:210-212)
+  is VolarHairlineThickness's literal 0.5 value, hand-copied per the CornerRadius/Thickness gotcha
+  (a plain `Rectangle`'s `Height` isn't a Thickness/CornerRadius property, but the literal-not-
+  resource discipline is kept consistent here anyway since the value IS one of the named Metrics
+  constants and inlining avoids a false "looks bindable" impression).
+-->
+<UserControl
+    x:Class="Volar.App.Views.Controls.SectionHeader"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <Grid Padding="6,8">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="8" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <TextBlock
+            x:Name="TitleText"
+            Grid.Column="0"
+            FontFamily="{StaticResource VolarUiFontFamily}"
+            FontSize="10.5"
+            FontWeight="Medium"
+            CharacterSpacing="70"
+            VerticalAlignment="Center" />
+        <Rectangle
+            x:Name="RuleLine"
+            Grid.Column="2"
+            Height="0.5"
+            VerticalAlignment="Center" />
+        <TextBlock
+            x:Name="CountText"
+            Grid.Column="3"
+            Margin="8,0,0,0"
+            FontFamily="{StaticResource VolarUiFontFamily}"
+            FontSize="10.5"
+            Typography.NumeralAlignment="Tabular"
+            Foreground="{StaticResource VolarTextMutBrush}"
+            VerticalAlignment="Center" />
+    </Grid>
+</UserControl>
