@@ -201,10 +201,15 @@ public partial class App : Application
         var captureFlow = Services.GetRequiredService<CaptureFlowService>();
         _tray = new TrayIconService(
             onOpen: () => _mainWindow?.DispatcherQueue.TryEnqueue(_mainWindow.ShowAndActivate),
+            // Tray "New task…" deliberately stays on the plain toggle rather than the state-aware
+            // hotkey path: a menu item that spells out what it does should do that, and only that.
+            // HandleHotkeyAsync saves a pending confirm card, which is the right answer for a bare
+            // keypress whose meaning must depend on state, and the wrong answer for a command
+            // labelled "New task".
             onNewTask: () => _mainWindow?.DispatcherQueue.TryEnqueue(() =>
             {
                 _mainWindow!.ShowAndActivate();
-                _ = SafeHandleHotkeyAsync(captureFlow);
+                _ = SafeToggleCaptureAsync(captureFlow);
             }),
             onSettings: () => _mainWindow?.DispatcherQueue.TryEnqueue(() => _mainWindow!.ShowSettings()),
             onPreviewReminder: () => _mainWindow?.DispatcherQueue.TryEnqueue(() => _mainWindow!.ShowReminderPreview()),
@@ -288,12 +293,10 @@ public partial class App : Application
         }
     }
 
-    /// <summary>Renamed from SafeToggleCaptureAsync: both the hotkey and the tray's "New task" item
-    /// now route through <see cref="CaptureFlowService.HandleHotkeyAsync"/> (the per-state dispatch
-    /// that fixed anh Khôi's "hotkey during Parsed starts a new capture instead of saving" bug)
-    /// rather than the plain <see cref="CaptureFlowService.ToggleCaptureAsync"/> two-branch toggle —
-    /// that method itself is unchanged and still used elsewhere (kept as a public API/existing test
-    /// surface).</summary>
+    /// <summary>The global hotkey only. Routes through
+    /// <see cref="CaptureFlowService.HandleHotkeyAsync"/>, the per-state dispatch that fixed "the
+    /// hotkey starts a second capture instead of saving the card already on screen" — a bare
+    /// keypress has no label, so its meaning is allowed to depend on state.</summary>
     private static async Task SafeHandleHotkeyAsync(CaptureFlowService captureFlow)
     {
         try
@@ -303,6 +306,20 @@ public partial class App : Application
         catch (Exception ex)
         {
             Debug.WriteLine($"[Volar.App.App] HandleHotkeyAsync failed: {ex.GetType().Name}");
+        }
+    }
+
+    /// <summary>Labelled entry points (tray "New task…"), which keep the plain two-branch toggle:
+    /// a command that says what it does should do only that. See the tray wiring above.</summary>
+    private static async Task SafeToggleCaptureAsync(CaptureFlowService captureFlow)
+    {
+        try
+        {
+            await captureFlow.ToggleCaptureAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"[Volar.App.App] ToggleCaptureAsync failed: {ex.GetType().Name}");
         }
     }
 
