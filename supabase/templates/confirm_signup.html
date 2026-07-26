@@ -1,14 +1,69 @@
 <!--
-  Supabase Auth email template for FIRST-TIME users (GoTrue's "Confirm signup" template).
+  Supabase Auth email — FIRST-TIME user (GoTrue "Confirm signup" template).
+
+  Subject line to paste alongside it:
+      Welcome to Volar — your sign-in code
 
   Easy to miss: both clients call /auth/v1/otp with `create_user: true`, so a brand-new address gets
-  THIS template, not "Magic Link". Editing only the Magic Link template leaves every first sign-up
-  receiving a link instead of a code — the exact flow a new user hits first.
+  THIS template, not "Magic Link". Editing only the Magic Link template leaves every first-ever
+  sign-in receiving a link instead of a code — i.e. the exact flow a new user hits first.
 
-  Same {{ .Token }} requirement and same manual-paste caveat as magic_link.html.
+  Same {{ .Token }} requirement, same manual-paste caveat, and same email-client constraints as
+  magic_link.html — see that file's header for the reasoning behind the table/inline-style markup.
 -->
-<h2>Welcome to Volar</h2>
-<p>Your sign-in code:</p>
-<p style="font-size: 28px; font-weight: 600; letter-spacing: 4px; margin: 16px 0;">{{ .Token }}</p>
-<p>Enter it in Volar under <strong>Settings &rarr; Account</strong> to finish signing in. The code expires in 1 hour.</p>
-<p style="color: #888; font-size: 12px;">If you didn't ask to sign in, you can ignore this email.</p>
+<div style="display: none; max-height: 0; overflow: hidden; mso-hide: all;">
+  Your Volar sign-in code is {{ .Token }} — expires in 1 hour.
+</div>
+
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="#0B0D11" style="background-color: #0B0D11; margin: 0; padding: 32px 12px;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="480" cellpadding="0" cellspacing="0" border="0" style="width: 480px; max-width: 480px;">
+
+        <tr>
+          <td align="left" style="padding: 0 4px 18px 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.3px; color: #EAECEF;">
+            Volar<span style="color: #5B8DEF;">.</span>
+          </td>
+        </tr>
+
+        <tr>
+          <td bgcolor="#15181E" style="background-color: #15181E; border: 1px solid #232833; border-radius: 14px; padding: 28px;">
+            <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+
+              <tr>
+                <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 17px; font-weight: 600; color: #EAECEF; padding-bottom: 6px;">
+                  Welcome to Volar
+                </td>
+              </tr>
+              <tr>
+                <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 14px; line-height: 21px; color: #9BA3AE; padding-bottom: 22px;">
+                  Enter this code in Volar under <span style="color: #EAECEF;">Settings &rarr; Account</span> to finish signing in.
+                </td>
+              </tr>
+
+              <tr>
+                <td align="center" bgcolor="#0B0D11" style="background-color: #0B0D11; border: 1px solid #2A303B; border-radius: 10px; padding: 20px 12px;">
+                  <span style="font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Courier New', monospace; font-size: 30px; font-weight: 600; letter-spacing: 7px; color: #EAECEF;">{{ .Token }}</span>
+                </td>
+              </tr>
+
+              <tr>
+                <td style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 13px; line-height: 20px; color: #5D646E; padding-top: 18px;">
+                  The code expires in 1 hour and can be used once. If you didn't try to sign in, you can ignore this email &mdash; no account is created without the code.
+                </td>
+              </tr>
+
+            </table>
+          </td>
+        </tr>
+
+        <tr>
+          <td align="left" style="padding: 16px 4px 0 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 12px; line-height: 18px; color: #5D646E;">
+            Volar &mdash; voice-first task capture. Your tasks, reminders and capture never require an account; signing in only unlocks cloud parsing and cloud transcription.
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>
