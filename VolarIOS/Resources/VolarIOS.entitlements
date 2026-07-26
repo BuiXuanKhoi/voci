@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  plan.md §7.2. ONLY entitlement this target declares. Sign in with Apple, one of the two
+	  account entry points (alongside email OTP) — required for
+	  ASAuthorizationAppleIDProvider/ASAuthorizationController to work at all; without it the
+	  Apple sign-in sheet fails immediately. Same key as `Volar/Resources/Volar.entitlements`.
+	-->
+	<key>com.apple.developer.applesignin</key>
+	<array>
+		<string>Default</string>
+	</array>
+	<!--
+	  Deliberately NOT included above (do not add without re-reading plan.md §7.2 first):
+
+	  - com.apple.security.app-sandbox — a macOS-only concept. Every iOS app is sandboxed
+	    unconditionally by the OS; there is no opt-in key for it, and declaring the macOS sandbox
+	    key here is meaningless at best.
+	  - com.apple.security.network.client — a macOS App Sandbox entitlement gating outbound
+	    sockets. iOS apps get network access by default with no entitlement; this key does not
+	    exist in the iOS entitlement schema.
+	  - com.apple.security.device.audio-input — again a macOS App Sandbox key. On iOS, microphone
+	    access is governed entirely by NSMicrophoneUsageDescription (Info.plist) + the runtime TCC
+	    prompt; there is no separate iOS entitlement for it.
+	  - com.apple.security.files.user-selected.read-write /
+	    com.apple.security.files.bookmarks.app-scope — macOS App Sandbox keys for NSOpenPanel-
+	    scoped file access. iOS has no NSOpenPanel; the equivalent flow (PhotosPicker for the
+	    ambient background image, plan §6 Phase 1 A6) already runs inside the app sandbox's own
+	    container with no extra entitlement needed.
+
+	  Declaring any macOS-only entitlement key on an iOS target does not silently no-op — it is a
+	  common cause of codesign/upload failures (Xcode Organizer / App Store Connect rejecting the
+	  archive because the entitlement isn't recognized/permitted for the iOS platform), so the
+	  list above must stay exactly this short. See also KeychainStore.swift (Shared/Account/) — it
+	  must NOT gain a `kSecAttrAccessGroup` unless a `keychain-access-groups` entitlement is added
+	  alongside it (plan §7.2 R4); this file intentionally carries no keychain-access-groups entry
+	  because KeychainStore doesn't need one on iOS (single app, no shared keychain group).
+	-->
+</dict>
+</plist>

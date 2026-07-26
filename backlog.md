@@ -30,6 +30,113 @@
     - Tour chưa cover Settings/menu-bar — chỉ 4 stop trong cửa sổ chính (`TodayView`/`Sidebar`), chưa có bước nào dẫn vào Settings hay menu bar item.
     - Chưa có bản dịch tiếng Việt — toàn bộ copy tour là tiếng Anh (khớp UI hiện tại 100% English), chưa tính đến localize.
     - ✅ **Đối chiếu lại sau khi Agent B xong:** `Sources/Integrations/CalendarAccess.swift` đã landed, API khớp 100% với contract (`Status` 5 case, `status`/`calendarCount`/`lastError`, `requestAccess() async`/`refreshStatus()`/`openSystemSettings()`) — `TourOverlay.swift`/`AppState.swift` compile-by-inspection sạch với type thật, không còn là giả định.
+## ★ NHÁNH `ios` — Volar for iOS (feature 004, bắt đầu 2026-07-27)
+
+Worktree `C:\projects\voci-ios`, branch `ios`. Plan đầy đủ: `specs/004-ios-port/plan.md`.
+**Base: cắt từ `b2fc3d9`, sau đó fast-forward lên `3982cea` (2026-07-27, anh Khôi yêu cầu bắt kịp
+`origin/macos`)** — nên nhánh ios GIỜ ĐÃ CÓ CalendarSync/Tour/TaskSections + fix two-phase-init.
+Quyết định anh Khôi chốt 2026-07-27: scope **core-first**, **chưa sync** (để dành
+cho paid tier), tổ chức code = **tách lớp shared, chỉ làm trên nhánh ios, merge về `macos` sau khi
+bản Mac build xanh**.
+
+- [x] **iOS Phase 0 — dựng `Shared/` XONG 2026-07-27.** 40 file **COPY** (không move) từ
+  `Volar/Sources` sang `Shared/`; `#if` platform đã chèn ở 5 file; `VolarCore` mở `.iOS(.v17)`.
+  Verify: `Volar/` không bị đụng, `#if`/`#endif` cân bằng, đường macOS byte-identical. CHƯA build.
+- [ ] **🔴 LUẬT ĐANG HIỆU LỰC: `Volar/Sources` và `Shared/` là HAI BẢN SAO, cố ý.** anh Khôi chốt
+  2026-07-27: copy chứ không move, vì có 2 agent khác đang làm trên nhánh `ios` → move sẽ race.
+  macOS + Windows chạy `Volar/Sources` (cũ), iOS chạy `Shared/` (mới). **`Volar/project.yml` KHÔNG
+  được thêm `../Shared`** — thêm là duplicate symbol, build macOS đỏ ngay.
+  ⚠️ **Hệ quả phải nhớ mỗi lần sửa code:** fix bug ở một bên KHÔNG tự sang bên kia. 40 file đang
+  tồn tại hai bản. Mỗi lần đụng file có ở cả hai nơi phải hỏi: sửa cả hai hay chỉ một?
+  **Việc đóng lại:** khi `Shared/` chạy ổn, anh Khôi sẽ instruct riêng việc xoá bản cũ. **Chưa làm.**
+- [~] **iOS Phase 1 — 5/6 agent XONG 2026-07-27.** Đã có: `VolarIOS/project.yml`, Info.plist (+ key
+  calendar), entitlements, `PrivacyInfo.xcprivacy`, AppIcon Contents.json, `IOSMetrics.swift`,
+  `VolarIOSApp.swift`, `RootTabView.swift`, `TodayIOSView.swift`, `MobileTaskCard.swift`,
+  `CaptureSheet.swift`, `MicFAB.swift`, `SettingsIOSView.swift`. Hợp đồng `IOSMetrics` (18 thành
+  viên) khớp 100% giữa 4 agent — đã verify bằng script. **CHƯA build lần nào.**
+- [ ] **iOS Focus mode — HOÃN (anh Khôi chốt 2026-07-27: "iphone focus mode để sau đi").** Agent A5
+  đã bị dừng giữa chừng; `FocusIOSView.swift` và `AmbientCanvasIOS.swift` **không tồn tại**. Đã gỡ
+  `.fullScreenCover` trỏ tới `FocusIOSView()` khỏi `RootTabView.swift` (để nguyên là compile error
+  cứng). Hiện không view iOS nào set `appState.focusActive` nên không có state cụt. Khi làm lại:
+  khôi phục `.fullScreenCover(isPresented:)` bind `focusActive`, `set:` gọi `endFocus()`. Plan §2.3
+  còn nguyên phần thiết kế.
+- [ ] **iOS Phase 2** — `UpcomingIOSView` (đang là placeholder trong `RootTabView`),
+  `TaskDetailSheet`, `OnboardingIOSView` (gate hiện chỉ set cờ true), App Intents/Siri, tests.
+- [ ] **App icon iOS chưa có file PNG** — `AppIcon.appiconset/Contents.json` trỏ tới
+  `volar-icon-ios-1024.png` nhưng file chưa được render. Anh Khôi chạy `design/logo/render-appicon.mjs`
+  (Node) ra bản **full-bleed vuông**, KHÔNG dùng lại bộ macOS (bộ đó bake sẵn squircle + padding →
+  ra icon nhỏ nằm giữa ô trắng). (2026-07-27)
+
+- [ ] **🐞 HAI BUG THẬT TRONG `AppState` — ẢNH HƯỞNG CẢ BẢN MAC, phát hiện khi port Settings iOS
+  2026-07-27:**
+  - **(a) `glass` và `voiceFeedback` không được persist.** Khác với `accent`/`density`/`ambient` (có
+    setter ghi `UserDefaults`), hai property này là `var` trơn — đổi trong Settings thì thấy ngay
+    nhưng **mất sau khi khởi động lại app**. Bản Mac cũng vậy.
+  - **(b) `allowServerRecognition` là `private(set)` và KHÔNG CÓ ĐƯỜNG TẮT.** Cách duy nhất bật là
+    `useServerRecognition()`, mà hàm đó còn **gọi luôn `startCapture()`** — nên bật công tắc trong
+    Settings sẽ bất ngờ mở micro thu âm, và bật rồi thì không tắt lại được từ UI. Đây là vấn đề
+    quyền riêng tư có thể bị App Review soi (user đồng ý gửi giọng nói lên server của Apple mà không
+    rút lại được). Cần thêm setter tắt/bật thuần, tách khỏi việc bắt đầu capture.
+- [ ] **`PulsingDot` trong `CaptureSheet` (iOS) dùng `.repeatForever`** — giống hệt bản macOS
+  `PopoverView.PulsingDot`. `Theme.swift` cấm looping animation nhưng phạm vi lệnh cấm là view gắn
+  vào MenuBarExtra / motion lúc nghỉ; ở đây chấm chỉ tồn tại đúng lúc đang thu âm và bị gỡ ngay khi
+  đổi state. Ghi lại để lần QA trên máy thật soi xem có hao pin/giật không. (2026-07-27)
+
+- [ ] **iOS Phase 3 (Opus review + `docs/ios-verify-checklist.md`)** — xem `specs/004-ios-port/plan.md` §6.
+- [x] **~~R2 (iOS reminder chết vì Timer)~~ — ĐÃ KIỂM 2026-07-27, KHÔNG PHẢI VẤN ĐỀ.**
+  `ReminderScheduler` không dùng `Timer` để bắn reminder; mọi thứ là `UNNotificationRequest` +
+  `UNTimeIntervalNotificationTrigger` (dòng ~545) hoặc `trigger: nil` cho loại tức thì ⇒ hệ thống
+  bắn, chạy được cả khi app bị đóng trên iOS. Đã thêm observer
+  `UIApplication.didBecomeActiveNotification` → `rebuildFromStorage()` làm đường phục hồi
+  (tương đương wake trên Mac).
+- [ ] **⚠️ `systemRequestCap = 60` — giới hạn scale, có ở CẢ bản Mac (`ReminderScheduler.swift:41`).**
+  Chỉ 60 record `.scheduled` gần nhất được đăng ký với OS; nạp thêm chỉ xảy ra khi có mutation /
+  launch / wake (iOS: thêm foreground). User có >60 reminder đang chờ mà không mở app lại thì
+  reminder thứ 61 trở đi sẽ nổ **muộn** (rơi vào đường due-but-missed) thay vì đúng giờ. Không phải
+  bug mới của iOS, nhưng iOS dễ chạm hơn vì app hay bị hệ thống kill. (2026-07-27)
+- [ ] **`WhisperKitEngine` / `GroqEngine` có cùng lỗi hạng R1 trên iOS**: hai file này tự thu mic
+  bằng `AVAudioRecorder` nhưng **không kích hoạt `AVAudioSession`** → nếu user chọn engine đó trên
+  iPhone thì mic câm y như R1. Phase 0 chỉ sửa `SpeechCapture`/`VoicePlayback` theo đúng scope.
+  Rủi ro hiện thấp vì cả hai off mặc định trên iOS (plan §0.1 D), nhưng phải sửa trước khi bật
+  WhisperKit cho iOS. (2026-07-27)
+- [ ] **`VoicePlayback` không deactivate `AVAudioSession` sau khi đọc xong** — cần
+  `AVSpeechSynthesizerDelegate` để biết lúc nào xong; bỏ qua ở Phase 0 vì phải thêm state machine
+  mới. Hệ quả: nhạc/podcast của user có thể bị duck lâu hơn cần thiết sau khi Volar đọc xong.
+  (2026-07-27)
+- [ ] **🔴 MỐC CHẶN TRƯỚC KHI SHIP iOS: `VolarTask` có `@Attribute(.unique) var id`** + vài property
+  non-optional không default. CloudKit **cấm cả hai**, và **không sửa được sau khi đã có user thật**.
+  Phase 0 **cố ý KHÔNG sửa**: bỏ `.unique` mà không có compiler/test có thể đẻ task trùng — đổi một
+  bug nhìn thấy được lấy một lựa chọn chưa chắc dùng (sync là paid tier, chưa làm). **Phải quyết
+  trước khi bản iOS lên App Store**, không phải trước khi làm sync. (2026-07-27)
+- [ ] **iOS Phase 4 — MorningFrog / Triage / Sweep trên iOS**: hoãn, ngoài scope core-first anh Khôi
+  chốt 2026-07-27. Đây là mấy màn hình ADHD-differentiator nên sẽ cần làm trước khi bán bản iOS.
+- [ ] **iOS Phase 5 — "glance layer" (widget / Control Center / Live Activity)**: hoãn sau khi core
+  xanh trên máy thật. ⚠️ Cần **app group** + dời SwiftData container vào group container — **phải
+  làm TRƯỚC khi có người dùng thật**, để sau là migration đau. Đây là thứ thay thế menu bar
+  (constitution V glance-and-dismiss) nên không được quên. (2026-07-27)
+- [ ] **Sync Mac ↔ iPhone cho paid tier** — anh Khôi chốt "để sau, sẽ dùng cho paid tier". Ràng buộc
+  đã biết: SwiftData+CloudKit yêu cầu mọi property optional/có default và cấm `@Attribute(.unique)`,
+  **không sửa được sau khi đã có dữ liệu user**. Phase 0 của feature 004 rà `VolarTask.swift` và sửa
+  ngay lúc chưa ai dùng (plan §7.3). Chưa bật CloudKit, chưa thêm entitlement iCloud. (2026-07-27)
+- [ ] **Thiếu `PrivacyInfo.xcprivacy` — CẢ BẢN MAC LẪN iOS**: App Store từ chối upload nếu thiếu
+  privacy manifest khi app dùng required-reason API (`UserDefaults` = `CA92.1`, file timestamp).
+  Bản iOS tạo ở Phase 1/A1; **bản `macos` cũng phải thêm** — chưa có trong
+  `docs/app-store-submission-guide.md`. (2026-07-27)
+- [ ] **`ReminderScheduler` có thể không chạy được trên iOS**: iOS không chạy `Timer` ở background,
+  nên mọi reminder phải là `UNNotificationRequest` đặt trước, không phải timer trong process. Phase 2
+  của feature 004 phải đọc kỹ file này (plan §8 R2). Nếu bản Mac đang dựa vào timer thì cần thêm
+  nhánh iOS pre-schedule. (2026-07-27)
+- [ ] **WhisperKit trên iPhone**: mặc định iOS dùng `SFSpeechRecognizer` on-device thay vì WhisperKit
+  (RAM/nhiệt + tải model vài trăm MB). WhisperKit giữ trong picker nhưng off mặc định và chỉ tải qua
+  Wi-Fi do user chủ động bấm. Lệch với quyết định freemium bản Mac (free = WhisperKit) — cần anh Khôi
+  xác nhận lại khi làm monetization iOS. (2026-07-27)
+- [ ] **Bundle ID iOS = `tech.kioh.Volar.ios`, tách khỏi bản Mac.** Hệ quả: KHÔNG có universal
+  purchase (mua trên Mac không tự có trên iPhone). Cần quyết khi làm paid tier: gộp về một app App
+  Store Connect (universal) hay bán riêng. (2026-07-27)
+- [ ] **Merge `ios` → `macos` sau này**: Phase 0 **copy** (không move) ~40 file sang `Shared/`, nên
+  `macos` không thấy thay đổi gì ngoài `VolarCore/Package.swift`. Việc thật sự phải làm khi merge là
+  quyết xem `Volar/Sources` có chuyển sang dùng `Shared/` không — xem mục "LUẬT ĐANG HIỆU LỰC" ở
+  trên. Chỉ merge SAU khi bản Mac build xanh. (2026-07-27)
 
 - [ ] **★★ RETHEME "VOLAR TWILIGHT" 2026-07-26 — MAC CHƯA BUILD LẦN NÀO SAU KHI ĐỔI (anh Khôi chốt full Twilight):** `Volar/Sources/Design/Theme.swift` đổi toàn bộ giá trị token theo board `Volar Twilight.dc.html` (claude.ai/design, project "Voci voice command app design") — board này nay là source of truth cho palette/tone, thay bộ "Studio Dark / One Lit Thing". Tên token KHÔNG đổi nên mọi call site vẫn compile.
   - **Mapping:** NOW `#E8B25A` → **`#8FEDCB` bạc hà** (soft `#A9F5DA`, deep `#74DDB6` = đúng 2 stop gradient của logo mark); accent `.indigo` `#5B8DEF` → **`#86B9FF` xanh băng** (hover `#B3D2FF`); nền `#0B0D11/#15181E/#1B1F26` → **`#07090E/#0A101C/#101827`**; text → `#EDF2F9/#9AA7BC/#57637C`; `instrument`/`instrumentDim` → `#86B9FF`/`#3A4E75`.
