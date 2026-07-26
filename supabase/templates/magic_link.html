@@ -16,9 +16,16 @@
 
   Email-client constraints this markup is built around: table layout with bgcolor attributes (so
   Outlook's Word renderer keeps the dark panels), every style inlined (no <style> block survives
-  Gmail reliably), no external images (blocked by default in most clients, and a broken logo is
-  worse than none), no web fonts. Colors are Volar's own tokens — bg #0B0D11, surface #15181E,
-  textPri #EAECEF, textSec #9BA3AE, textMut #5D646E, indigo accent #5B8DEF (Theme.swift).
+  Gmail reliably), no SVG (stripped by Gmail/Outlook), no web fonts. Colors are Volar's own tokens —
+  bg #0B0D11, surface #15181E, textPri #EAECEF, textSec #9BA3AE, textMut #5D646E (Theme.swift).
+
+  LOGO: hosted PNG (Supabase Storage public bucket `brand`, uploaded from
+  assets/brand/volar-mark-mint-96.png, Cache-Control max-age=604800). It is served at 4x the
+  rendered 24x32 box so it stays crisp on retina. `alt=""` is deliberate, not an oversight: most
+  clients block remote images by default, and the "Volar." wordmark beside it already carries the
+  name — so a blocked image degrades to the wordmark alone rather than to alt text duplicating it.
+  Accent dot uses the logo kit's mint #A9F5DA, NOT the app's indigo #5B8DEF, so the dot cannot clash
+  with the mint mark it sits next to (see assets zip -> export-logo/README.txt).
 -->
 <div style="display: none; max-height: 0; overflow: hidden; mso-hide: all;">
   Your Volar sign-in code is {{ .Token }} — expires in 1 hour.
@@ -30,8 +37,17 @@
       <table role="presentation" width="480" cellpadding="0" cellspacing="0" border="0" style="width: 480px; max-width: 480px;">
 
         <tr>
-          <td align="left" style="padding: 0 4px 18px 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.3px; color: #EAECEF;">
-            Volar<span style="color: #5B8DEF;">.</span>
+          <td align="left" style="padding: 0 4px 18px 4px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td valign="middle" style="padding-right: 9px; line-height: 0; font-size: 0;">
+                  <img src="https://nuzrpipwacravfgsiacv.supabase.co/storage/v1/object/public/brand/volar-mark-mint-96.png" width="24" height="32" alt="" style="display: block; width: 24px; height: 32px; border: 0; outline: none; text-decoration: none;" />
+                </td>
+                <td valign="middle" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.3px; color: #EAECEF;">
+                  Volar<span style="color: #A9F5DA;">.</span>
+                </td>
+              </tr>
+            </table>
           </td>
         </tr>
 

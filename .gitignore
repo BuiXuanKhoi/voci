@@ -33,3 +33,9 @@ Package.resolved
 
 # Misc
 *.log
+
+# Supabase CLI link state (project ref + local temp), never committed
+supabase/.temp/
+
+# MSYS/Git-Bash crash dumps
+sh.exe.stackdump

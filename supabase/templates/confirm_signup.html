@@ -8,8 +8,9 @@
   THIS template, not "Magic Link". Editing only the Magic Link template leaves every first-ever
   sign-in receiving a link instead of a code — i.e. the exact flow a new user hits first.
 
-  Same {{ .Token }} requirement, same manual-paste caveat, and same email-client constraints as
-  magic_link.html — see that file's header for the reasoning behind the table/inline-style markup.
+  Same {{ .Token }} requirement, same manual-paste caveat, same hosted-logo/alt="" reasoning, and
+  same email-client constraints as magic_link.html — see that file's header for the full rationale
+  behind the table/inline-style markup and the mint-vs-indigo accent choice.
 -->
 <div style="display: none; max-height: 0; overflow: hidden; mso-hide: all;">
   Your Volar sign-in code is {{ .Token }} — expires in 1 hour.
@@ -21,8 +22,17 @@
       <table role="presentation" width="480" cellpadding="0" cellspacing="0" border="0" style="width: 480px; max-width: 480px;">
 
         <tr>
-          <td align="left" style="padding: 0 4px 18px 4px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.3px; color: #EAECEF;">
-            Volar<span style="color: #5B8DEF;">.</span>
+          <td align="left" style="padding: 0 4px 18px 4px;">
+            <table role="presentation" cellpadding="0" cellspacing="0" border="0">
+              <tr>
+                <td valign="middle" style="padding-right: 9px; line-height: 0; font-size: 0;">
+                  <img src="https://nuzrpipwacravfgsiacv.supabase.co/storage/v1/object/public/brand/volar-mark-mint-96.png" width="24" height="32" alt="" style="display: block; width: 24px; height: 32px; border: 0; outline: none; text-decoration: none;" />
+                </td>
+                <td valign="middle" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; font-size: 15px; font-weight: 600; letter-spacing: 0.3px; color: #EAECEF;">
+                  Volar<span style="color: #A9F5DA;">.</span>
+                </td>
+              </tr>
+            </table>
           </td>
         </tr>
 
