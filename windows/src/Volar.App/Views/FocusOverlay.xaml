@@ -29,7 +29,7 @@
     <Grid>
         <!-- Heavy dark glass backdrop — FocusOverlay.swift:56-60: `.ultraThinMaterial` overlaid with
              `Color(red: 9/255, green: 10/255, blue: 15/255).opacity(0.78)`, a hand-computed
-             near-duplicate of VolarBg (#0B0D11) the inventory flags as literal-vs-token drift
+             near-duplicate of the pre-Twilight VolarBg the inventory flags as literal-vs-token drift
              (views-inventory.md §1.12 point 4) — reconciled here to the real VolarGlassHeavyBrush
              (VolarBg-tinted AcrylicBrush, Glass.xaml) rather than reproducing the drift. -->
         <Border Background="{StaticResource VolarGlassHeavyBrush}" />

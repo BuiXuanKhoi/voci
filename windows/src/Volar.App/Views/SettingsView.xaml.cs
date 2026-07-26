@@ -950,42 +950,50 @@ public sealed partial class SettingsView : UserControl
         var appResources = Application.Current.Resources;
         var stack = new StackPanel { Spacing = 14, HorizontalAlignment = HorizontalAlignment.Center };
 
-        // GradientStop is a bare DependencyObject (not a FrameworkElement), so the binding is set
-        // via the static Microsoft.UI.Xaml.Data.BindingOperations.SetBinding(...) — the same seam
-        // KeyBadge.xaml uses declaratively ({Binding Color, Source={StaticResource ...}}) for its
-        // own live-updating accent stroke brush — so this tile's gradient tracks ThemeState.SetAccent
-        // in place too, exactly like every other accent-tinted surface in this port.
-        var gradient = new LinearGradientBrush { StartPoint = new Windows.Foundation.Point(0, 0), EndPoint = new Windows.Foundation.Point(1, 1) };
-        var solidStop = new GradientStop { Offset = 0 };
-        Microsoft.UI.Xaml.Data.BindingOperations.SetBinding(
-            solidStop, GradientStop.ColorProperty,
-            new Microsoft.UI.Xaml.Data.Binding { Source = appResources["AccentSolidBrush"], Path = new PropertyPath("Color") });
-        var hoverStop = new GradientStop { Offset = 1 };
-        Microsoft.UI.Xaml.Data.BindingOperations.SetBinding(
-            hoverStop, GradientStop.ColorProperty,
-            new Microsoft.UI.Xaml.Data.Binding { Source = appResources["AccentHoverBrush"], Path = new PropertyPath("Color") });
-        gradient.GradientStops.Add(solidStop);
-        gradient.GradientStops.Add(hoverStop);
-
-        var tile = new Border
+        // The real app icon replaces this port's stand-in tile (an accent gradient with a mic
+        // glyph). The mark IS the squircle — night-blue ground, mint cone, lit dot — so it replaces
+        // both layers rather than sitting inside them, and the accent-gradient binding that used to
+        // paint the tile is gone with it: it tracked ThemeState.SetAccent, which the brand mark must
+        // NOT do (the icon is fixed identity, not a themeable surface).
+        var tile = new Image
         {
             Width = 64,
             Height = 64,
-            CornerRadius = new CornerRadius(16), // one-off literal, SettingsView.swift:712.
-            Background = gradient,
             HorizontalAlignment = HorizontalAlignment.Center,
-            Child = new Controls.VolarIcon { IconName = Controls.VolarIconName.Mic, IconSize = 32, IconBrush = new SolidColorBrush(Microsoft.UI.Colors.White) },
+            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri("ms-appx:///Assets/volar-app-icon-128.png")),
         };
         stack.Children.Add(tile);
 
-        stack.Children.Add(new TextBlock
+        // Wordmark image + version, instead of the app name set in the UI font: the wordmark is
+        // Bricolage Grotesque 600 with -0.03em tracking and a mint dot inside the "o" (design zip ->
+        // export-wordmark/README.txt), none of which the system font stack can reproduce — and the
+        // font is not bundled in this app (deferred, see backlog.md), so the raster IS the only
+        // faithful way to render it today. AppDisplayName still drives the version row's accessible
+        // name so screen readers keep hearing the product name.
+        var nameRow = new StackPanel
         {
-            Text = $"{SettingsViewModel.AppDisplayName} {SettingsViewModel.AppVersion}",
-            FontSize = 22,
-            FontWeight = FontWeights.Medium,
-            Foreground = (Brush)appResources["VolarTextPriBrush"],
+            Orientation = Orientation.Horizontal,
+            Spacing = 10,
             HorizontalAlignment = HorizontalAlignment.Center,
+        };
+        nameRow.Children.Add(new Image
+        {
+            Height = 22,
+            Stretch = Microsoft.UI.Xaml.Media.Stretch.Uniform,
+            VerticalAlignment = VerticalAlignment.Center,
+            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri("ms-appx:///Assets/volar-wordmark.png")),
         });
+        nameRow.Children.Add(new TextBlock
+        {
+            Text = SettingsViewModel.AppVersion,
+            FontSize = 17,
+            FontWeight = FontWeights.Medium,
+            Foreground = (Brush)appResources["VolarTextSecBrush"],
+            VerticalAlignment = VerticalAlignment.Center,
+        });
+        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(
+            nameRow, $"{SettingsViewModel.AppDisplayName} {SettingsViewModel.AppVersion}");
+        stack.Children.Add(nameRow);
         stack.Children.Add(new TextBlock
         {
             Text = SettingsViewModel.AppTagline,

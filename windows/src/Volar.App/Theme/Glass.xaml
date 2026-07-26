@@ -26,7 +26,7 @@
 
     <!-- ============================================================
          Per-control glass/acrylic brushes (GlassBackground equivalents).
-         TintColor = VolarBg (#0B0D11). TintOpacity = GlassLevel.bgOpacity for that level.
+         TintColor = VolarBg (#07090E). TintOpacity = GlassLevel.bgOpacity for that level.
          FallbackColor = VolarSurface, used when the OS disables transparency effects.
          ============================================================ -->
 
@@ -99,14 +99,14 @@
          happens to be square-ish and sized so its edge roughly lines up with 320pt; visually close
          enough for a vignette (a soft, low-frequency gradient) that exact pixel radii don't matter.
 
-         VolarColor.bg (#0B0D11) @0.45 -> alpha = round(0.45*255) = 114.75 -> 115 = 0x73 -> #730B0D11.
+         VolarColor.bg (#07090E) @0.45 -> alpha = round(0.45*255) = 114.75 -> 115 = 0x73 -> #7307090E.
          No pre-existing named color for this exact alpha exists in Colors.xaml (bg's other alpha
          variants are all accent/priority tokens, not this one), so it's inlined here rather than
          inventing a new Colors.xaml key used nowhere else — same "component-local one-off" pattern
          Components.swift's own inline `Color.white.opacity(...)` literals already establish. -->
     <RadialGradientBrush x:Key="NowSpotlightVignetteBrush" Center="0.5,0.32" RadiusX="1" RadiusY="1">
         <GradientStop Offset="0.4375" Color="Transparent" />
-        <GradientStop Offset="1.0" Color="#730B0D11" />
+        <GradientStop Offset="1.0" Color="#7307090E" />
     </RadialGradientBrush>
 
 </ResourceDictionary>

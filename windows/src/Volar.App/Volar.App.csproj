@@ -46,6 +46,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Brand raster assets consumed at runtime through ms-appx:///Assets/... (About tile,
+         onboarding hero). This project is UNPACKAGED (WindowsPackageType=None), so nothing copies
+         Assets\ implicitly the way the MSIX templates do — without this the images resolve to
+         nothing at runtime and the tiles render empty. Volar.ico is deliberately NOT here: it is
+         compiled into the exe via <ApplicationIcon> above, not loaded from disk. -->
+    <Content Include="Assets\*.png" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\Volar.Core\Volar.Core.csproj" />
     <ProjectReference Include="..\Volar.Domain\Volar.Domain.csproj" />
     <ProjectReference Include="..\Volar.Data\Volar.Data.csproj" />

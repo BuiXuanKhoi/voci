@@ -6,27 +6,25 @@
   Opacity -> alpha conversion: surface alpha = round(0.15*255) = 38.25 -> 38 = 0x26;
   glow alpha = round(0.45*255) = 114.75 -> 115 = 0x73.
 
-  Default app-wide accent = INDIGO, which resolves to the cool instrument blue #5B8DEF
-  (VolarColor.instrument / `cool (CSS var)`) per Theme.swift's header note: the app-wide accent is
-  cool, NOT the warm NOW amber (`nowAccent` family in Colors.xaml) — that family is reserved
-  exclusively for the single active/NOW task spotlight. `.amber` here (the 4th selectable
-  accent family, #D9853D copper/burnt-orange) is intentionally a DIFFERENT hex from
-  VolarNowAccent (#E8B25A honey-gold) so a user who opts into it never produces a second
-  "amber thing" that competes with the NOW spotlight.
+  Default app-wide accent = INDIGO — a name kept only because it is persisted by rawValue; since
+  the Twilight retheme it resolves to the ice blue #86B9FF (VolarColor.instrument / `cool`), per
+  Theme.swift's header note: the app-wide accent must never be the reserved mint NOW family
+  (`nowAccent` in Colors.xaml). `.teal` (#3DBFAF) is now the family that sits closest to that
+  reserved mint; it is left as-is deliberately (opt-in, off by default) and tracked in backlog.md.
 -->
 <ResourceDictionary
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
 
     <!-- ============================================================
-         Indigo — cool instrument blue (cool (CSS var)). App-wide default accent.
+         Indigo (legacy key name) — ice-blue instrument accent. App-wide default.
          ============================================================ -->
-    <Color x:Key="VolarIndigoSolid">#5B8DEF</Color>
-    <Color x:Key="VolarIndigoHover">#7FA5F5</Color>
+    <Color x:Key="VolarIndigoSolid">#86B9FF</Color>
+    <Color x:Key="VolarIndigoHover">#B3D2FF</Color>
     <!-- #5B8DEF @0.15 -> alpha 0x26 -->
-    <Color x:Key="VolarIndigoSurface">#265B8DEF</Color>
+    <Color x:Key="VolarIndigoSurface">#2686B9FF</Color>
     <!-- #5B8DEF @0.45 -> alpha 0x73 -->
-    <Color x:Key="VolarIndigoGlow">#735B8DEF</Color>
+    <Color x:Key="VolarIndigoGlow">#7386B9FF</Color>
 
     <SolidColorBrush x:Key="VolarIndigoSolidBrush" Color="{StaticResource VolarIndigoSolid}" />
     <SolidColorBrush x:Key="VolarIndigoHoverBrush" Color="{StaticResource VolarIndigoHover}" />

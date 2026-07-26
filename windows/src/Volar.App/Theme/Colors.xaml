@@ -1,11 +1,14 @@
 <!--
-  Colors.xaml — Studio Dark base palette, ported 1:1 by hex value from
-  Volar/Sources/Design/Theme.swift `enum VolarColor` (2026-07 "Studio Dark / One Lit Thing"
-  retheme). DO NOT pull values from design/tokens.jsx — that file is a stale older palette
+  Colors.xaml — "Volar Twilight" base palette, ported 1:1 by hex value from
+  Volar/Sources/Design/Theme.swift `enum VolarColor` (2026-07-26 Twilight retheme, which supersedes
+  the earlier Studio Dark values; see that file's header for why the key light moved to mint). DO NOT pull values from design/tokens.jsx — that file is a stale older palette
   Theme.swift explicitly superseded (bg #1C1C1E, red #FF6B6B). Theme.swift wins on every conflict.
 
   Opacity -> ARGB alpha conversion used throughout this port: alpha = round(opacity * 255),
-  written as a 2-digit hex prefix on the RRGGBB tuple (e.g. white @0.04 -> 0x0A -> #0AFFFFFF).
+  written as a 2-digit hex prefix on the RRGGBB tuple (e.g. #94B2E0 @0.10 -> 0x1A -> #1A94B2E0).
+  Translucent ink tokens tint with the cool blue #94B2E0, not white: Twilight draws hairlines as
+  rgba(148,178,224,...), and a white veil over night-blue ink is exactly what made edges read as
+  bright white lines.
   See the per-token comments below for the exact math on each translucent token.
 
   Key naming mirrors the Swift names 1:1: VolarColor.bg -> VolarBg, VolarColor.textPri ->
@@ -19,40 +22,41 @@
          Ink / depth (foundations.html §01 "Color") — VolarColor.bg/surface/surfaceHi/card/border
          ============================================================ -->
 
-    <!-- ink-0 — base bg, deepest. -->
-    <Color x:Key="VolarBg">#0B0D11</Color>
+    <!-- ink-0 — base bg, deepest (Twilight page ground). -->
+    <Color x:Key="VolarBg">#07090E</Color>
     <!-- surface-1 — raised surface, one step up from bg. -->
-    <Color x:Key="VolarSurface">#15181E</Color>
+    <Color x:Key="VolarSurface">#0A101C</Color>
     <!-- surface-2 — raised surface, higher. -->
-    <Color x:Key="VolarSurfaceHi">#1B1F26</Color>
+    <Color x:Key="VolarSurfaceHi">#101827</Color>
 
-    <!-- Color.white.opacity(0.04) -> alpha = round(0.04*255) = 10.2 -> 10 = 0x0A -->
-    <Color x:Key="VolarCard">#0AFFFFFF</Color>
-    <!-- Color.white.opacity(0.07) -> alpha = round(0.07*255) = 17.85 -> 18 = 0x12 -->
-    <Color x:Key="VolarCardHover">#12FFFFFF</Color>
-    <!-- hairline (CSS var): Color.white.opacity(0.07) -> alpha = 0x12 (same math as cardHover) -->
-    <Color x:Key="VolarBorder">#12FFFFFF</Color>
-    <!-- hairline-strong (CSS var): Color.white.opacity(0.11) -> alpha = round(0.11*255) = 28.05 -> 28 = 0x1C -->
-    <Color x:Key="VolarBorderHi">#1CFFFFFF</Color>
+    <!-- #94B2E0 @0.05 -> alpha = round(0.05*255) = 12.75 -> 13 = 0x0D -->
+    <Color x:Key="VolarCard">#0D94B2E0</Color>
+    <!-- #94B2E0 @0.08 -> alpha = round(0.08*255) = 20.4 -> 20 = 0x14 -->
+    <Color x:Key="VolarCardHover">#1494B2E0</Color>
+    <!-- hairline: #94B2E0 @0.10 -> alpha = round(0.10*255) = 25.5 -> 26 = 0x1A. THIS is the app's
+         window/divider edge colour — cool blue, never white. -->
+    <Color x:Key="VolarBorder">#1A94B2E0</Color>
+    <!-- hairline-strong: #94B2E0 @0.18 -> alpha = round(0.18*255) = 45.9 -> 46 = 0x2E -->
+    <Color x:Key="VolarBorderHi">#2E94B2E0</Color>
 
     <!-- ============================================================
          Text (foundations.html tx-1/2/3) — VolarColor.textPri/textSec/textMut
          ============================================================ -->
 
-    <!-- tx-1 primary. Contrast vs bg ~15.6:1 (WCAG AAA body text). -->
-    <Color x:Key="VolarTextPri">#EAECEF</Color>
-    <!-- tx-2 secondary. Contrast vs bg ~7.6:1 (WCAG AA/AAA body text). -->
-    <Color x:Key="VolarTextSec">#9BA3AE</Color>
+    <!-- tx-1 primary. Contrast vs bg ~16.9:1 (WCAG AAA body text). -->
+    <Color x:Key="VolarTextPri">#EDF2F9</Color>
+    <!-- tx-2 secondary. Contrast vs bg ~7.9:1 (WCAG AA/AAA body text). -->
+    <Color x:Key="VolarTextSec">#9AA7BC</Color>
     <!-- tx-3 tertiary/muted. Contrast vs bg ~3.3:1 — below body-text AA on purpose; tertiary/
          de-emphasized labels only, never body copy. -->
-    <Color x:Key="VolarTextMut">#5D646E</Color>
+    <Color x:Key="VolarTextMut">#57637C</Color>
 
     <!-- ============================================================
-         Priority / status dots & badges. No red for status (anti-shame rule) and no amber
-         (amber is reserved exclusively for the NOW spotlight family below).
+         Priority / status dots & badges. No red for status (anti-shame rule) and nothing green
+         (mint is reserved exclusively for the NOW spotlight family below).
          ============================================================ -->
 
-    <!-- High priority — muted clay/terracotta, deliberately not the signature amber. -->
+    <!-- High priority — muted clay/terracotta, deliberately not alarm red. -->
     <Color x:Key="VolarHigh">#B9705A</Color>
     <!-- Medium priority — muted warm taupe. -->
     <Color x:Key="VolarMed">#9C8C6B</Color>
@@ -64,33 +68,33 @@
     <Color x:Key="VolarDone">#7FA88C</Color>
 
     <!-- ============================================================
-         NEW: NOW / spotlight tokens (foundations.html §01, §03; menubar-now.html).
-         THE ONE RULE: this warm amber family is a spotlight for the single active/NOW task —
-         never the app-wide accent. See Accents.xaml for the cool default accent (indigo).
+         NOW / spotlight tokens. THE ONE RULE: this mint family — the same mint as the lit dot in
+         the logo mark — is a spotlight for the single active/NOW task, never the app-wide accent
+         ("bạc hà = NOW duy nhất"). See Accents.xaml for the ice-blue default accent.
          ============================================================ -->
 
-    <!-- amber (CSS var) — THE key light. -->
-    <Color x:Key="VolarNowAccent">#E8B25A</Color>
-    <!-- amber-soft — lighter warm, NOW title text / primary-button gradient top. -->
-    <Color x:Key="VolarNowAccentSoft">#F0C67E</Color>
-    <!-- amber-deep — darker warm, gradient bottom / pressed states. -->
-    <Color x:Key="VolarNowAccentDeep">#B9832F</Color>
-    <!-- amber-glow: 0xE8B25A @0.20 -> alpha = round(0.20*255) = 51 = 0x33 -->
-    <Color x:Key="VolarNowGlow">#33E8B25A</Color>
-    <!-- amber-glow-soft: 0xE8B25A @0.10 -> alpha = round(0.10*255) = 25.5 -> 26 = 0x1A -->
-    <Color x:Key="VolarNowGlowSoft">#1AE8B25A</Color>
-    <!-- amber-ring: 0xE8B25A @0.55 -> alpha = round(0.55*255) = 140.25 -> 140 = 0x8C -->
-    <Color x:Key="VolarNowRing">#8CE8B25A</Color>
+    <!-- mint — THE key light, same hue as the logo mark's lit dot. -->
+    <Color x:Key="VolarNowAccent">#8FEDCB</Color>
+    <!-- mint-soft — NOW title text / primary-button gradient top (logo gradient top stop). -->
+    <Color x:Key="VolarNowAccentSoft">#A9F5DA</Color>
+    <!-- mint-deep — gradient bottom / pressed states (logo gradient bottom stop). -->
+    <Color x:Key="VolarNowAccentDeep">#74DDB6</Color>
+    <!-- mint-glow: 0x8FEDCB @0.20 -> alpha = round(0.20*255) = 51 = 0x33 -->
+    <Color x:Key="VolarNowGlow">#338FEDCB</Color>
+    <!-- mint-glow-soft: 0x8FEDCB @0.10 -> alpha = round(0.10*255) = 25.5 -> 26 = 0x1A -->
+    <Color x:Key="VolarNowGlowSoft">#1A8FEDCB</Color>
+    <!-- mint-ring: 0x8FEDCB @0.55 -> alpha = round(0.55*255) = 140.25 -> 140 = 0x8C -->
+    <Color x:Key="VolarNowRing">#8C8FEDCB</Color>
 
     <!-- ============================================================
          NEW: instrument tokens (foundations.html §05 "Instrument readouts") — informational only,
          sparing: WIP counter, timers, links, dependency dots. Never the NOW spotlight.
          ============================================================ -->
 
-    <!-- cool (CSS var) — cool instrument accent. -->
-    <Color x:Key="VolarInstrument">#5B8DEF</Color>
-    <!-- cool-dim — dimmed cool, dashed dependency chips / secondary instrument marks. -->
-    <Color x:Key="VolarInstrumentDim">#40557F</Color>
+    <!-- cool — ice-blue instrument accent ("xanh băng = thông tin"). -->
+    <Color x:Key="VolarInstrument">#86B9FF</Color>
+    <!-- cool-dim — dimmed ice blue, dashed dependency chips / secondary instrument marks. -->
+    <Color x:Key="VolarInstrumentDim">#3A4E75</Color>
 
     <!-- reschedule (CSS var) — calm neutral "needs rescheduling" tone used INSTEAD of red for overdue
          (anti-shame rule). -->

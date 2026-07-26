@@ -208,11 +208,11 @@ public sealed class TrayIconService : IDisposable
 
     /// <summary>Builds the 3 state icons once. GDI-drawn simple glyph variants, per this task's
     /// brief ("dot/red dot/ring"): idle = a small muted-grey dot (Colors.xaml <c>VolarTextSec</c>
-    /// #9BA3AE), listening = a small solid red dot (a plain "recording" convention — deliberately
+    /// #9AA7BC), listening = a small solid red dot (a plain "recording" convention — deliberately
     /// NOT drawn from the app's anti-shame no-red-for-status palette rule, since a tray REC glyph is
     /// an activity indicator under normal OS iconography conventions, not an in-app task-status
-    /// color; flagged in this task's final report), focus-lock = a ring in the reserved warm NOW
-    /// spotlight tone (Colors.xaml <c>VolarNowAccent</c> #E8B25A — mirrors MenuBarLabel.swift's own
+    /// color; flagged in this task's final report), focus-lock = a ring in the reserved mint NOW
+    /// spotlight tone (Colors.xaml <c>VolarNowAccent</c> #8FEDCB — mirrors MenuBarLabel.swift's own
     /// choice to badge focus-lock with the NOW-spotlight family, MenuBarLabel.swift:103-113).
     /// Falls back to <c>LoadIcon(0, IDI_APPLICATION)</c> per-state if generation fails for any
     /// reason (never let a tray icon glyph failure take down the tray).</summary>
@@ -222,9 +222,9 @@ public sealed class TrayIconService : IDisposable
         {
             return;
         }
-        _iconIdle = CreateDotIcon(0x9BA3AE, ringOnly: false);
+        _iconIdle = CreateDotIcon(0x9AA7BC, ringOnly: false);
         _iconListening = CreateDotIcon(0xE0524F, ringOnly: false);
-        _iconFocus = CreateDotIcon(0xE8B25A, ringOnly: true);
+        _iconFocus = CreateDotIcon(0x8FEDCB, ringOnly: true);
     }
 
     private static nint CreateDotIcon(uint rgb, bool ringOnly)

@@ -67,6 +67,10 @@ public sealed partial class MainWindow : Window
         _appWindow.Resize(new Windows.Graphics.SizeInt32(MinWidth, MinHeight));
         _appWindow.Closing += OnAppWindowClosing;
 
+        // The caption bar and window border are drawn by DWM, not XAML — see WindowChrome for why
+        // they need an explicit call and are otherwise a white hairline around a night-blue app.
+        Volar.App.Theme.WindowChrome.Apply(hWnd);
+
         ComposeShell();
     }
 

@@ -237,15 +237,16 @@ public sealed partial class OnboardingView : UserControl
     {
         var stack = new StackPanel();
 
-        stack.Children.Add(new Border
+        // First thing a new user ever sees, so it is the app icon itself rather than the
+        // accent-gradient + mic stand-in. The mic tile is kept on the PERMISSION step below, where
+        // the glyph is semantic (it is telling you what is being asked for), not decorative.
+        stack.Children.Add(new Image
         {
             Width = 84,
             Height = 84,
-            CornerRadius = new CornerRadius(22), // one-off literal, OnboardingView.swift:101.
-            Background = BuildAccentGradientBrush(),
             Margin = new Thickness(0, 0, 0, 28),
             HorizontalAlignment = HorizontalAlignment.Left,
-            Child = new Controls.VolarIcon { IconName = Controls.VolarIconName.Mic, IconSize = 42, IconBrush = new SolidColorBrush(Microsoft.UI.Colors.White) },
+            Source = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage(new Uri("ms-appx:///Assets/volar-app-icon-128.png")),
         });
 
         var pressRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Margin = new Thickness(0, 0, 0, 2) };
