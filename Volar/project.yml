@@ -52,10 +52,22 @@ targets:
           # (INFOPLIST_FILE / `entitlements:`).
           - Assets.xcassets
       - path: Resources/Assets.xcassets
-    entitlements:
-      path: Resources/Volar.entitlements
+    # NOTE: there is deliberately no `entitlements:` key here. XcodeGen's `entitlements:` is a
+    # GENERATOR — it writes the file at `path` from the `properties:` map underneath it. Declared
+    # with a `path` but no `properties` (as it was until 2026-07-27), every `xcodegen generate`
+    # overwrote the hand-written Resources/Volar.entitlements with an empty plist, silently
+    # stripping all six entitlements. Losing `com.apple.security.device.audio-input` that way is
+    # near-undiagnosable from the app side: App Sandbox denies the microphone BELOW the TCC layer,
+    # so macOS never shows a permission prompt at all and `AVCaptureDevice.requestAccess` just
+    # returns false — while System Settings still lists the app as allowed, and the Speech
+    # Recognition prompt (which needs no sandbox entitlement) keeps working normally.
+    #
+    # Pointing CODE_SIGN_ENTITLEMENTS straight at the file instead uses it verbatim and never
+    # rewrites it. If a new entitlement is ever needed, edit Resources/Volar.entitlements by hand —
+    # do NOT reintroduce the `entitlements:` key.
     settings:
       base:
+        CODE_SIGN_ENTITLEMENTS: Resources/Volar.entitlements
         INFOPLIST_FILE: Resources/Info.plist
         PRODUCT_BUNDLE_IDENTIFIER: tech.kioh.Volar
         PRODUCT_NAME: Volar
