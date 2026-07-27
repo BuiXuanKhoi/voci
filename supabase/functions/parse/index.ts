@@ -24,11 +24,31 @@
 //   upstream
 //
 // Privacy: this file must never log transcript/title/notes body text, access tokens, or a raw user
-// id — only sizes/counts/status/latency and a HASH of user_id, via ../_shared/log.ts +
-// ../_shared/auth.ts's `hashUserId` (see that module's doc comment for why it's the only logger).
+// id in the default configuration — only sizes/counts/status/latency and a HASH of user_id, via
+// ../_shared/log.ts + ../_shared/auth.ts's `hashUserId` (see that module's doc comment for why it's
+// the only logger). The ONE opt-in exception is `LOG_VERBOSE_BODIES=1` (see ../_shared/log.ts's
+// module doc comment) — MUST stay off in production.
+//
+// Logging: every request gets a `reqId` (../_shared/log.ts's `newRequestId`), logged immediately in
+// the top-level `Deno.serve` handler via `logRequestStart` (point 1 of 3, before any method/
+// content-type/auth check), threaded through every log call in this file plus every `_shared/`
+// helper that logs on this request's behalf (`verifyAccount`, `createServiceRoleClient`,
+// `callGemini`), wrapped around the Gemini call inside ../_shared/gemini.ts via
+// `logUpstreamRequest`/`logUpstreamResponse` (point 2), and guaranteed on every return path via the
+// local `finish()` closure, which calls `logRequestEnd` (point 3) exactly once per request.
 
 import { requireEnv, readEnvInt } from "../_shared/env.ts";
-import { logEvent, logError } from "../_shared/log.ts";
+import {
+  errorDetails,
+  logEvent,
+  logError,
+  logRequestEnd,
+  logRequestStart,
+  newRequestId,
+  truncateForLog,
+  verboseBodiesEnabled,
+  type LogFields,
+} from "../_shared/log.ts";
 import { BodyTooLargeError, errorResponse, jsonResponse, readBodyCapped } from "../_shared/http.ts";
 import { createServiceRoleClient, hashUserId, verifyAccount } from "../_shared/auth.ts";
 import { consumeQuota, parseLimitFor } from "../_shared/quota.ts";
@@ -56,51 +76,65 @@ import {
 
 Deno.serve(async (req) => {
   const startedAt = performance.now();
+  const reqId = newRequestId();
+  // Logged as the very first thing, before any method/content-type/auth check, so an early-rejected
+  // request still leaves a trace (see ../_shared/log.ts's `logRequestStart` doc comment).
+  logRequestStart(req, reqId);
 
   try {
-    return await handle(req, startedAt);
+    return await handle(req, startedAt, reqId);
   } catch (err) {
     // Last-resort net: nothing above should throw uncaught, but if it does, never leak the
     // exception message to the client (opaque hardening requirement) and never let an unhandled
     // rejection crash the isolate without a response.
-    logError("parse_unhandled_error", {
-      message: err instanceof Error ? err.name : "unknown",
-      latencyMs: Math.round(performance.now() - startedAt),
-    });
-    return errorResponse(503, "service_unavailable");
+    logError("parse_unhandled_error", { reqId, ...errorDetails(err) });
+    const res = errorResponse(503, "service_unavailable");
+    logRequestEnd(res.status, performance.now() - startedAt, { reqId, reason: "unhandled_exception" });
+    return res;
   }
 });
 
-async function handle(req: Request, startedAt: number): Promise<Response> {
+async function handle(req: Request, startedAt: number, reqId: string): Promise<Response> {
+  // Every return path in this function goes through `finish` so `logRequestEnd` (point 3 of the 3
+  // required log points) fires exactly once, no matter which branch returns — including the early
+  // method/content-type rejections and validation failures that used to return with no log at all.
+  const finish = (res: Response, fields: LogFields = {}): Response => {
+    logRequestEnd(res.status, performance.now() - startedAt, { reqId, ...fields });
+    return res;
+  };
+
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: { allow: "POST, OPTIONS" } });
+    return finish(new Response(null, { status: 204, headers: { allow: "POST, OPTIONS" } }), {
+      reason: "cors_preflight",
+    });
   }
   if (req.method !== "POST") {
-    return errorResponse(405, "invalid_request");
+    return finish(errorResponse(405, "invalid_request"), { reason: "wrong_method" });
   }
 
   const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
   if (!contentType.startsWith("application/json")) {
-    return errorResponse(415, "invalid_request");
+    return finish(errorResponse(415, "invalid_request"), { reason: "wrong_content_type" });
   }
 
   // --- AUTH first (contract §4 fix — body is read/validated further down, AFTER auth+quota). ---
-  const authResult = await verifyAccount(req);
+  const authResult = await verifyAccount(req, reqId);
   if (!authResult.ok) {
     logEvent("parse_auth_rejected", {
+      reqId,
       status: authResult.response.status,
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return authResult.response;
+    return finish(authResult.response, { reason: "auth_rejected" });
   }
   const userIdHash = await hashUserId(authResult.userId);
 
   // --- Tier: both free and pro may call /parse; only the daily limit differs. ---
   const limit = parseLimitFor(authResult.tier);
 
-  const supabase = createServiceRoleClient();
+  const supabase = createServiceRoleClient(reqId);
   if (!supabase) {
-    return errorResponse(503, "service_unavailable");
+    return finish(errorResponse(503, "service_unavailable"), { reason: "service_role_client_unavailable" });
   }
 
   const now = new Date();
@@ -110,21 +144,25 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     quotaUsed = check.used;
     if (!check.allowed) {
       logEvent("parse_request", {
+        reqId,
         userIdHash,
         tier: authResult.tier,
         status: 429,
         quotaUsed: check.used,
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return jsonResponse(429, { error: "quota_exceeded", resetAt: check.resetAt });
+      return finish(jsonResponse(429, { error: "quota_exceeded", resetAt: check.resetAt }), {
+        reason: "quota_exceeded",
+      });
     }
   } catch (err) {
     logError("parse_quota_failure", {
+      reqId,
       userIdHash,
-      message: err instanceof Error ? err.message : "unknown",
+      ...errorDetails(err),
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return errorResponse(503, "service_unavailable");
+    return finish(errorResponse(503, "service_unavailable"), { reason: "quota_check_exception" });
   }
 
   // --- Read & validate body only AFTER auth + quota have both passed. ---
@@ -132,27 +170,51 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   try {
     rawBody = await readBodyCapped(req, MAX_BODY_BYTES);
   } catch (err) {
-    if (err instanceof BodyTooLargeError) return errorResponse(413, "payload_too_large");
-    return errorResponse(400, "invalid_request");
+    if (err instanceof BodyTooLargeError) {
+      logEvent("parse_payload_rejected", { reqId, reason: "body_too_large" });
+      return finish(errorResponse(413, "payload_too_large"), { reason: "body_too_large" });
+    }
+    logError("parse_body_read_failed", { reqId, ...errorDetails(err) });
+    return finish(errorResponse(400, "invalid_request"), { reason: "body_read_failed" });
   }
 
   let parsedJson: unknown;
   try {
     parsedJson = JSON.parse(rawBody);
-  } catch {
-    return errorResponse(400, "invalid_request");
+  } catch (err) {
+    // Safe to log this parse exception's own message (e.g. "Unexpected token ... in JSON at
+    // position 5") — that describes the SHAPE of the failure, never `rawBody` itself, which is
+    // only ever logged (truncated) behind `LOG_VERBOSE_BODIES` further down.
+    logError("parse_json_parse_failed", { reqId, ...errorDetails(err) });
+    return finish(errorResponse(400, "invalid_request"), { reason: "json_parse_failed" });
   }
 
   const validated = validateRequestBody(parsedJson);
   if (!validated.ok) {
-    return errorResponse(400, "invalid_request");
+    // `validated.error` is a fixed, static description of which validation RULE failed (e.g.
+    // "transcript exceeds 2000 chars") — it never echoes the offending value itself, so it is safe
+    // to log unconditionally, unlike the body content it describes.
+    logEvent("parse_validation_rejected", { reqId, reason: "validation_failed", detail: validated.error });
+    return finish(errorResponse(400, "invalid_request"), { reason: "validation_failed" });
   }
   const body = validated.value;
 
+  // Verbose-only: a truncated preview of the validated request body. Gated behind
+  // `LOG_VERBOSE_BODIES` (see ../_shared/log.ts module doc comment) — this is the ONE place in this
+  // route where transcript/task-title/notes content can reach a log line at all, and only when an
+  // operator has deliberately opted in on a non-production deployment.
+  if (verboseBodiesEnabled()) {
+    logEvent("parse_request_body_verbose", {
+      reqId,
+      mode: body.mode,
+      bodyPreview: truncateForLog(rawBody),
+    });
+  }
+
   const geminiCfg = requireEnv(["GEMINI_API_KEY"] as const);
   if (!geminiCfg.ok) {
-    logError("gemini_config_missing", { missingEnv: geminiCfg.missing.join(",") });
-    return errorResponse(503, "service_unavailable");
+    logError("gemini_config_missing", { reqId, missingEnv: geminiCfg.missing.join(",") });
+    return finish(errorResponse(503, "service_unavailable"), { reason: "config_missing_gemini_api_key" });
   }
   const model = Deno.env.get("PARSE_MODEL") || DEFAULT_PARSE_MODEL;
   const timeoutMs = readEnvInt("PARSE_UPSTREAM_TIMEOUT_MS", 20000);
@@ -172,13 +234,15 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
         contents,
         responseSchema: buildParseResponseSchema(),
         timeoutMs,
+        reqId,
       });
       const result = validateParsedTaskArray(raw);
       if (!result) {
-        logError("parse_output_invalid", { tier: authResult.tier });
-        return errorResponse(502, "upstream_error");
+        logError("parse_output_invalid", { reqId, tier: authResult.tier, mode: "parse" });
+        return finish(errorResponse(502, "upstream_error"), { reason: "model_output_invalid" });
       }
       logEvent("parse_request", {
+        reqId,
         userIdHash,
         tier: authResult.tier,
         status: 200,
@@ -190,7 +254,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
         quotaUsed,
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return jsonResponse(200, result.tasks);
+      return finish(jsonResponse(200, result.tasks), { reason: "success" });
     }
 
     if (body.mode === "breakdown") {
@@ -202,13 +266,15 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
         contents,
         responseSchema: buildBreakdownResponseSchema(),
         timeoutMs,
+        reqId,
       });
       const steps = validateBreakdownSteps(raw);
       if (!steps) {
-        logError("parse_output_invalid", { tier: authResult.tier, mode: "breakdown" });
-        return errorResponse(502, "upstream_error");
+        logError("parse_output_invalid", { reqId, tier: authResult.tier, mode: "breakdown" });
+        return finish(errorResponse(502, "upstream_error"), { reason: "model_output_invalid" });
       }
       logEvent("parse_request", {
+        reqId,
         userIdHash,
         tier: authResult.tier,
         status: 200,
@@ -218,7 +284,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
         quotaUsed,
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return jsonResponse(200, { steps });
+      return finish(jsonResponse(200, { steps }), { reason: "success" });
     }
 
     // mode === "resolve_completion" — see module doc comment. Unlike `parse`/`breakdown`, an
@@ -242,6 +308,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
         contents,
         responseSchema: buildResolveCompletionResponseSchema(),
         timeoutMs,
+        reqId,
       });
       resolved = validateResolveCompletion(raw, body.candidates.length);
       if (!resolved) {
@@ -249,16 +316,21 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
         // confidence, out-of-range index, etc.) — distinct failure mode from the upstream-call
         // failure below, logged separately so operators can tell "model misbehaved" apart from
         // "upstream unreachable".
-        logError("parse_output_invalid", { tier: authResult.tier, mode: "resolve_completion" });
+        logError("parse_output_invalid", { reqId, tier: authResult.tier, mode: "resolve_completion" });
       }
     } catch (err) {
       // Upstream failure (timeout/transport/non-2xx/malformed JSON) also folds into a safe
       // "none" 200 for the same reason as an invalid model response above — see comment there.
-      // Still logged as a failure (via the errorType below) so operators can see upstream health.
+      // Still logged as a failure so operators can see upstream health; `err.message` is safe to
+      // log here because every `GeminiUpstreamError` message is one of a small set of FIXED
+      // literal strings this codebase writes (see ../_shared/gemini.ts), never a fragment of the
+      // upstream response body itself.
       logError("parse_upstream_failure", {
+        reqId,
         tier: authResult.tier,
         mode: "resolve_completion",
         errorType: err instanceof GeminiUpstreamError ? "gemini_upstream" : "unexpected",
+        ...errorDetails(err),
         latencyMs: Math.round(performance.now() - startedAt),
       });
       resolved = undefined;
@@ -267,6 +339,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     // counts/status/latency + the hashed user id, matching every other log line in this route.
     const out: ResolveCompletionOut = resolved ?? { intent: "none", confidence: 0 };
     logEvent("parse_request", {
+      reqId,
       userIdHash,
       tier: authResult.tier,
       status: 200,
@@ -278,16 +351,20 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
       quotaUsed,
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return jsonResponse(200, out);
+    return finish(jsonResponse(200, out), { reason: "success" });
   } catch (err) {
     // Covers GeminiUpstreamError (non-2xx, timeout, transport, malformed JSON text) and anything
-    // else from this block. NEVER forward `err.message` — it may contain upstream response
-    // fragments (see gemini.ts) — log only the error's class name.
+    // else thrown from the `parse`/`breakdown` branches above (`resolve_completion` has its own
+    // inner try/catch and never rethrows). `err.message` is safe to log — see the comment on the
+    // `resolve_completion` catch above for why (fixed literal strings, never upstream body
+    // fragments) — never forwarded to the HTTP client either way (opaque 502).
     logError("parse_upstream_failure", {
+      reqId,
       tier: authResult.tier,
       errorType: err instanceof GeminiUpstreamError ? "gemini_upstream" : "unexpected",
+      ...errorDetails(err),
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return errorResponse(502, "upstream_error");
+    return finish(errorResponse(502, "upstream_error"), { reason: "gemini_upstream_failure" });
   }
 }

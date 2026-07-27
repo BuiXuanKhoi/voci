@@ -32,14 +32,36 @@
 // `Deno.env.get` (Supabase Secrets) — the key never touches the client, never touches a log line,
 // and the caller's credential is used only to pass `verifyAccount`, never reused past that point.
 //
-// Privacy: this file must never log audio bytes, filename, transcript text, or a raw user id —
-// only sizes/counts/status/latency and a HASH of user_id, via ../_shared/log.ts + ../_shared/
-// auth.ts's `hashUserId`. Upstream error bodies are never read into a log line or forwarded to the
-// client either — they could carry account/billing detail belonging to the Groq key's owner (us),
-// not the caller.
+// Privacy: this file must never log audio bytes, filename (except behind `LOG_VERBOSE_BODIES`,
+// see below), transcript text, or a raw user id — only sizes/counts/status/latency and a HASH of
+// user_id, via ../_shared/log.ts + ../_shared/auth.ts's `hashUserId`. Groq's upstream error body
+// (only on a non-2xx response, NEVER on 200 — a 200 body is the transcript) is logged truncated,
+// unconditionally — that is Groq's own diagnostic message about our request, not user content, and
+// is the deliberate, always-on exception documented in ../_shared/log.ts's module doc comment.
+//
+// Logging: every request gets a `reqId` (../_shared/log.ts's `newRequestId`) generated as the very
+// first thing in the top-level `Deno.serve` handler, logged immediately via `logRequestStart`
+// (point 1 of 3 — before ANY method/content-type/auth check, so an early-rejected request still
+// leaves a trace), threaded through every log call in this file plus every `_shared/` helper that
+// logs on this request's behalf (`verifyAccount`, `createServiceRoleClient`), wrapped around the
+// Groq call via `logUpstreamRequest`/`logUpstreamResponse` (point 2), and guaranteed on every single
+// return path via the local `finish()` closure, which calls `logRequestEnd` (point 3) exactly once
+// per request no matter which branch returns.
 
 import { requireEnv, readEnvInt } from "../_shared/env.ts";
-import { logEvent, logError } from "../_shared/log.ts";
+import {
+  errorDetails,
+  logEvent,
+  logError,
+  logRequestEnd,
+  logRequestStart,
+  logUpstreamRequest,
+  logUpstreamResponse,
+  newRequestId,
+  truncateForLog,
+  verboseBodiesEnabled,
+  type LogFields,
+} from "../_shared/log.ts";
 import { BodyTooLargeError, errorResponse, jsonResponse, readBodyCappedBytes } from "../_shared/http.ts";
 import { createServiceRoleClient, hashUserId, verifyAccount } from "../_shared/auth.ts";
 import { consumeQuota, speechLimitFor } from "../_shared/quota.ts";
@@ -61,34 +83,49 @@ const DEFAULT_GROQ_BASE_URL = "https://api.groq.com/openai/v1";
 
 Deno.serve(async (req) => {
   const startedAt = performance.now();
+  const reqId = newRequestId();
+  // Logged as the very first thing, before any method/content-type/auth check, so a request that
+  // gets rejected in the next few lines still leaves a trace (log.ts's `logRequestStart` doc
+  // comment explains why this ordering matters — it is what the lowercased-boundary bug needed and
+  // didn't have).
+  logRequestStart(req, reqId);
 
   try {
-    return await handle(req, startedAt);
+    return await handle(req, startedAt, reqId);
   } catch (err) {
     // Last-resort net: nothing above should throw uncaught, but if it does, never leak the
     // exception message to the client (opaque hardening requirement) and never let an unhandled
     // rejection crash the isolate without a response.
-    logError("groq_unhandled_error", {
-      message: err instanceof Error ? err.name : "unknown",
-      latencyMs: Math.round(performance.now() - startedAt),
-    });
-    return errorResponse(503, "service_unavailable");
+    logError("groq_unhandled_error", { reqId, ...errorDetails(err) });
+    const res = errorResponse(503, "service_unavailable");
+    logRequestEnd(res.status, performance.now() - startedAt, { reqId, reason: "unhandled_exception" });
+    return res;
   }
 });
 
-async function handle(req: Request, startedAt: number): Promise<Response> {
+async function handle(req: Request, startedAt: number, reqId: string): Promise<Response> {
+  // Every return path in this function goes through `finish` so `logRequestEnd` (point 3 of the 3
+  // required log points) fires exactly once, no matter which branch returns — including the early
+  // routing/method/content-type rejections that used to return with no log line at all.
+  const finish = (res: Response, fields: LogFields = {}): Response => {
+    logRequestEnd(res.status, performance.now() - startedAt, { reqId, ...fields });
+    return res;
+  };
+
   // --- Strict routing: only a path ending in "/audio/transcriptions" is legitimate; everything
   // else is rejected before any auth/quota/upstream work happens. ---
   const { pathname } = new URL(req.url);
   if (!pathname.endsWith("/audio/transcriptions")) {
-    return errorResponse(404, "invalid_request");
+    return finish(errorResponse(404, "invalid_request"), { reason: "unknown_route" });
   }
 
   if (req.method === "OPTIONS") {
-    return new Response(null, { status: 204, headers: { allow: "POST, OPTIONS" } });
+    return finish(new Response(null, { status: 204, headers: { allow: "POST, OPTIONS" } }), {
+      reason: "cors_preflight",
+    });
   }
   if (req.method !== "POST") {
-    return errorResponse(405, "invalid_request");
+    return finish(errorResponse(405, "invalid_request"), { reason: "wrong_method" });
   }
 
   // Keep the header EXACTLY as sent; only the media-type comparison is case-insensitive.
@@ -102,18 +139,19 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   // died as an unlogged `400 invalid_request`.
   const contentType = req.headers.get("content-type") ?? "";
   if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
-    return errorResponse(415, "invalid_request");
+    return finish(errorResponse(415, "invalid_request"), { reason: "wrong_content_type" });
   }
 
   // --- Auth: any real account may authenticate. Any rejection here is the same opaque shape
   // ../parse uses. ---
-  const authResult = await verifyAccount(req);
+  const authResult = await verifyAccount(req, reqId);
   if (!authResult.ok) {
     logEvent("groq_auth_rejected", {
+      reqId,
       status: authResult.response.status,
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return authResult.response;
+    return finish(authResult.response, { reason: "auth_rejected" });
   }
   const userIdHash = await hashUserId(authResult.userId);
 
@@ -121,9 +159,9 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   // ../parse's `parseLimitFor`). This must still run BEFORE any body work. ---
   const limit = speechLimitFor(authResult.tier);
 
-  const supabase = createServiceRoleClient();
+  const supabase = createServiceRoleClient(reqId);
   if (!supabase) {
-    return errorResponse(503, "service_unavailable");
+    return finish(errorResponse(503, "service_unavailable"), { reason: "service_role_client_unavailable" });
   }
 
   const now = new Date();
@@ -133,29 +171,33 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     quotaUsed = check.used;
     if (!check.allowed) {
       logEvent("groq_request", {
+        reqId,
         userIdHash,
         tier: authResult.tier,
         status: 429,
         quotaUsed: check.used,
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return jsonResponse(429, { error: "quota_exceeded", resetAt: check.resetAt });
+      return finish(jsonResponse(429, { error: "quota_exceeded", resetAt: check.resetAt }), {
+        reason: "quota_exceeded",
+      });
     }
   } catch (err) {
     logError("groq_quota_failure", {
+      reqId,
       userIdHash,
-      message: err instanceof Error ? err.message : "unknown",
+      ...errorDetails(err),
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return errorResponse(503, "service_unavailable");
+    return finish(errorResponse(503, "service_unavailable"), { reason: "quota_check_exception" });
   }
 
   const groqCfg = requireEnv(["GROQ_API_KEY"] as const);
   if (!groqCfg.ok) {
     // Opaque to the caller — never report *which* var is missing in the HTTP response, only in
     // the server-side log where it's useful to whoever owns the deployment.
-    logError("groq_config_missing", { missingEnv: groqCfg.missing.join(",") });
-    return errorResponse(503, "service_unavailable");
+    logError("groq_config_missing", { reqId, missingEnv: groqCfg.missing.join(",") });
+    return finish(errorResponse(503, "service_unavailable"), { reason: "config_missing_groq_api_key" });
   }
 
   // --- Body size gate + read, only AFTER auth/tier/quota have all passed (contract §4 gate
@@ -168,16 +210,27 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   const contentLengthHeader = req.headers.get("content-length");
   const declaredLength = contentLengthHeader ? Number.parseInt(contentLengthHeader, 10) : NaN;
   if (!contentLengthHeader || !Number.isFinite(declaredLength) || declaredLength > maxAudioBytes) {
-    return errorResponse(413, "payload_too_large");
+    logEvent("groq_payload_rejected", {
+      reqId,
+      reason: "declared_content_length_over_cap_or_missing",
+      contentLengthHeader: contentLengthHeader ?? "absent",
+      maxAudioBytes,
+    });
+    return finish(errorResponse(413, "payload_too_large"), {
+      reason: "declared_content_length_over_cap_or_missing",
+    });
   }
 
   let rawBytes: Uint8Array;
   try {
     rawBytes = await readBodyCappedBytes(req, maxAudioBytes);
   } catch (err) {
-    if (err instanceof BodyTooLargeError) return errorResponse(413, "payload_too_large");
-    logError("groq_body_read_failed", { message: err instanceof Error ? err.message : "unknown" });
-    return errorResponse(400, "invalid_request");
+    if (err instanceof BodyTooLargeError) {
+      logEvent("groq_payload_rejected", { reqId, reason: "actual_body_over_cap", maxAudioBytes });
+      return finish(errorResponse(413, "payload_too_large"), { reason: "actual_body_over_cap" });
+    }
+    logError("groq_body_read_failed", { reqId, ...errorDetails(err) });
+    return finish(errorResponse(400, "invalid_request"), { reason: "body_read_failed" });
   }
 
   let form: FormData;
@@ -203,17 +256,33 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     // bare 400 and the server said nothing at all — which is exactly how the lowercased-boundary
     // bug above survived. `boundaryEcho` is the declared boundary only, never body content.
     logError("groq_multipart_parse_failed", {
-      message: err instanceof Error ? err.message : "unknown",
+      reqId,
+      ...errorDetails(err),
       boundaryEcho: contentType.split("boundary=")[1] ?? "absent",
       bytes: rawBytes.byteLength,
     });
-    return errorResponse(400, "invalid_request");
+    return finish(errorResponse(400, "invalid_request"), { reason: "multipart_parse_failed" });
   }
 
   const file = form.get("file");
   if (!(file instanceof File)) {
-    logError("groq_missing_file_part", { fields: [...form.keys()].join(",") });
-    return errorResponse(400, "invalid_request");
+    logError("groq_missing_file_part", { reqId, fields: [...form.keys()].join(",") });
+    return finish(errorResponse(400, "invalid_request"), { reason: "missing_file_part" });
+  }
+
+  // Verbose-only: form-SHAPE metadata (field names, filename, content-type, byte count) — NEVER
+  // the audio bytes themselves, under any configuration. Gated behind `LOG_VERBOSE_BODIES` so this
+  // never fires in production by default (see ../_shared/log.ts module doc comment); `fileName` is
+  // held back here specifically (not logged unconditionally like the other groq_request fields)
+  // because a user-chosen filename can itself carry incidental personal content.
+  if (verboseBodiesEnabled()) {
+    logEvent("groq_request_body_verbose", {
+      reqId,
+      formFields: [...form.keys()].join(","),
+      fileName: file.name,
+      fileContentType: file.type,
+      fileBytes: file.size,
+    });
   }
 
   // Only a strict ISO-639-1 code passes through; anything else for this field is dropped rather
@@ -238,16 +307,18 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   try {
     const normalizedBase = configuredBaseUrl.endsWith("/") ? configuredBaseUrl : `${configuredBaseUrl}/`;
     upstreamUrl = new URL("audio/transcriptions", normalizedBase).toString();
-  } catch {
-    logError("groq_config_invalid", { reason: "groq_base_url_unparseable" });
-    return errorResponse(503, "service_unavailable");
+  } catch (err) {
+    logError("groq_config_invalid", { reqId, reason: "groq_base_url_unparseable", ...errorDetails(err) });
+    return finish(errorResponse(503, "service_unavailable"), { reason: "groq_base_url_unparseable" });
   }
 
   const timeoutMs = readEnvInt("GROQ_UPSTREAM_TIMEOUT_MS", DEFAULT_UPSTREAM_TIMEOUT_MS);
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const upstreamStartedAt = performance.now();
 
   try {
+    logUpstreamRequest("groq", upstreamUrl, "POST", { reqId, audioBytes: rawBytes.length });
     const upstreamRes = await fetch(upstreamUrl, {
       method: "POST",
       headers: {
@@ -259,46 +330,61 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
       body: forwardForm,
       signal: controller.signal,
     });
+    logUpstreamResponse("groq", upstreamRes.status, performance.now() - upstreamStartedAt, { reqId });
 
     if (upstreamRes.status === 429) {
-      await upstreamRes.arrayBuffer().catch(() => {}); // drain; body never logged/forwarded
+      // Reading + logging the (truncated) error body here is a DELIBERATE, always-on exception to
+      // the "never log body content" rule (see ../_shared/log.ts's `logUpstreamResponse` doc
+      // comment): this is Groq's OWN diagnostic message about our request, not user content, and
+      // without it a 429 is exactly as undiagnosable as the boundary bug this logging pass exists
+      // to prevent. Never forwarded to our own HTTP client either way — the client still only ever
+      // sees the opaque `429 rate_limited` below.
+      const errorBodyText = await upstreamRes.text().catch(() => "");
       logEvent("groq_request", {
+        reqId,
         userIdHash,
         tier: authResult.tier,
         status: 429,
         quotaUsed,
         audioBytes: rawBytes.length,
+        errorBody: truncateForLog(errorBodyText, 500),
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return errorResponse(429, "rate_limited");
+      return finish(errorResponse(429, "rate_limited"), { reason: "upstream_rate_limited" });
     }
 
     if (!upstreamRes.ok) {
-      // Never surface an upstream error body to the client or a log line — it could contain
-      // account/billing detail belonging to the Groq key's owner. Every other non-2xx (5xx,
-      // transport-adjacent 4xx we have no specific mapping for) collapses to one opaque 502; only
-      // status code (not body) is logged.
-      await upstreamRes.arrayBuffer().catch(() => {});
+      // Same deliberate exception as the 429 branch above: log Groq's truncated error body, still
+      // never forward it to our own client (every other non-2xx collapses to one opaque 502).
+      const errorBodyText = await upstreamRes.text().catch(() => "");
       logError("groq_upstream_failure", {
+        reqId,
+        reason: "upstream_non_ok",
         status: upstreamRes.status,
         audioBytes: rawBytes.length,
+        errorBody: truncateForLog(errorBodyText, 500),
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return errorResponse(502, "upstream_error");
+      return finish(errorResponse(502, "upstream_error"), { reason: "upstream_non_ok" });
     }
 
     let json: unknown;
     try {
       json = await upstreamRes.json();
-    } catch {
+    } catch (err) {
+      // Safe to log this parse exception's own message — it describes the JSON SHAPE failure, not
+      // the (200, i.e. actual transcript) body text, which is never logged here.
       logError("groq_upstream_invalid_json", {
+        reqId,
+        ...errorDetails(err),
         audioBytes: rawBytes.length,
         latencyMs: Math.round(performance.now() - startedAt),
       });
-      return errorResponse(502, "upstream_error");
+      return finish(errorResponse(502, "upstream_error"), { reason: "upstream_invalid_json" });
     }
 
     logEvent("groq_request", {
+      reqId,
       userIdHash,
       tier: authResult.tier,
       status: 200,
@@ -308,16 +394,21 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     });
     // Passed through verbatim on success — GroqTranscriptionClient.swift decodes
     // `{ text: string }`, the OpenAI-compatible shape Groq returns. Never logged: the transcript
-    // text must not reach a log line (see ../_shared/log.ts module doc comment).
-    return jsonResponse(200, json);
+    // text must not reach a log line (see ../_shared/log.ts module doc comment) — this is exactly
+    // the 200 case the "never log an upstream 2xx body" rule protects.
+    return finish(jsonResponse(200, json), { reason: "success" });
   } catch (err) {
-    const errorType = err instanceof Error && err.name === "AbortError" ? "timeout" : "transport";
+    const timedOut = err instanceof Error && err.name === "AbortError";
     logError("groq_upstream_failure", {
-      errorType,
+      reqId,
+      reason: timedOut ? "timeout" : "transport_error",
+      ...errorDetails(err),
       audioBytes: rawBytes.length,
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return errorResponse(502, "upstream_error");
+    return finish(errorResponse(502, "upstream_error"), {
+      reason: timedOut ? "timeout" : "transport_error",
+    });
   } finally {
     clearTimeout(timer);
   }

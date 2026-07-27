@@ -9,7 +9,13 @@
 // caller (index.ts) MUST still run the raw JSON text through schema.ts's validators before
 // trusting anything — see schema.ts's module doc comment for why.
 
-import { logEvent } from "./log.ts";
+import {
+  errorDetails,
+  logError,
+  logUpstreamRequest,
+  logUpstreamResponse,
+  truncateForLog,
+} from "./log.ts";
 import {
   MAX_BREAKDOWN_STEPS,
   MAX_OPEN_TASK_TITLE_CHARS,
@@ -357,8 +363,16 @@ export class GeminiUpstreamError extends Error {}
 /** Calls Gemini with an upstream timeout (env `PARSE_UPSTREAM_TIMEOUT_MS`, default 20s) and
  *  returns the raw parsed JSON body (NOT yet validated against our own schema — caller must run
  *  it through schema.ts). Any non-2xx or transport failure throws `GeminiUpstreamError` with a
- *  message that is safe to log (no upstream body) but the caller must still map to an opaque 502
- *  and never forward the message text to the HTTP client. */
+ *  message that is safe to log (no upstream body in the exception message itself — see the
+ *  `gemini_upstream_error` log call below for where the upstream's own error body IS logged,
+ *  server-side only, truncated) but the caller must still map to an opaque 502 and never forward
+ *  either the exception message or the upstream body text to the HTTP client.
+ *
+ *  `reqId`, when passed, threads the caller's correlation id into this function's own
+ *  `logUpstreamRequest`/`logUpstreamResponse`/`logError` calls so they can be tied back to the one
+ *  inbound request that triggered them — optional only so this signature doesn't break for a
+ *  hypothetical caller written before request-id tracing existed; every real call site in this
+ *  codebase (`../parse/index.ts`) passes it. */
 export async function callGemini(args: {
   apiKey: string;
   model: string;
@@ -366,6 +380,7 @@ export async function callGemini(args: {
   contents: string;
   responseSchema: Record<string, unknown>;
   timeoutMs: number;
+  reqId?: string;
 }): Promise<unknown> {
   const url =
     `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(args.model)}:generateContent`;
@@ -373,6 +388,11 @@ export async function callGemini(args: {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), args.timeoutMs);
   const started = performance.now();
+  // `undefined` until a response is actually received — stays `undefined` (logged as 0, see the
+  // `finally` block) for a transport failure/timeout/abort, where there never was an HTTP status.
+  let status: number | undefined;
+
+  logUpstreamRequest("gemini", url, "POST", { reqId: args.reqId, model: args.model });
 
   try {
     const res = await fetch(url, {
@@ -408,31 +428,61 @@ export async function callGemini(args: {
       }),
       signal: controller.signal,
     });
+    status = res.status;
 
     if (!res.ok) {
-      // Body intentionally never read/logged/forwarded — could contain quota/billing detail we
-      // don't want to leak, and reading it costs nothing we need.
+      // Reading + logging the error body here is a DELIBERATE, always-on exception to the "never
+      // log body content" rule (see log.ts's `logUpstreamResponse` doc comment): this is Gemini's
+      // OWN diagnostic message about our request, not user-authored content, and without it a 4xx
+      // from a third party is exactly as undiagnosable as the boundary bug this logging pass
+      // exists to prevent. Truncated, and NEVER forwarded to our own HTTP client either way.
+      const errorBodyText = await res.text().catch(() => "");
+      logError("gemini_upstream_error", {
+        reqId: args.reqId,
+        reason: "upstream_non_ok",
+        status: res.status,
+        errorBody: truncateForLog(errorBodyText, 500),
+      });
       throw new GeminiUpstreamError(`upstream status ${res.status}`);
     }
 
     const body = await res.json();
     const text: unknown = body?.candidates?.[0]?.content?.parts?.[0]?.text;
     if (typeof text !== "string") {
+      logError("gemini_response_shape_invalid", { reqId: args.reqId, reason: "missing_text_part" });
       throw new GeminiUpstreamError("upstream response missing text part");
     }
     try {
       return JSON.parse(text);
-    } catch {
+    } catch (err) {
+      // Safe to log the parse exception's own message/name (e.g. "Unexpected token ... in JSON at
+      // position 12") — that describes the SHAPE of the failure, never `text` itself, which is
+      // the model's output over user transcript content and is never logged here.
+      logError("gemini_response_invalid_json", {
+        reqId: args.reqId,
+        reason: "text_not_json",
+        ...errorDetails(err),
+      });
       throw new GeminiUpstreamError("upstream text was not valid JSON");
     }
   } catch (err) {
     if (err instanceof GeminiUpstreamError) throw err;
-    if (err instanceof Error && err.name === "AbortError") {
+    // Anything reaching here is a genuine transport-layer failure (network error, or our own
+    // AbortController firing on timeout) — NOT yet logged above (the branches above cover
+    // non-2xx/shape/parse failures specifically), so it must be logged here or it vanishes with no
+    // trace at all, which is the exact failure mode this logging pass exists to close.
+    const timedOut = err instanceof Error && err.name === "AbortError";
+    logError("gemini_transport_failure", {
+      reqId: args.reqId,
+      reason: timedOut ? "timeout" : "transport_error",
+      ...errorDetails(err),
+    });
+    if (timedOut) {
       throw new GeminiUpstreamError("upstream timeout");
     }
     throw new GeminiUpstreamError("upstream transport error");
   } finally {
     clearTimeout(timer);
-    logEvent("gemini_call_timing", { latencyMs: Math.round(performance.now() - started) });
+    logUpstreamResponse("gemini", status ?? 0, performance.now() - started, { reqId: args.reqId });
   }
 }

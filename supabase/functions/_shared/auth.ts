@@ -43,7 +43,7 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.110.6";
 import { requireEnv } from "./env.ts";
 import { errorResponse } from "./http.ts";
-import { logError } from "./log.ts";
+import { errorDetails, logError } from "./log.ts";
 
 export type Tier = "free" | "pro";
 
@@ -90,7 +90,13 @@ function isEntitlementsRowArray(value: unknown): value is EntitlementsRow[] {
     );
 }
 
-export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
+/** `reqId`, when passed, threads the caller's correlation id into every `logError` call this
+ *  function makes — optional only so the signature doesn't break a hypothetical caller written
+ *  before request-id tracing existed; every real call site (`../groq/index.ts`,
+ *  `../parse/index.ts`, `../subscription/index.ts`) passes it. Without this, exactly the log lines
+ *  most useful while tracing an auth failure (config missing, token rejected, entitlements lookup
+ *  failure) would be the ones NOT tied back to the request that triggered them. */
+export async function verifyAccount(req: Request, reqId?: string): Promise<AccountAuthResult> {
   const token = extractBearerToken(req.headers.get("authorization"));
   if (!token) {
     return { ok: false, response: errorResponse(401, "auth_missing") };
@@ -100,7 +106,7 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
   if (!cfg.ok) {
     // Opaque to the caller (info-leak hardening) — the specific missing keys are only useful to
     // whoever owns the deployment, never to an unauthenticated internet caller.
-    logError("account_config_missing", { missingEnv: cfg.missing.join(",") });
+    logError("account_config_missing", { reqId, missingEnv: cfg.missing.join(",") });
     return { ok: false, response: errorResponse(503, "service_unavailable") };
   }
 
@@ -115,10 +121,22 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
   try {
     const { data, error } = await userClient.auth.getUser();
     if (error || !data?.user?.id) {
+      // `error` here is GoTrue's own rejection (expired/malformed/revoked token, wrong key type,
+      // etc.) — its `.message` is a fixed library string, never anything derived from what the
+      // caller sent, so it is safe to log; still opaque to the CLIENT (401 `auth_invalid`, no
+      // detail in the response body).
+      logError("account_token_rejected", {
+        reqId,
+        message: error?.message ?? "no_user_on_response",
+      });
       return { ok: false, response: errorResponse(401, "auth_invalid") };
     }
     userId = data.user.id;
-  } catch {
+  } catch (err) {
+    // Previously a bare `catch { ... }` that swallowed the exception entirely — a transport/library
+    // failure here looked IDENTICAL in the logs to a deliberately-rejected token, which is exactly
+    // the kind of silent boundary this logging pass exists to close. Still opaque to the client.
+    logError("account_token_check_exception", { reqId, ...errorDetails(err) });
     return { ok: false, response: errorResponse(401, "auth_invalid") };
   }
 
@@ -136,7 +154,7 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
       .select("tier, expires_at")
       .eq("user_id", userId);
     if (error) {
-      logError("entitlements_lookup_failed", { message: error.message });
+      logError("entitlements_lookup_failed", { reqId, message: error.message, errorCode: error.code });
       return { ok: false, response: errorResponse(503, "service_unavailable") };
     }
     // Defensive guard against an unexpected PostgREST response shape — never trust an unchecked
@@ -155,7 +173,7 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
     } else if (isEntitlementsRowArray(data)) {
       rows = data;
     } else {
-      logError("entitlements_lookup_unexpected_shape", {});
+      logError("entitlements_lookup_unexpected_shape", { reqId });
       return { ok: false, response: errorResponse(503, "service_unavailable") };
     }
 
@@ -189,7 +207,7 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
       expiresAt,
     };
   } catch (err) {
-    logError("entitlements_lookup_exception", { message: err instanceof Error ? err.name : "unknown" });
+    logError("entitlements_lookup_exception", { reqId, ...errorDetails(err) });
     return { ok: false, response: errorResponse(503, "service_unavailable") };
   }
 }
@@ -198,10 +216,10 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
  *  admin user deletion), and this keeps the "which env vars, what auth mode" decision in one place
  *  rather than re-derived per file. Returns `undefined` (never throws) when config is incomplete
  *  so callers can map that to a uniform `503 service_unavailable`. */
-export function createServiceRoleClient(): SupabaseClient | undefined {
+export function createServiceRoleClient(reqId?: string): SupabaseClient | undefined {
   const cfg = requireEnv(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] as const);
   if (!cfg.ok) {
-    logError("service_role_config_missing", { missingEnv: cfg.missing.join(",") });
+    logError("service_role_config_missing", { reqId, missingEnv: cfg.missing.join(",") });
     return undefined;
   }
   return createClient(cfg.values.SUPABASE_URL, cfg.values.SUPABASE_SERVICE_ROLE_KEY, {
