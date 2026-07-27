@@ -85,22 +85,29 @@ struct SettingsView: View {
     @State private var speechAuthStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
     @State private var notifAuthStatus: UNAuthorizationStatus = .notDetermined
 
-    // Account tab (Task 4, account-auth.md contract) — purely local UI state for the sign-in
-    // forms; the actual session/tier/quota state lives on `AppState` (`accountEmail`,
-    // `accountTier`, `subscriptionStatus`, `accountBusy`, `accountError`), same split as every
-    // other tab's cosmetic `@State` vs. the frozen `AppState` API.
-    @State private var accountEmailInput = ""
-    @State private var accountCodeInput = ""
-    @State private var accountCodeSent = false
+    // Account tab (Task 4, account-auth.md contract) — purely local UI state; the actual
+    // session/tier/quota state lives on `AppState` (`accountEmail`, `accountTier`,
+    // `subscriptionStatus`, `accountBusy`, `accountError`), same split as every other tab's
+    // cosmetic `@State` vs. the frozen `AppState` API. The sign-in FORM's own field state
+    // (email/code text, "code sent?" flag) used to live here too, but moved to `EmailSignInForm`
+    // (Sign-in-entry-point fix, 2026-07-28) so it exists in exactly one place in the codebase —
+    // `signedOutAccountBody` below just embeds that view now.
     @State private var showDeleteAccountConfirm = false
     /// Backlog "1 free month of Pro" promo codes (Task 3, redeem contract). Local `@State`, same
-    /// convention as `accountEmailInput`/`accountCodeInput` above — the FIELD text is view-local,
+    /// convention `EmailSignInForm`'s own field state now follows — the FIELD text is view-local,
     /// the actual redeem call + success/failure state lives on `appState` (`redeemPromoCode(_:)`/
     /// `lastRedeemedUntil`/`accountError`).
     @State private var promoCodeInput = ""
     /// Drives the `PaywallView` sheet — the ONE purchase surface in the app (replaces the old bare
     /// `productRow` pair that used to live directly in `upgradeSection`).
     @State private var showPaywall = false
+    /// Drives `SignInSheet` when `PaywallView`'s "Sign in to subscribe" CTA fires `onNeedSignIn`
+    /// from within this tab (main-window Sign-in entry point fix, 2026-07-28).
+    @State private var showSignInSheet = false
+    /// Set by the paywall's sign-in CTA and read back in the paywall sheet's `onDismiss` — the two
+    /// sheets are handed off across a full dismissal rather than swapped in one update. See the
+    /// `.sheet(isPresented: $showPaywall, onDismiss:)` on `accountTab` for the whole reasoning.
+    @State private var pendingSignInAfterPaywall = false
 
     @Environment(AppState.self) private var appState
     // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
@@ -1184,16 +1191,30 @@ struct SettingsView: View {
         VStack(spacing: 12) {
             accountCard
         }
-        .sheet(isPresented: $showPaywall) {
-            // `onNeedSignIn`: the paywall's own CTA routes here instead of attempting a doomed
-            // purchase when signed out (`Entitlements.purchase` throws `.notSignedIn` — see
-            // `PaywallView`'s doc comment). Dismiss the sheet and land on this same Account tab,
-            // where the sign-in forms already are — already the current tab here, but kept explicit
-            // since `showPaywall` isn't necessarily only ever opened from this tab in the future.
+        // `onNeedSignIn`: the paywall's own CTA routes here instead of attempting a doomed purchase
+        // while signed out (`Entitlements.purchase` throws `.notSignedIn` — see `PaywallView`'s doc
+        // comment).
+        //
+        // The handoff runs through `onDismiss` rather than flipping both flags in the callback
+        // (`showPaywall = false; showSignInSheet = true`). Setting both in one closure asks SwiftUI
+        // to tear down one sheet and present another within the same update, and the second
+        // presentation is routinely dropped — the paywall closes and nothing replaces it, which
+        // reads to the user as a dead button. `onDismiss` fires only once the paywall is fully
+        // gone, so the second present always lands. `pendingSignInAfterPaywall` is what
+        // distinguishes "closed via the sign-in CTA" from "closed with the X button", which must
+        // not open anything.
+        .sheet(isPresented: $showPaywall, onDismiss: {
+            guard pendingSignInAfterPaywall else { return }
+            pendingSignInAfterPaywall = false
+            showSignInSheet = true
+        }) {
             PaywallView(onNeedSignIn: {
+                pendingSignInAfterPaywall = true
                 showPaywall = false
-                tab = .account
             })
+        }
+        .sheet(isPresented: $showSignInSheet) {
+            SignInSheet()
         }
     }
 
@@ -1220,7 +1241,12 @@ struct SettingsView: View {
                 signedOutAccountBody
             }
 
-            if let accountError = appState.accountError {
+            // Signed-in-only here: the signed-OUT case's error display now lives INSIDE
+            // `EmailSignInForm` (embedded by `signedOutAccountBody` below), which shows the exact
+            // same `appState.accountError` text right under its own Verify button. Without this
+            // guard a sign-in failure would render twice on this card — once from the form, once
+            // from here.
+            if appState.accountEmail != nil, let accountError = appState.accountError {
                 Text(accountError)
                     .font(.system(size: 11.5))
                     .foregroundStyle(VolarColor.reschedule)
@@ -1233,44 +1259,13 @@ struct SettingsView: View {
         .volarHairline(cornerRadius: 11)
     }
 
+    /// The email-OTP form itself now lives in exactly one place, `EmailSignInForm.swift` — this
+    /// used to be a full copy of that form's fields/buttons, inlined directly here. Kept as its own
+    /// `private var` (rather than inlining `EmailSignInForm()` straight into `accountCard` above)
+    /// so the "why this exists / what it used to be" comment has an obvious home, and so a future
+    /// diff against this tab's history reads cleanly.
     private var signedOutAccountBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                TextField("you@example.com", text: $accountEmailInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(VolarColor.textPri)
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(Color.black.opacity(0.25))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .volarHairline(cornerRadius: 7)
-                settingsPillButton("Send code") {
-                    accountCodeSent = true
-                    appState.sendEmailOTP(email: accountEmailInput)
-                }
-                .disabled(appState.accountBusy || accountEmailInput.isEmpty)
-            }
-
-            if accountCodeSent {
-                HStack(spacing: 8) {
-                    TextField("6-digit code", text: $accountCodeInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .foregroundStyle(VolarColor.textPri)
-                        .padding(.horizontal, 10)
-                        .frame(height: 30)
-                        .frame(width: 120)
-                        .background(Color.black.opacity(0.25))
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .volarHairline(cornerRadius: 7)
-                    settingsPillButton("Verify", solid: true) {
-                        appState.verifyEmailOTP(email: accountEmailInput, code: accountCodeInput)
-                    }
-                    .disabled(appState.accountBusy || accountCodeInput.count != 6)
-                }
-            }
-        }
+        EmailSignInForm()
     }
 
     @ViewBuilder

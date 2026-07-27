@@ -32,6 +32,12 @@ struct TodayView: View {
     /// NEW (retheme): "Completed" drawer, same collapsed-by-default convention as `laterExpanded`.
     @State private var completedExpanded = false
 
+    /// Drives `SignInSheet` (main-window Sign-in entry point fix, 2026-07-28) — Settings ▸ Account
+    /// used to be the ONLY place to sign in, which a brand-new user has no reason to ever open, so
+    /// they'd never discover cloud speech/parsing or Pro. This flag backs a toolbar pill that's
+    /// visible only while signed out (see the `ToolbarItemGroup` below).
+    @State private var showSignInSheet = false
+
     private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
@@ -115,12 +121,26 @@ struct TodayView: View {
                 ToolButton(icon: .plus, accent: true) {
                     appState.startCapture()
                 }
+                // Sign-in entry point from the main window (fix, 2026-07-28): before this, signing
+                // in was reachable ONLY through Settings ▸ Account, which a first-time user has no
+                // reason to ever open — so cloud speech/parsing and Pro were effectively
+                // undiscoverable. Text pill (not a bare icon): `VolarIconName` has no "person/
+                // account" glyph (see `SettingsView`'s `.account` tab-icon comment for the same gap),
+                // and even if it did, a brand-new user has no learned association for it yet — the
+                // word "Sign in" needs no icon to be understood. Hidden entirely once signed in
+                // (Việc 3's brief: no avatar/email replacement, that's out of scope here).
+                if appState.accountEmail == nil {
+                    SignInToolPill { showSignInSheet = true }
+                }
                 // Settings entry point from the main window: previously reachable ONLY via the
                 // menu-bar dropdown or the ⌘, shortcut (which requires the window to already be
                 // key). See `SettingsToolButton`'s own doc comment below for why this isn't just
                 // `ToolButton` with a `SettingsLink`-flavored action.
                 SettingsToolButton()
             }
+        }
+        .sheet(isPresented: $showSignInSheet) {
+            SignInSheet()
         }
     }
 
@@ -757,6 +777,38 @@ private struct SettingsToolButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(VolarMotion.press, value: configuration.isPressed)
+    }
+}
+
+/// Toolbar "Sign in" pill — the new main-window entry point into `SignInSheet` (see this file's
+/// `.toolbar` block above; visible only while `appState.accountEmail == nil`). A capsule with
+/// visible TEXT rather than a bare icon: `VolarIconName` has no person/account glyph (same gap
+/// `SettingsView`'s Account tab works around), and a brand-new user wouldn't recognize one yet even
+/// if it existed — "Sign in" reads on its own. Styled as an accent-filled capsule so it stands out
+/// from the plain icon `ToolButton`s beside it (this is the one action in the toolbar a signed-out
+/// user is actually meant to notice and take).
+private struct SignInToolPill: View {
+    let action: () -> Void
+
+    @Environment(AppState.self) private var appState
+    @State private var isHovering = false
+
+    private var accentColors: Accent { appState.accent.accent }
+
+    var body: some View {
+        Button(action: action) {
+            Text("Sign in")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+        }
+        .buttonStyle(SettingsToolButtonStyle())
+        .background(isHovering ? accentColors.hover : accentColors.solid)
+        .clipShape(Capsule())
+        .onHover { isHovering = $0 }
+        .animation(VolarMotion.hover, value: isHovering)
+        .accessibilityLabel("Sign in")
     }
 }
 
