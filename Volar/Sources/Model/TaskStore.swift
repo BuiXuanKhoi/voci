@@ -136,6 +136,42 @@ final class TaskStore {
         save()
     }
 
+    /// Việc 3 (confirm-list data layer, duplicate-detection merge, 2026-07-28): merges a freshly-
+    /// confirmed draft into an ALREADY-PERSISTED task the user chose instead of creating a
+    /// duplicate row (`AppState.ConfirmDraft.DuplicateResolution.useExisting`). `applying` receives
+    /// the task's CURRENT `TaskItem` and returns the merged version — building it this way (a
+    /// caller-supplied transform, rather than a long list of optional-field parameters) keeps every
+    /// "present vs. absent" / "dismissed vs. accepted" rule exactly where it already lives
+    /// (`AppState.resolvedValue`/`AppState.mergeTransform`), while this method owns the two things
+    /// a bare field copy would get wrong:
+    ///   - Validation rule 2 (recurrence only on a leaf): if the merged result would set a
+    ///     recurrence on a task that has children, that ONE field is silently reverted back to the
+    ///     task's existing recurrence rather than rejecting the whole merge outright (the merge
+    ///     already represents something the user explicitly asked for — a save failing over one
+    ///     attribute the calling utterance likely didn't even care about would be a worse
+    ///     experience than dropping that one field, mirroring `sanitizedConditions`'s "partial
+    ///     success beats losing everything" precedent below).
+    ///   - Validation rule 1 (`.taskDone` cycle/self-reference): the merged `conditions` array is
+    ///     re-run through `sanitizedConditions` — the SAME bulk-insert gate `add`/`addBatch` use —
+    ///     so a merge can never smuggle in a cyclic edge `addCondition`'s single-edge path would
+    ///     have caught.
+    /// Reuses `VolarTask.apply(_:)` (already documented there as "the one obvious place a future
+    /// 'edit task' API writes through") for the actual field sync, so this file has exactly one
+    /// place that copies a `TaskItem`'s fields onto a live model. A no-op (returns `nil`, no save)
+    /// for an unknown id — nothing to merge into.
+    @discardableResult
+    func mergeIntoExisting(_ id: UUID, applying transform: (TaskItem) -> TaskItem) -> TaskItem? {
+        guard let model = fetchModel(id) else { return nil }
+        var merged = transform(model.asTaskItem)
+        if merged.recurrence != nil, hasChildren(id) {
+            merged.recurrence = model.recurrence
+        }
+        merged.conditions = sanitizedConditions(merged.conditions, for: id, in: allEngineSnapshot())
+        model.apply(merged)
+        save()
+        return merged
+    }
+
     /// Validation rule 2: recurrence is only ever allowed on a task with no children.
     func setRecurrence(_ recurrence: Recurrence?, on id: UUID) throws {
         guard let model = fetchModel(id) else { return }

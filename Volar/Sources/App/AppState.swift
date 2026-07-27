@@ -155,6 +155,14 @@ enum ChipKind: String, CaseIterable, Hashable, Sendable {
 struct ConfirmDraft: Identifiable, Equatable {
     let id = UUID()
     var task: ParsedTask
+    /// 2026-07-28 (confirm-list data layer, Việc 1): ticked by default — the common case is the
+    /// user wants every drafted task in the batch saved. Unticking (future `PopoverView` checkbox,
+    /// lượt 2b) excludes this draft from `confirmSave()` entirely: not created, not eligible as an
+    /// intra-batch `.taskDone` target (see `intraBatchTaskDone` below), nothing. Defaulting `true`
+    /// is exactly what makes today's behavior fall out unchanged — every existing call site
+    /// builds a fresh `ConfirmDraft` and never touches this field, so `confirmSave()` still saves
+    /// every draft it's handed, same as before this field existed.
+    var isIncluded: Bool = true
     /// Scalar attribute chips the user explicitly removed — dismissed attributes are never saved,
     /// regardless of confidence (constitution II: dismiss always wins).
     var dismissed: Set<ChipKind> = []
@@ -171,6 +179,18 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// choice. Never populated by a guess below that bar (constitution II) — an unresolved
     /// `.taskDone` is simply absent here and gets dropped at save, not committed.
     var resolvedTaskDone: [Int: UUID] = [:]
+    /// 2026-07-28 (confirm-list data layer, Việc 2 — real gap fix, not a new feature toggle):
+    /// `task.conditions` indices of `.taskDone` cases resolved against ANOTHER DRAFT in the SAME
+    /// batch rather than an already-persisted task — "xong task A thì tạo task B" said in one
+    /// breath makes A and B together, so A is nowhere in `openTasks` for `preResolveConditions` to
+    /// find; without this, that dependency was silently dropped at save (see that method's own
+    /// doc comment). The value is the OTHER `ConfirmDraft`'s `id`, deliberately NOT a real task
+    /// UUID — that task doesn't exist until `confirmSave()`'s first pass creates it. Kept as a
+    /// SEPARATE map from `resolvedTaskDone` (never both set for the same index) so a real,
+    /// already-persisted resolution can never be confused with a same-batch one that still needs
+    /// `confirmSave()`'s second pass to become a real edge — see that method's doc comment for
+    /// the two-pass save this drives.
+    var intraBatchTaskDone: [Int: ConfirmDraft.ID] = [:]
     /// T074 (conflict advisory, `contracts/phase4-contract.md` §C/§E): computed ONCE, right when
     /// this draft is created from a fresh parse (`AppState.runParse`) — never recomputed per chip
     /// edit (self-review "performance"). Empty = clean capture; `PopoverView` renders AT MOST the
@@ -182,6 +202,28 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// every other chip on this card — see `PopoverView.conflictAdvisoryRow`). Never re-surfaces
     /// within this confirm session; recording again starts fresh, same as every other draft field.
     var conflictDismissed: Bool = false
+    /// 2026-07-28 (confirm-list data layer, Việc 3): up to 3 already-persisted tasks whose title
+    /// looks like it might BE this same task, worth surfacing so the user can say "oh, I already
+    /// have that" instead of ending up with two rows for the same thing. Computed EXACTLY ONCE,
+    /// right when this draft is created (`AppState.buildConfirmDrafts`) — never recomputed as the
+    /// user edits chips/title (self-review "performance": that would be an O(n) `openTasks` scan
+    /// per keystroke). See `AppState.duplicateCandidates(for:in:)` for the threshold and why it's
+    /// deliberately looser than `preResolveConditions`'s auto-resolve bar.
+    var duplicateCandidates: [UUID] = []
+    /// The user's call on what to do about `duplicateCandidates` — constitution II forbids ever
+    /// picking `.useExisting` FOR the user, so this always starts (and stays, absent explicit
+    /// input from a future `PopoverView` picker, lượt 2b) at `.addNew`. `Equatable` is declared
+    /// explicitly (rather than relying on synthesis) per this task's own technical constraints.
+    enum DuplicateResolution: Equatable {
+        /// Default: create a brand-new task, exactly like today (no duplicate handling existed
+        /// before this field).
+        case addNew
+        /// The user explicitly said "that's the same task" — `confirmSave()` merges this draft's
+        /// resolved attributes/conditions INTO the existing task at this id instead of creating a
+        /// second row. Never reached without an explicit user choice.
+        case useExisting(UUID)
+    }
+    var duplicateResolution: DuplicateResolution = .addNew
     /// User-edited title from the confirm card's editable title field (`PopoverView.taskDraftCard`).
     /// `nil` until the user actually types something — mirrors the Windows port's
     /// `ConfirmDraft.EditedTitle` (`voci-windows/windows/.../CaptureFlowService.cs:126-134`), but
@@ -324,11 +366,13 @@ final class AppState {
     // MARK: - Typed capture (⌃⌥T, `Sources/Views/TextCapturePanel.swift`) — "type one line, hit
     // Add task, done." A SEPARATE state machine from `captureState` above, deliberately: the typed
     // popup is a smaller surface with no recording/parsing-in-place/multi-second-wave visuals, and
-    // — critically — it skips the confirm-card review pause `captureState == .parsed` exists for
-    // (see `submitTextCapture()`'s doc comment for exactly why and how it still reuses the SAME
-    // underlying save path). Mutually exclusive with `captureState`'s voice surface by construction
-    // (`openTextCapture()`/`handleHotkey()` below, and `VolarApp.swift`'s `syncCapturePanel()`) —
-    // never both non-idle/non-closed at once.
+    // — for the genuinely simple case (2026-07-28, Việc 4: one task, no duplicate hint, no
+    // condition) — skips the confirm-card review pause `captureState == .parsed` exists for (see
+    // `submitTextCapture()`'s doc comment for exactly why and how it still reuses the SAME
+    // underlying save path). Anything more complex hands off to that SAME review pause instead of
+    // guessing (`applyTextCaptureParseResult`'s own doc comment). Mutually exclusive with
+    // `captureState`'s voice surface by construction (`openTextCapture()`/`handleHotkey()` below,
+    // and `VolarApp.swift`'s `syncCapturePanel()`) — never both non-idle/non-closed at once.
     enum TextCaptureState: Sendable, Equatable {
         case closed
         case editing
@@ -1567,12 +1611,15 @@ final class AppState {
     // user reviews the confirm card -> `confirmSave()` commits (batching / `store.addBatch`
     // chunking / `tasks = store.fetchAll()` / `notifyEligibilityAndScheduleResurface` /
     // `scheduleRemindersForSavedItems` / `syncCalendarMirror` / `finishSaveUI`). The typed flow
-    // below is IDENTICAL except it skips the review pause: parse -> build `confirmDrafts` exactly
-    // the way `runParse` does -> call `confirmSave()` directly. `submitTextCapture()` therefore
-    // reuses `confirmSave()` verbatim (not a parallel save path) — every side effect
-    // `confirmSave()` produces for a voice save (reminders scheduled, calendar mirror synced,
-    // eligibility/resurface diff computed, `TaskStore.maxBatchSize`-chunked `addBatch` commits)
-    // happens exactly the same way for a typed save.
+    // below shares that exact same `buildConfirmDrafts`/`confirmSave()` pipeline — parse -> build
+    // `confirmDrafts` the way `runParse` does -> either save immediately (the genuinely simple
+    // case: one task, no duplicate hint, no condition of any kind) or hand off to the SAME
+    // confirm-card review the voice flow uses (2026-07-28, Việc 4 — see
+    // `applyTextCaptureParseResult`'s own doc comment for exactly which case is "simple" and why).
+    // Either way this reuses `confirmSave()` verbatim (not a parallel save path) when it does
+    // save — every side effect `confirmSave()` produces for a voice save (reminders scheduled,
+    // calendar mirror synced, eligibility/resurface diff computed, `TaskStore.maxBatchSize`-
+    // chunked `addBatch` commits) happens exactly the same way for a typed save.
 
     /// Opens the typed-capture popup. ⌃⌥T (`HotkeyManager`) is the only real caller.
     func openTextCapture() {
@@ -1602,8 +1649,11 @@ final class AppState {
     }
 
     /// Parses `textCaptureInput` and saves it — the typed equivalent of the voice flow's
-    /// `finishRecording` -> `runParse` -> (review pause) -> `confirmSave()`, minus the review
-    /// pause (see this section's header comment). Sync entry point; the actual parse is async, so
+    /// `finishRecording` -> `runParse` -> (review pause) -> `confirmSave()`. Skips the review
+    /// pause ONLY for the genuinely simple case (see this section's header comment and
+    /// `applyTextCaptureParseResult`'s own doc comment for exactly which case that is, 2026-07-28
+    /// Việc 4); anything more complex hands off to the same review pause the voice flow uses.
+    /// Sync entry point; the actual parse is async, so
     /// this hops through `_Concurrency.Task { @MainActor in ... }` exactly like `runParse` does,
     /// with the same before-the-`await` session-token capture/guard pattern (`textCaptureSession`,
     /// mirroring `captureSession`) so a user who hits Esc mid-parse can never have a stale result
@@ -1614,7 +1664,8 @@ final class AppState {
     /// (`pendingCloudConsent`/`captureState = .error`) the FIRST time a parse is ever attempted.
     /// This method deliberately does NOT do that — a tiny "type one line" popup is the wrong
     /// surface to interrupt with a privacy decision; the whole point of this feature is "type →
-    /// Add task → done" with no pause of any kind. Instead this calls `router.parse` directly.
+    /// Add task → done" with no PRIVACY pause (unrelated to the separate confirm-card review pause
+    /// a complex parse can still trigger, Việc 4 above). Instead this calls `router.parse` directly.
     /// `IntentRouter` still applies its own `cloudGate.isOptedIn()` (+ `isOnline()`) gate
     /// internally regardless of caller (see `IntentRouter.parse` in `IntentParsing.swift`), so an
     /// un-opted-in user simply gets on-device (Heuristic/FoundationModel) parsing here — nothing
@@ -1662,16 +1713,13 @@ final class AppState {
         guard textCaptureSession == session, textCapture == .saving else { return }
 
         // Same construction `runParse` uses: cap to `TaskStore.maxBatchSize`, pre-resolve the
-        // "easy" `.taskDone` conditions, and compute the conflict advisory ONCE against a single
-        // shared `conflictNow` clock read shared by every draft in the batch (T074 — never
-        // recomputed per draft).
+        // "easy" `.taskDone` conditions (intra-batch included, Việc 2), and compute the conflict
+        // advisory + duplicate hint (Việc 3) ONCE against a single shared `conflictNow` clock read
+        // shared by every draft in the batch (T074 — never recomputed per draft). Shared with
+        // `runParse` via `buildConfirmDrafts` so the two entry points can't drift apart.
         let capped = Array(results.prefix(TaskStore.maxBatchSize))
         let conflictNow = clock()
-        let drafts = capped.map { parsed -> ConfirmDraft in
-            var draft = preResolveConditions(ConfirmDraft(task: parsed))
-            draft.conflicts = computeConflicts(for: draft, now: conflictNow)
-            return draft
-        }
+        let drafts = buildConfirmDrafts(from: capped, conflictNow: conflictNow)
 
         guard !drafts.isEmpty else {
             // Never close the popup and silently lose what the user typed (task brief) — the
@@ -1682,6 +1730,34 @@ final class AppState {
             // exists as the defensive floor for whatever a future parser tier might legitimately
             // fail to extract anything from, not a reachable path today.
             textCapture = .failed("Didn't catch that.")
+            return
+        }
+
+        // Việc 4 (2026-07-28, task brief: "chỉ đi qua confirm khi phức tạp"): the typed popup's
+        // whole pitch is "type -> Add task -> done" with NO review pause — but that pitch only
+        // holds for the genuinely simple case. The instant there's more than one drafted task, a
+        // possible duplicate (Việc 3), or ANY condition at all (including one only resolvable
+        // intra-batch, Việc 2) the user is facing a real decision this tiny popup has no UI for
+        // (no checkbox, no dependency picker, no merge choice) — silently auto-resolving it here
+        // would be exactly the "guess instead of ask" constitution II forbids. So: hand off to the
+        // SAME confirm-card review the voice flow already has instead.
+        let isSimpleCase = drafts.count == 1
+            && (drafts.first?.duplicateCandidates.isEmpty ?? false)
+            && (drafts.first?.task.conditions.isEmpty ?? false)
+        guard isSimpleCase else {
+            // Populate `confirmDrafts` and flip `captureState` to `.parsed` — EXACTLY what
+            // `runParse` does on a successful voice parse. `VolarApp.swift`'s existing
+            // `observeCaptureState()`/`observeTextCaptureState()` pair (already wired, no view
+            // changes needed here — see this method's header comment) reacts to both property
+            // changes: closing the typed popup (`textCapture == .closed` hides it, mirroring
+            // `cancelTextCapture()`) and presenting the voice popover's confirm-card review
+            // (`captureState != .idle` shows it). This file only needs to set the two properties;
+            // the mutual-exclusion plumbing (`syncCapturePanel()`/`syncTextCapturePanel()`)
+            // already exists and requires no changes.
+            confirmDrafts = drafts
+            captureState = .parsed
+            textCapture = .closed
+            textCaptureInput = ""
             return
         }
 
@@ -2265,11 +2341,7 @@ final class AppState {
             // read shared by every draft in the batch so a multi-task confirm scores consistently
             // against the same "now" instant.
             let conflictNow = self.clock()
-            self.confirmDrafts = capped.map { parsed in
-                var draft = self.preResolveConditions(ConfirmDraft(task: parsed))
-                draft.conflicts = self.computeConflicts(for: draft, now: conflictNow)
-                return draft
-            }
+            self.confirmDrafts = self.buildConfirmDrafts(from: capped, conflictNow: conflictNow)
             if self.confirmDrafts.isEmpty {
                 self.captureErrorDetail = "Didn't catch that."
                 self.captureState = .error
@@ -2279,46 +2351,157 @@ final class AppState {
         }
     }
 
-    /// Auto-resolves `.taskDone` conditions the router was itself confident about (>=0.7) against
-    /// a confident fuzzy title match in `openTasks` — never a guess below either bar (constitution
-    /// II); anything short of both stays unresolved for `PopoverView`'s picker.
-    private func preResolveConditions(_ draft: ConfirmDraft) -> ConfirmDraft {
-        var draft = draft
-        let candidates = openTasks
-        for (index, condition) in draft.task.conditions.enumerated() {
-            guard case .taskDone(let titleQuery, let confidence) = condition, confidence >= 0.7 else { continue }
-            if let match = Self.bestFuzzyMatch(for: titleQuery, in: candidates), match.score >= 0.7 {
-                draft.resolvedTaskDone[index] = match.id
+    /// Shared "parsed tasks -> confirm drafts" pipeline for BOTH `runParse` (voice) and
+    /// `applyTextCaptureParseResult` (typed) — kept as ONE implementation (2026-07-28) so Việc 2's
+    /// intra-batch `.taskDone` resolution and Việc 3's duplicate hint can never drift between the
+    /// two entry points. For a single-task batch with no matching duplicate/condition this reduces
+    /// to exactly the original `capped.map { preResolveConditions(ConfirmDraft(task:)) }`
+    /// pipeline — nothing else in a 1-draft batch to intra-batch-match against, and an empty
+    /// `duplicateCandidates` never changes `confirmSave()`'s outcome — so the default/simple case
+    /// is byte-for-byte unchanged.
+    private func buildConfirmDrafts(from parsed: [ParsedTask], conflictNow: Date) -> [ConfirmDraft] {
+        // Single read, reused for BOTH the duplicate hint and the intra-batch/openTasks
+        // `.taskDone` resolution below, so every draft in this batch is scored against the exact
+        // same snapshot (the previous code read `openTasks` twice, once inside
+        // `preResolveConditions` and implicitly again via `computeConflicts`'s own `tasks` read —
+        // harmless since nothing `await`s in between, but one read is simpler to reason about).
+        let existingTasks = openTasks
+        var drafts = parsed.map { ConfirmDraft(task: $0) }
+        // Việc 3.1: duplicate hint computed ONCE here, at draft-creation time — never recomputed
+        // per chip edit (self-review "performance"; see `ConfirmDraft.duplicateCandidates`'s doc
+        // comment).
+        for i in drafts.indices {
+            drafts[i].duplicateCandidates = Self.duplicateCandidates(for: drafts[i].effectiveTitle, in: existingTasks).map(\.id)
+        }
+        drafts = preResolveConditions(drafts, openTasks: existingTasks)
+        for i in drafts.indices {
+            drafts[i].conflicts = computeConflicts(for: drafts[i], now: conflictNow)
+        }
+        return drafts
+    }
+
+    /// Auto-resolves `.taskDone` conditions the router was itself confident about (>=0.7) — first
+    /// against a confident fuzzy title match in `openTasks` (exactly the original v1 behavior),
+    /// and — Việc 2 (2026-07-28, closing a real gap, not a new feature): if THAT comes up empty,
+    /// against the OTHER drafts in this SAME batch (excluding itself). "Xong task A thì tạo task
+    /// B" said in one breath makes A and B together — A is nowhere in `openTasks` yet because it
+    /// doesn't exist until `confirmSave()` creates it, so without this second lookup the condition
+    /// was silently dropped at save (see `ConfirmDraft.intraBatchTaskDone`'s doc comment). SAME
+    /// 0.7 bar for both lookups — constitution II: matching within the batch is a convenience for
+    /// what the user already said, never a reason to lower the confidence floor. A batch match is
+    /// recorded in `intraBatchTaskDone` (the OTHER DRAFT's id), never `resolvedTaskDone` (which
+    /// promises an already-persisted task id) and never a fabricated UUID.
+    ///
+    /// Takes the WHOLE batch (rather than one draft, the original signature) specifically so each
+    /// draft's condition can see every OTHER draft's stable `id`/title before any of them exist as
+    /// real tasks — a single-draft signature has no way to look sideways at its siblings. Both
+    /// call sites (`buildConfirmDrafts` above) already have the full batch in hand, so this is a
+    /// call-site-local change, not a wider API break.
+    private func preResolveConditions(_ drafts: [ConfirmDraft], openTasks: [TaskItem]) -> [ConfirmDraft] {
+        var drafts = drafts
+        for i in drafts.indices {
+            for (index, condition) in drafts[i].task.conditions.enumerated() {
+                guard case .taskDone(let titleQuery, let confidence) = condition, confidence >= 0.7 else { continue }
+                if let match = Self.bestFuzzyMatch(for: titleQuery, in: openTasks), match.score >= 0.7 {
+                    drafts[i].resolvedTaskDone[index] = match.id
+                    continue
+                }
+                let siblings: [(id: UUID, title: String)] = drafts.indices
+                    .filter { $0 != i }
+                    .map { (drafts[$0].id, drafts[$0].effectiveTitle) }
+                if let match = Self.scoredMatches(for: titleQuery, candidates: siblings).first, match.score >= 0.7 {
+                    drafts[i].intraBatchTaskDone[index] = match.id
+                }
             }
         }
-        return draft
+        return drafts
     }
 
     private struct FuzzyMatch { let id: UUID; let score: Double }
 
-    /// Token-overlap similarity (case/diacritic-insensitive, so Vietnamese input matches
-    /// sensibly): scores each open task's title against `query` as a Jaccard index over
-    /// whitespace tokens, returning the single best match. O(n) over `openTasks` per condition —
-    /// at most ~10 conditions in a confirm batch, so this stays cheap even at hundreds of tasks
-    /// (self-review "performance"; no picker-side O(n²) — the picker itself just lists titles).
+    /// Shared token-overlap scorer (Jaccard over whitespace tokens, case/diacritic-insensitive so
+    /// Vietnamese input matches sensibly) used by `bestFuzzyMatch` (single best, threshold checked
+    /// by the caller) and `duplicateCandidates` (top-3 above a lower bar) — one formula, two
+    /// thresholds, rather than two copies of the same loop. Returns every candidate with a
+    /// nonzero-union score, sorted by score DESCENDING; `Array.sorted` is stable (Swift 5+), so
+    /// candidates tied on score keep `candidates`' original relative order — matching the original
+    /// `bestFuzzyMatch`'s "first max-scoring entry wins" behavior exactly for that caller.
     /// // UNVERIFIED: a deliberately simple placeholder heuristic — swap for a real string-
     /// distance/fuzzy library later if parsing quality demands it (backlog candidate).
-    private static func bestFuzzyMatch(for query: String, in openTasks: [TaskItem]) -> FuzzyMatch? {
+    /// Which formula `scoredMatches` uses. The two callers want opposite error profiles, so they
+    /// must NOT share one — this used to be a single Jaccard score for both, and loosening it
+    /// globally would have silently loosened dependency auto-resolution too.
+    private enum Similarity {
+        /// Jaccard only: `shared / union`. Strict, and strictness is the point for
+        /// `preResolveConditions` — a wrong match there commits a real `.taskDone` edge with no
+        /// further confirmation, so a false positive is a wrong task graph.
+        case strict
+        /// `max(jaccard, overlap)` where overlap is `shared / min(|a|, |b|)`. Overlap is the one
+        /// that handles "one title is a subset of the other" — restating a stored task more briefly
+        /// is the single most common way a real duplicate shows up, and Jaccard scores it terribly
+        /// because it counts every extra word in the longer title against the match. Concretely:
+        /// "sanitize html tag" vs "sanitize html tags this afternoon" is 2/6 = 0.33 by Jaccard —
+        /// under the 0.45 duplicate bar, so the app would silently create a second copy — but
+        /// 2/min(3,5) = 0.67 by overlap, which surfaces it.
+        case lenient
+    }
+
+    private static func scoredMatches(
+        for query: String,
+        candidates: [(id: UUID, title: String)],
+        similarity: Similarity = .strict
+    ) -> [FuzzyMatch] {
         let queryTokens = tokenize(query)
-        guard !queryTokens.isEmpty else { return nil }
-        var best: FuzzyMatch?
-        for task in openTasks {
-            let titleTokens = tokenize(task.title)
+        guard !queryTokens.isEmpty else { return [] }
+        var scored: [FuzzyMatch] = []
+        for candidate in candidates {
+            let titleTokens = tokenize(candidate.title)
             guard !titleTokens.isEmpty else { continue }
-            let shared = queryTokens.intersection(titleTokens).count
             let union = queryTokens.union(titleTokens).count
             guard union > 0 else { continue }
-            let score = Double(shared) / Double(union)
-            if score > (best?.score ?? 0) {
-                best = FuzzyMatch(id: task.id, score: score)
+            let shared = queryTokens.intersection(titleTokens).count
+            let jaccard = Double(shared) / Double(union)
+            var score = jaccard
+            if similarity == .lenient {
+                let smaller = min(queryTokens.count, titleTokens.count)
+                // `smaller >= 2` guard: with a one-token side, overlap is 1.0 the moment that single
+                // token appears anywhere in the other title — "html" would score a perfect match
+                // against every task mentioning html, burying the real candidates. Two shared tokens
+                // is the cheapest thing that means more than coincidence here.
+                if smaller >= 2 {
+                    score = max(jaccard, Double(shared) / Double(smaller))
+                }
             }
+            scored.append(FuzzyMatch(id: candidate.id, score: score))
         }
-        return best
+        return scored.sorted { $0.score > $1.score }
+    }
+
+    /// Việc 3.1 (2026-07-28): up to 3 already-persisted tasks that look like they might BE `title`
+    /// — a glance-and-decide HINT for the confirm card, never auto-applied (see
+    /// `ConfirmDraft.duplicateResolution`'s doc comment: it always starts at `.addNew`). Threshold
+    /// (0.45) is DELIBERATELY LOWER than `preResolveConditions`'s 0.7 auto-resolve bar — that's not
+    /// a bug, it's the opposite risk profile: an auto-resolved `.taskDone` that's wrong silently
+    /// commits a real, wrong dependency edge, so it needs a high bar. This is just a suggestion a
+    /// human glances at and can ignore — a false positive here costs one glance; a false negative
+    /// costs a full duplicate task silently created (exactly the gap this whole feature closes).
+    /// Bounded to 3 so the card never has to render an unbounded list (same defensive-cap
+    /// philosophy as `VoiceDoneConfirm`'s candidate list elsewhere in this file).
+    private static func duplicateCandidates(for title: String, in openTasks: [TaskItem]) -> [FuzzyMatch] {
+        Array(
+            scoredMatches(for: title, candidates: openTasks.map { ($0.id, $0.title) }, similarity: .lenient)
+                .filter { $0.score >= 0.45 }
+                .prefix(3)
+        )
+    }
+
+    /// O(n) over `openTasks` per condition — at most ~10 conditions in a confirm batch, so this
+    /// stays cheap even at hundreds of tasks (self-review "performance"; no picker-side O(n²) —
+    /// the picker itself just lists titles). Single best match; `scoredMatches`'s stable sort
+    /// means a tie keeps whichever candidate appeared first in `openTasks`, matching this
+    /// function's pre-refactor "first max-scoring entry wins" behavior exactly.
+    private static func bestFuzzyMatch(for query: String, in openTasks: [TaskItem]) -> FuzzyMatch? {
+        scoredMatches(for: query, candidates: openTasks.map { ($0.id, $0.title) }).first
     }
 
     private static func tokenize(_ text: String) -> Set<String> {
@@ -2361,6 +2544,9 @@ final class AppState {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].dismissedConditions.insert(conditionIndex)
         confirmDrafts[index].resolvedTaskDone[conditionIndex] = nil
+        // Việc 2: dismiss wins over EITHER resolution kind — a dropped condition must not linger
+        // as an intra-batch target `confirmSave()`'s second pass would otherwise still attach.
+        confirmDrafts[index].intraBatchTaskDone[conditionIndex] = nil
         logCorrection(
             kind: nil, attribute: "condition[\(conditionIndex)]",
             task: confirmDrafts[index].task, correctedValue: "dropped"
@@ -2387,9 +2573,13 @@ final class AppState {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         if let taskID {
             confirmDrafts[index].resolvedTaskDone[conditionIndex] = taskID
+            // Việc 2: an explicit picker choice always overrides whatever `preResolveConditions`
+            // may have auto-matched intra-batch — the two must never both be set for one index.
+            confirmDrafts[index].intraBatchTaskDone[conditionIndex] = nil
             confirmDrafts[index].dismissedConditions.remove(conditionIndex)
         } else {
             confirmDrafts[index].dismissedConditions.insert(conditionIndex)
+            confirmDrafts[index].intraBatchTaskDone[conditionIndex] = nil
         }
         logCorrection(
             kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
@@ -2458,6 +2648,35 @@ final class AppState {
     /// `addBatch` itself). Preserves glance-and-dismiss + Enter-to-save (`PopoverView`'s
     /// `.keyboardShortcut(.defaultAction)` on the Save button, unchanged) and the frozen
     /// zero-argument signature.
+    ///
+    /// 2026-07-28 (confirm-list data layer): now a THREE-part save rather than a flat map —
+    ///
+    /// 1. Việc 1: `confirmDrafts.filter(\.isIncluded)` first. An unticked draft is saved nowhere,
+    ///    isn't a candidate to merge into, and can't be an intra-batch `.taskDone` target (handled
+    ///    below by simply never appearing in `targetID`).
+    /// 2. Việc 3: every included draft gets its post-save IDENTITY decided up front — a freshly
+    ///    minted id for `.addNew` (explicit, not left to `TaskItem.init`'s own default, so this
+    ///    method can look it up again below), or the ALREADY-PERSISTED id for `.useExisting` (that
+    ///    draft creates nothing; it merges into the existing task instead, see `mergeTransform`).
+    ///    A `.useExisting` target that no longer exists in `before` (deleted between the confirm
+    ///    card appearing and Save — this data layer has no live re-poll yet) degrades to `.addNew`
+    ///    rather than merging into a dangling id or losing the draft (self-review "no crash/no
+    ///    dangling id").
+    /// 3. Việc 2: intra-batch `.taskDone` conditions are resolved to real ids via that SAME
+    ///    `targetID` map — which is exactly why it has to exist before anything is created: the
+    ///    referenced draft can appear later in `confirmDrafts` than the one depending on it. A
+    ///    reference to a draft that isn't in `targetID` (unticked, or never existed) is simply
+    ///    dropped, never attached to a nonexistent id (self-review "explicit handling of both
+    ///    branches", task brief Việc 2.4).
+    ///
+    /// The store path commits in THREE ordered steps — new tasks (`addBatch`, chunked exactly as
+    /// before), then merges (`TaskStore.mergeIntoExisting`), then intra-batch conditions
+    /// (`TaskStore.addCondition`) — because step 3 needs every id from steps 1 and 2 to already be
+    /// real. A failure in step 1 aborts before steps 2/3 ever run (same "leave `confirmDrafts`
+    /// intact, let the user retry" contract the pre-existing catch block already had); a rejected
+    /// edge in step 3 drops just that one edge (`try?`) rather than unwinding tasks that, by then,
+    /// have already committed — same "partial success beats losing everything over one bad edge"
+    /// precedent `TaskStore.sanitizedConditions` already sets for bulk inserts.
     func confirmSave() {
         guard !confirmDrafts.isEmpty else { return }
         captureState = .saving
@@ -2467,25 +2686,120 @@ final class AppState {
         // this whole method runs synchronously on @MainActor).
         let before = tasks
 
-        var itemsToSave: [TaskItem] = []
-        for draft in confirmDrafts {
-            let item = materialize(draft, now: now)
-            itemsToSave.append(item)
-            // Mi-1: the "+ review after done" chip is dismissible (defaults on, per
-            // `ChipKind.followUpReview`'s doc comment) — only materialize the derived `.review`
-            // task when the user hasn't dismissed it.
-            if draft.task.followUpReview, !draft.dismissed.contains(.followUpReview) {
-                itemsToSave.append(materializeFollowUpReview(for: item, now: now))
+        // Việc 1: unticked drafts are saved nowhere and can never be an intra-batch target —
+        // simply excluding them from every list below (`targetID`, `itemsToSave`, merges) is
+        // enough; nothing downstream needs a separate "is this included?" check.
+        let includedDrafts = confirmDrafts.filter(\.isIncluded)
+        guard !includedDrafts.isEmpty else {
+            // Every draft was unticked (unreachable today — no UI sets `isIncluded = false` yet,
+            // see that field's doc comment — but handled explicitly rather than left to crash or
+            // silently misbehave once lượt 2b's checkbox exists). Nothing to persist; close out
+            // quietly rather than announcing "0 tasks saved" via `finishSaveUI`.
+            confirmDrafts = []
+            captureState = .idle
+            liveTranscript = ""
+            return
+        }
+
+        // Việc 3 self-review: a `.useExisting` target that vanished since the draft was built
+        // (deleted from `before` — this confirm-list has no live re-poll) degrades to `.addNew`
+        // rather than merging into a dangling id.
+        let currentTaskIDs = Set(before.map(\.id))
+        func effectiveResolution(_ draft: ConfirmDraft) -> ConfirmDraft.DuplicateResolution {
+            if case .useExisting(let id) = draft.duplicateResolution, !currentTaskIDs.contains(id) {
+                return .addNew
+            }
+            return draft.duplicateResolution
+        }
+
+        // Việc 2/3: every included draft's post-save identity, decided BEFORE anything is created
+        // so intra-batch `.taskDone` conditions (which may reference a draft appearing later in
+        // `confirmDrafts`) always have a real id to resolve against.
+        var targetID: [ConfirmDraft.ID: UUID] = [:]
+        for draft in includedDrafts {
+            switch effectiveResolution(draft) {
+            case .addNew: targetID[draft.id] = UUID()
+            case .useExisting(let existingID): targetID[draft.id] = existingID
             }
         }
+
+        var itemsToSave: [TaskItem] = []
+        var mergeDrafts: [ConfirmDraft] = []
+        for draft in includedDrafts {
+            guard let id = targetID[draft.id] else { continue } // unreachable: built from includedDrafts above
+            let parentTitle: String
+            let parentSourceTranscript: String?
+            switch effectiveResolution(draft) {
+            case .addNew:
+                let item = materialize(draft, id: id, now: now)
+                itemsToSave.append(item)
+                parentTitle = item.title
+                parentSourceTranscript = item.sourceTranscript
+            case .useExisting:
+                mergeDrafts.append(draft)
+                // No new `TaskItem` for a merge — but the followUpReview chip below still needs
+                // something to name the derived review after; the utterance's own resolved title
+                // reads fine even though the merge itself may keep the OLDER task's title.
+                parentTitle = draft.effectiveTitle
+                parentSourceTranscript = draft.task.sourceTranscript
+            }
+            // Mi-1: the "+ review after done" chip is dismissible (defaults on, per
+            // `ChipKind.followUpReview`'s doc comment) — only materialize the derived `.review`
+            // task when the user hasn't dismissed it. `id` here is the SAME post-save identity
+            // (fresh or merge-target) an intra-batch condition elsewhere in this batch would also
+            // resolve to — a follow-up review is just as valid a dependent either way.
+            if draft.task.followUpReview, !draft.dismissed.contains(.followUpReview) {
+                itemsToSave.append(materializeFollowUpReview(
+                    parentID: id, parentTitle: parentTitle, sourceTranscript: parentSourceTranscript, now: now
+                ))
+            }
+        }
+
+        // Việc 2, pass two's payload: every intra-batch `.taskDone` this batch resolved, translated
+        // from "the OTHER draft's id" into "the other draft's REAL post-save id" via `targetID`.
+        // Computed once here (pure — no store/`tasks` mutation yet) so both the store and no-store
+        // branches below can apply the identical list.
+        var intraBatchAttachments: [(ownID: UUID, condition: VolarCore.Condition)] = []
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id] else { continue }
+            for (index, referencedDraftID) in draft.intraBatchTaskDone {
+                // Dismiss always wins (constitution II) — same guard `resolvedConditions` applies
+                // to every other condition kind.
+                guard !draft.dismissedConditions.contains(index) else { continue }
+                // The referenced draft is unticked, was removed from the batch, or (defensively)
+                // never existed: Việc 2.4 says drop the condition rather than point at nothing.
+                guard let refID = targetID[referencedDraftID], refID != ownID else { continue }
+                intraBatchAttachments.append((ownID: ownID, condition: .taskDone(refID)))
+            }
+        }
+
+        let mergedTitles = mergeDrafts.map(\.effectiveTitle)
+        let mergedIDs = mergeDrafts.compactMap { targetID[$0.id] }
+        let savedTitles = itemsToSave.map(\.title) + mergedTitles
+        let remindersTargetIDs = itemsToSave.map(\.id) + mergedIDs
 
         guard let store else {
             // No-store fallback (previews/tests without a TaskStore) — mirrors `addTask`'s own
             // no-store branch: in-memory only, no validation (there is no store to validate against).
             tasks.insert(contentsOf: itemsToSave.reversed(), at: 0)
+            // Việc 3: apply each merge directly onto its `tasks` entry — same "no validation, this
+            // is the no-store fallback" convention the rest of this branch already follows.
+            for draft in mergeDrafts {
+                guard let existingID = targetID[draft.id],
+                      let index = tasks.firstIndex(where: { $0.id == existingID })
+                else { continue }
+                tasks[index] = mergeTransform(for: draft)(tasks[index])
+            }
+            // Việc 2 pass two, in-memory: append each resolved intra-batch condition directly.
+            for attachment in intraBatchAttachments {
+                guard let index = tasks.firstIndex(where: { $0.id == attachment.ownID }) else { continue }
+                if !tasks[index].conditions.contains(attachment.condition) {
+                    tasks[index].conditions.append(attachment.condition)
+                }
+            }
             notifyEligibilityAndScheduleResurface(before: before, now: now)
-            scheduleRemindersForSavedItems(itemsToSave) // no-op: `scheduler` is nil without a store
-            finishSaveUI(titles: itemsToSave.map(\.title))
+            scheduleRemindersForSavedItems(remindersTargetIDs) // no-op: `scheduler` is nil without a store
+            finishSaveUI(titles: savedTitles)
             // FIX 6: membership change (new tasks, possibly with new deadlines).
             syncCalendarMirror()
             return
@@ -2510,11 +2824,25 @@ final class AppState {
             for chunk in chunks {
                 try store.addBatch(chunk)
             }
+            // Việc 3: merges only ever touch an ALREADY-persisted task, so they never depend on
+            // anything the chunk loop above just created — but doing them right after keeps every
+            // store mutation for this `confirmSave()` grouped before the single refresh below.
+            for draft in mergeDrafts {
+                guard let existingID = targetID[draft.id] else { continue }
+                store.mergeIntoExisting(existingID, applying: mergeTransform(for: draft))
+            }
+            // Việc 2, pass two: attach every intra-batch `.taskDone` now that both ends (new OR
+            // merged) are real, persisted ids. `try?` — see this method's own doc comment for why
+            // a rejected edge here (e.g. two drafts in the same utterance depending on each other)
+            // drops just that one edge instead of unwinding an already-committed save.
+            for attachment in intraBatchAttachments {
+                try? store.addCondition(attachment.condition, to: attachment.ownID)
+            }
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
-            scheduleRemindersForSavedItems(itemsToSave)
-            finishSaveUI(titles: itemsToSave.map(\.title))
+            scheduleRemindersForSavedItems(remindersTargetIDs)
+            finishSaveUI(titles: savedTitles)
             // FIX 6: membership change (new tasks, possibly with new deadlines) — every chunk
             // committed successfully by this point.
             syncCalendarMirror()
@@ -2525,9 +2853,11 @@ final class AppState {
             // A failure on a LATER chunk (after earlier chunks already committed) is refreshed
             // from the store here too, so the UI never shows stale/duplicate state for the part
             // that did save — the user only re-confirms what's genuinely still outstanding.
+            // Merges/intra-batch conditions never ran (they're only reached after the `do` block's
+            // chunk loop finishes without throwing), so there is nothing further to unwind here.
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
-            scheduleRemindersForSavedItems(itemsToSave)
+            scheduleRemindersForSavedItems(itemsToSave.map(\.id))
             captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             captureState = .error
             // FIX 6: an earlier chunk may have committed successfully before this failure (see the
@@ -2537,23 +2867,70 @@ final class AppState {
         }
     }
 
-    /// WG-1 (constitution IV): schedules reminders for exactly the drafts that actually made it
-    /// into `tasks` — filtering against the just-refreshed `tasks` snapshot (rather than assuming
-    /// every item in `items` saved) so a partial-chunk failure in `confirmSave`'s catch branch
-    /// never schedules a reminder for a task that was never actually persisted.
-    private func scheduleRemindersForSavedItems(_ items: [TaskItem]) {
+    /// Việc 3: the merge-into-existing overlay, as a PURE `TaskItem -> TaskItem` transform so it
+    /// can be shared verbatim between the store path (`TaskStore.mergeIntoExisting`, which applies
+    /// it via `VolarTask.apply(_:)` behind its own cycle/rule-2 guards) and the no-store fallback
+    /// (which applies it directly to a `tasks` element, matching that branch's existing "no
+    /// validation" convention). Scalar attributes overwrite the existing value ONLY when
+    /// `AppState.resolvedValue` says this draft actually resolved one (present, not dismissed, and
+    /// accepted if uncertain — the SAME gate a brand-new task's `materialize(_:id:now:)` already
+    /// applies) — `nil` from `resolvedValue` here means "this utterance said nothing about this
+    /// attribute," so the existing task's value is left exactly as it was, never cleared. Anh Khôi
+    /// deliberately did NOT ask for title/kind/notes to be touched by a merge, so this leaves those
+    /// alone. Conditions are UNIONED (de-duplicated), never replaced — anh Khôi: "có thể merge tất
+    /// cả condition vào" — intra-batch `.taskDone` entries are excluded from this union on purpose
+    /// (same as a brand-new task, `resolvedConditions` never includes them) since they're attached
+    /// separately, after every draft's real/merge-target id is known (`confirmSave`'s second pass).
+    private func mergeTransform(for draft: ConfirmDraft) -> (TaskItem) -> TaskItem {
+        { existing in
+            var merged = existing
+            if let deadline = resolvedValue(draft.task.deadline, kind: .deadline, draft: draft) {
+                merged.deadline = deadline
+            }
+            if let priorityRaw = resolvedValue(draft.task.priority, kind: .priority, draft: draft) {
+                merged.priority = Self.uiPriority(from: priorityRaw)
+            }
+            if let estimate = resolvedValue(draft.task.estimateMinutes, kind: .estimate, draft: draft) {
+                merged.durationMinutes = estimate
+            }
+            if let reminder = resolvedValue(draft.task.reminderOverride, kind: .reminder, draft: draft) {
+                merged.reminderOverride = reminder
+            }
+            if let recurrence = resolvedValue(draft.task.recurrence, kind: .recurrence, draft: draft) {
+                merged.recurrence = recurrence
+            }
+            for condition in resolvedConditions(draft) where !merged.conditions.contains(condition) {
+                merged.conditions.append(condition)
+            }
+            return merged
+        }
+    }
+
+    /// WG-1 (constitution IV): schedules reminders for exactly the ids that actually made it into
+    /// `tasks` — filtering against the just-refreshed `tasks` snapshot (rather than assuming every
+    /// id in `ids` saved) so a partial-chunk failure in `confirmSave`'s catch branch never
+    /// schedules a reminder for a task that was never actually persisted. Takes bare ids (rather
+    /// than `[TaskItem]`, the pre-2026-07-28 signature) since `ReminderScheduler.scheduleReminders
+    /// (taskId:)` re-reads the task fresh from the store anyway — this lets `confirmSave` pass a
+    /// MERGED task's id (whose deadline/reminderOverride may have just changed) alongside brand-new
+    /// ones without needing a `TaskItem` for something that was never newly materialized.
+    private func scheduleRemindersForSavedItems(_ ids: [UUID]) {
         guard let scheduler else { return }
         let savedIds = Set(tasks.map(\.id))
-        for item in items where savedIds.contains(item.id) {
-            scheduler.scheduleReminders(taskId: item.id)
+        for id in ids where savedIds.contains(id) {
+            scheduler.scheduleReminders(taskId: id)
         }
     }
 
     /// One draft -> one `TaskItem`, resolving every `ParsedValue`/`ParsedCondition` per the
     /// contract's "Confirm + materialize" rules. `sourceTranscript` is ALWAYS persisted (closes
     /// the backlog item where `confirmSave` used to hardcode `deadline: nil` for voice tasks —
-    /// deadlines, like every other attribute, now come resolved from `ParsedTask`).
-    private func materialize(_ draft: ConfirmDraft, now: Date) -> TaskItem {
+    /// deadlines, like every other attribute, now come resolved from `ParsedTask`). `id` is now an
+    /// explicit parameter (2026-07-28, was `TaskItem.init`'s own default `UUID()`) so
+    /// `confirmSave` can mint it BEFORE calling this, record it in `targetID`, and have an
+    /// intra-batch `.taskDone` condition elsewhere in the same batch resolve to the exact id this
+    /// task ends up with.
+    private func materialize(_ draft: ConfirmDraft, id: UUID, now: Date) -> TaskItem {
         let task = draft.task
         let deadline = resolvedValue(task.deadline, kind: .deadline, draft: draft)
         let estimate = resolvedValue(task.estimateMinutes, kind: .estimate, draft: draft)
@@ -2563,6 +2940,7 @@ final class AppState {
         let kind = draft.dismissed.contains(.kind) ? .task : task.kind
 
         return TaskItem(
+            id: id,
             title: draft.effectiveTitle,
             // `details` is the voice read-back copy (`AppState.speakDetails`'s frozen-field
             // meaning, distinct from `notes` — see TaskItem.swift) — prefer explicit notes, else
@@ -2630,23 +3008,28 @@ final class AppState {
         }
     }
 
-    /// `followUpReview` (contract): a second `.review`-kind task depending on the just-created
-    /// one via `.taskDone`. Appended immediately after its parent in `confirmSave`'s batch, so
+    /// `followUpReview` (contract): a second `.review`-kind task depending on `parentID` via
+    /// `.taskDone`. Appended immediately after its parent in `confirmSave`'s batch, so
     /// `TaskStore.addBatch`'s intra-batch snapshot (documented to grow as earlier items in the
-    /// SAME batch are accepted) validates the edge without a second pass.
-    private func materializeFollowUpReview(for parent: TaskItem, now: Date) -> TaskItem {
+    /// SAME batch are accepted) validates the edge without a second pass — and for a Việc 3 merge
+    /// target, `parentID` already refers to an ALREADY-persisted task, so the edge validates
+    /// trivially against the store's existing snapshot regardless. Takes `parentID`/`parentTitle`/
+    /// `sourceTranscript` directly (2026-07-28, was a full `parent: TaskItem`) so `confirmSave` can
+    /// call this the same way whether the parent is a brand-new item it just materialized OR an
+    /// existing task being merged into (which never gets its own `TaskItem` from this save).
+    private func materializeFollowUpReview(parentID: UUID, parentTitle: String, sourceTranscript: String?, now: Date) -> TaskItem {
         TaskItem(
-            title: "Review: \(parent.title)",
+            title: "Review: \(parentTitle)",
             details: "",
             priority: .medium,
             status: .todo,
             deadline: nil,
-            conditions: [.taskDone(parent.id)],
+            conditions: [.taskDone(parentID)],
             createdAt: now,
             when: .later,
             durationMinutes: nil,
             frog: false,
-            sourceTranscript: parent.sourceTranscript,
+            sourceTranscript: sourceTranscript,
             kind: .review
         )
     }

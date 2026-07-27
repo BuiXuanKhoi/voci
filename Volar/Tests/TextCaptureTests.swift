@@ -241,7 +241,14 @@ final class TextCaptureTests: XCTestCase {
         XCTAssertEqual(state.textCapture, .saved(titles: ["Buy milk"]))
     }
 
-    func testApplyParseResultReportsEveryTitleForACompoundUtterance() {
+    /// Rewritten 2026-07-28. This used to assert that a two-task typed line saved both tasks
+    /// immediately, which was correct while typed capture always skipped the confirm card. It no
+    /// longer is: a compound utterance is exactly the case where the user needs to see what was
+    /// understood — how many tasks came out, which ones depend on which, and whether any of them
+    /// duplicates something already in the store. Typed capture now saves directly ONLY for the
+    /// simple case (one task, no duplicate candidates, no conditions); anything else routes into
+    /// the same confirm list the voice flow uses.
+    func testCompoundTypedUtteranceRoutesToConfirmInsteadOfSavingDirectly() {
         let state = AppState()
         state.textCapture = .saving
         state.textCaptureInput = "buy milk and call mom"
@@ -251,8 +258,30 @@ final class TextCaptureTests: XCTestCase {
             session: 0
         )
 
+        XCTAssertEqual(state.confirmDrafts.count, 2, "both parsed tasks must reach the confirm list")
+        XCTAssertEqual(state.confirmDrafts.map(\.task.title), ["Buy milk", "Call mom"], "every title survives the handoff, in order")
+        XCTAssertEqual(state.captureState, .parsed, "confirm review is what opens the popup")
+        XCTAssertEqual(state.textCapture, .closed, "the text panel hands off and closes rather than reporting a save")
+        XCTAssertFalse(state.tasks.contains { $0.title == "Buy milk" }, "nothing is persisted until the user confirms")
+        XCTAssertFalse(state.tasks.contains { $0.title == "Call mom" }, "nothing is persisted until the user confirms")
+    }
+
+    /// The other half of the same rule: a single, unambiguous typed task still saves on Enter with
+    /// no review step. "type → Add" was a deliberate property of typed capture and only compound or
+    /// ambiguous input gives it up.
+    func testSingleSimpleTypedTaskStillSavesDirectly() {
+        let state = AppState()
+        state.textCapture = .saving
+        state.textCaptureInput = "buy milk"
+
+        state.applyTextCaptureParseResult([makeParsedTask(title: "Buy milk")], session: 0)
+
         XCTAssertTrue(state.tasks.contains { $0.title == "Buy milk" })
-        XCTAssertTrue(state.tasks.contains { $0.title == "Call mom" })
-        XCTAssertEqual(state.textCapture, .saved(titles: ["Buy milk", "Call mom"]), "a multi-task line must report every title, not just a count")
+        XCTAssertEqual(state.textCapture, .saved(titles: ["Buy milk"]), "the typed panel reports the save itself rather than handing off")
+        // Deliberately NOT asserting `confirmDrafts.isEmpty`: the simple path assigns
+        // `confirmDrafts` before calling `confirmSave()`, and clearing it is part of that method's
+        // trailing 900ms auto-dismiss. `captureState` below is the property that actually
+        // distinguishes "saved outright" from "handed off for review".
+        XCTAssertNotEqual(state.captureState, .parsed, "the simple case must never open confirm review")
     }
 }
