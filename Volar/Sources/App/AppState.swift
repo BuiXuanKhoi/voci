@@ -510,51 +510,6 @@ final class AppState {
     // instead of awaiting an actor itself, matching how every other `SettingsView` tab only ever
     // touches plain `AppState` properties/methods.
 
-    /// 2026-07-27 (dual-identity trap UX, backlog): which sign-in method most recently succeeded.
-    /// Supabase matches identity by EMAIL, and Apple's "Hide My Email" relay issues a
-    /// `@privaterelay.appleid.com` address that never equals the user's real email — so signing in
-    /// with Apple once and with an email OTP another time can silently create TWO separate
-    /// `auth.users` rows (and two separate entitlement rows), leaving someone who bought Pro on one
-    /// seeing `free` on the other. This can't be fixed by blocking either method (both are kept,
-    /// per product decision), only mitigated with UX that reminds the user which one they used —
-    /// see `lastAuthMethod` below and its two call sites in `SettingsView`.
-    enum AuthMethodHint: String, Sendable {
-        case apple, email
-
-        var displayName: String {
-            switch self {
-            case .apple: return "Sign in with Apple"
-            case .email: return "Email code"
-            }
-        }
-
-        /// The OTHER method — used by the free-tier hint ("if you subscribed using X, sign out and
-        /// sign back in that way instead").
-        var other: AuthMethodHint {
-            switch self {
-            case .apple: return .email
-            case .email: return .apple
-            }
-        }
-    }
-
-    /// `nonisolated static let` — NOT a plain `static let` — for the same reason as
-    /// `cloudParseConsentKey` above and `IntentRouter.maxTaskCap`
-    /// (`Sources/Parsing/IntentParsing.swift`): a `static let` declared inside a `@MainActor` type
-    /// inherits that type's isolation (only statics at global/file scope are implicitly
-    /// `nonisolated`), so without this modifier any nonisolated context reading this key fails to
-    /// compile under Swift 6 strict concurrency. This exact bug class has already bitten this repo
-    /// twice — see the two precedents named above — so it's called out explicitly here rather than
-    /// risk a third.
-    nonisolated static let lastAuthMethodKey = "volar.lastAuthMethod"
-
-    /// Which method last successfully signed the user in. Persisted (`lastAuthMethodKey`) and
-    /// loaded in `init` alongside the other persisted settings there. Deliberately survives
-    /// `signOutAccount()` (remembering across a sign-out is the entire point — the badge on the
-    /// signed-out Account tab reads this) but is cleared by `deleteAccount()` (that account no
-    /// longer exists, so there is nothing left to remember signing into).
-    var lastAuthMethod: AuthMethodHint?
-
     var accountEmail: String?
     var accountTier: AccountTier = .free
     var subscriptionStatus: SubscriptionStatus?
@@ -788,10 +743,6 @@ final class AppState {
         // absent means "never run before" (the honest default for a fresh install), so `Bool` here
         // needs no fallback expression the way `speechEngineChoice`/`voiceDeliveryMode` do.
         self.hasSeenTour = UserDefaults.standard.bool(forKey: Self.hasSeenTourKey)
-        // Dual-identity trap UX: same read-only-override-from-persisted-choice convention as every
-        // other setting above — absent means "never signed in on this install", the honest default.
-        self.lastAuthMethod = UserDefaults.standard.string(forKey: Self.lastAuthMethodKey)
-            .flatMap(AuthMethodHint.init(rawValue:))
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -926,34 +877,6 @@ final class AppState {
         }
     }
 
-    /// Persists which method just successfully signed the user in — see `lastAuthMethod`'s doc
-    /// comment for why this exists. Called ONLY from a success branch (never before the `await`,
-    /// never from a `catch`): a cancelled/failed attempt must not overwrite a real prior method.
-    private func rememberAuthMethod(_ method: AuthMethodHint) {
-        lastAuthMethod = method
-        UserDefaults.standard.set(method.rawValue, forKey: Self.lastAuthMethodKey)
-    }
-
-    func signInWithApple() {
-        accountBusy = true
-        accountError = nil
-        _Concurrency.Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.accountBusy = false }
-            do {
-                let user = try await AccountService.shared.signInWithApple()
-                self.accountEmail = user.email
-                self.rememberAuthMethod(.apple)
-                await Entitlements.shared.relinkCurrentEntitlements()
-                self.refreshAccountState()
-            } catch AccountError.cancelled {
-                // Not a real failure — user dismissed the sheet. No error text shown.
-            } catch {
-                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            }
-        }
-    }
-
     func sendEmailOTP(email: String) {
         accountBusy = true
         accountError = nil
@@ -977,7 +900,6 @@ final class AppState {
             do {
                 let user = try await AccountService.shared.verifyEmailOTP(email: email, code: code)
                 self.accountEmail = user.email
-                self.rememberAuthMethod(.email)
                 await Entitlements.shared.relinkCurrentEntitlements()
                 self.refreshAccountState()
             } catch {
@@ -1017,11 +939,6 @@ final class AppState {
                 self.accountTier = .free
                 self.subscriptionStatus = nil
                 self.accountError = nil
-                // Unlike `signOutAccount()` (which deliberately keeps this — remembering across a
-                // sign-out is the whole point), a DELETED account no longer exists, so there is
-                // nothing left to remember signing back into.
-                self.lastAuthMethod = nil
-                UserDefaults.standard.removeObject(forKey: Self.lastAuthMethodKey)
             } catch {
                 self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             }

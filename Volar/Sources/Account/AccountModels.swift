@@ -101,8 +101,6 @@ enum AccountError: Error, Sendable, Equatable {
     /// fall back on-device silently (contract §1: "Chưa login → ... Không hiện lỗi"). Only
     /// `SettingsView`'s explicit sign-in flow shows this to the user.
     case signedOut
-    /// User dismissed/cancelled the Apple Sign-In sheet — not a real failure.
-    case cancelled
     /// Non-2xx HTTP response. `code` is the decoded `{"error":"…"}` body when present (contract
     /// §5's opaque error codes), `nil` if the body didn't decode.
     case http(status: Int, code: String?)
@@ -132,7 +130,6 @@ extension AccountError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .signedOut: return "Not signed in."
-        case .cancelled: return "Sign-in was cancelled."
         case .http(let status, let code): return "Request failed (\(code ?? "http_\(status)"))."
         case .decoding: return "Couldn't read the server's response."
         case .network(let message): return "Network error: \(message)"

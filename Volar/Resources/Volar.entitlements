@@ -22,15 +22,6 @@
 	<key>com.apple.security.network.client</key>
 	<true/>
 
-	<!-- feature 002 account-auth.md (contracts/account-auth.md): Sign in with Apple, one of
-	     the two account entry points (alongside email OTP). Required for
-	     ASAuthorizationAppleIDProvider/ASAuthorizationController to work at all — without this
-	     entitlement the Apple sign-in sheet fails immediately. -->
-	<key>com.apple.developer.applesignin</key>
-	<array>
-		<string>Default</string>
-	</array>
-
 	<!-- CRITICAL: without this the microphone silently stops working under App Sandbox even
 	     though NSMicrophoneUsageDescription (Info.plist) is set — TCC never even prompts, capture
 	     just fails. This is the one entitlement whose absence breaks the app's core function. -->

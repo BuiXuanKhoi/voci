@@ -1235,25 +1235,6 @@ struct SettingsView: View {
 
     private var signedOutAccountBody: some View {
         VStack(alignment: .leading, spacing: 10) {
-            // Dual-identity trap UX (backlog): a reminder of which method worked last time, so a
-            // Pro subscriber who tries the OTHER method doesn't accidentally end up looking at a
-            // brand-new, unrelated `free` account. Informational only — never blocks either button
-            // below, both login paths stay fully available per product decision.
-            if let method = appState.lastAuthMethod {
-                Text("Last time you signed in with \(method.displayName).")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(VolarColor.textMut)
-            }
-
-            settingsPillButton("Sign in with Apple", solid: true) {
-                appState.signInWithApple()
-            }
-            .disabled(appState.accountBusy)
-
-            Text("or sign in with email")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(VolarColor.textMut)
-
             HStack(spacing: 8) {
                 TextField("you@example.com", text: $accountEmailInput)
                     .textFieldStyle(.plain)
@@ -1315,17 +1296,6 @@ struct SettingsView: View {
 
             if appState.accountTier == .free {
                 upgradeSection
-                // Dual-identity trap UX (backlog): this account genuinely reads `free` server-side
-                // — but if the user bought Pro using the OTHER sign-in method, Apple's Hide My
-                // Email relay can mean that purchase lives on a totally different `auth.users` row
-                // than the one they're looking at right now. Informational only — deliberately NO
-                // auto-sign-out button here, just a pointer at the fix.
-                if let method = appState.lastAuthMethod {
-                    Text("Already subscribed? Your Pro plan lives with the account you bought it on. If you subscribed using \(method.other.displayName), sign out and sign back in that way — Apple's Hide My Email can create a second, separate account.")
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(VolarColor.textSec)
-                        .lineSpacing(2)
-                }
             }
 
             redeemCodeRow
