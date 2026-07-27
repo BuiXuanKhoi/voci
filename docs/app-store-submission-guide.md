@@ -76,10 +76,33 @@ Supabase SMTP mặc định giới hạn **~2 mail/giờ**. Reviewer đăng nh�
 bị chặn → họ kết luận "app không đăng nhập được" → **reject**. Phải cắm SMTP thật
 (Resend/SendGrid/Postmark) vào Supabase Auth **trước khi submit**, không phải "sau khi có user".
 
+## Cổng 2.5 — 🔴 HỢP ĐỒNG & NGÂN HÀNG (làm TRƯỚC mọi thứ liên quan tiền)
+
+**Đây là thứ hay giết IAP nhất và không doc nào trong repo từng nhắc tới.** App Store Connect ▸
+**Business** (trước gọi là *Agreements, Tax, and Banking*):
+
+1. Ký **Paid Applications Agreement** (khác với Free Apps Agreement đã có sẵn khi mở tài khoản).
+2. Điền **Bank Account** (tài khoản nhận tiền).
+3. Điền **Tax Forms** — pháp nhân/cá nhân Việt Nam nộp **W-8BEN** (cá nhân) hoặc **W-8BEN-E**
+   (công ty) cho phần thuế Mỹ.
+
+**Chưa xong cả 3 thì `Product.products(for:)` trả về MẢNG RỖNG.** Không throw, không lỗi, không
+log — nút mua chỉ đơn giản là trống trơn. Rất dễ mất mấy ngày đi soi code StoreKit trong khi code
+hoàn toàn đúng. Nếu trên Mac thấy `appState.monthlyProduct == nil` mà mọi thứ khác đúng, kiểm mục
+này TRƯỚC KHI nghi ngờ code.
+
+Apple duyệt banking/tax không tức thì (thường vài giờ tới vài ngày). Làm sớm, đừng để tới lúc
+sắp submit.
+
 ## Cổng 3 — Setup App Store Connect
 
-Làm theo `docs/app-store-connect-checklist.md` §1–§8, không thêm gì. Lưu ý thứ tự phụ thuộc:
-App ID (§2) → app record (§1) → subscription group (§4) → App Store Server API key (§5).
+Làm theo `docs/app-store-connect-checklist.md` §1–§8. Thứ tự phụ thuộc:
+App ID (§2) → app record (§1) → subscription group (§4).
+
+**⚠️ SỬA 2026-07-27 — bỏ bước "App Store Server API key":** `_shared/appstore.ts` **KHÔNG** gọi
+App Store Server API; nó chỉ verify chữ ký JWS của giao dịch bằng root CA công khai của Apple. Ba
+secret cần thiết (`APPSTORE_BUNDLE_ID`, `APPSTORE_ENVIRONMENT`, `APPSTORE_ROOT_CA_PEM`) **đã set
+và verify xong 2026-07-27** — không phải tạo key `.p8` nào cả. Mục §5 của checklist cũ nói sai.
 
 Nhắc lại 2 điều dễ quên trong đó:
 - Subscription **auto-renewable phải được submit kèm build đầu tiên** thì mới được review cùng đợt.
