@@ -1218,6 +1218,18 @@ struct SettingsView: View {
 
     // MARK: - About
 
+    /// Read the real marketing version from the bundle instead of typing it in the string below —
+    /// a typed literal silently drifts from `Info.plist`'s `CFBundleShortVersionString` on every
+    /// version bump (this string used to read "1.0.2" while Info.plist said "1.0.0"). Falls back
+    /// to an empty string (never force-unwrapped) so a lookup failure just omits the version
+    /// rather than crashing or showing a placeholder.
+    private var appVersionSuffix: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              !version.isEmpty
+        else { return "" }
+        return " \(version)"
+    }
+
     private var aboutTab: some View {
         VStack(spacing: 14) {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -1228,7 +1240,7 @@ struct SettingsView: View {
                 }
                 .shadow(color: accentColors.glow, radius: 20, y: 8)
 
-            Text("Volar 1.0.2")
+            Text("Volar AI\(appVersionSuffix)")
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(VolarColor.textPri)
 

@@ -52,14 +52,18 @@ Banking*) ▸ tab **Agreements**.
 
 ## Bước 1 — App record
 
-Vào **My Apps**. Kiểm tra đã có app nào tên **Volar** hoặc có bundle ID `tech.kioh.Volar` chưa.
+Vào **My Apps**. Kiểm tra đã có app nào tên **Volar AI** hoặc có bundle ID `tech.kioh.Volar` chưa.
 
 - **Nếu đã có:** ghi lại **App Apple ID** (dãy số hiện ở mục App Information) rồi sang Bước 2.
 - **Nếu chưa có:** bấm **+** ▸ **New App**, điền:
   - **Platforms:** chỉ tick **macOS** (KHÔNG tick iOS)
-  - **Name:** `Volar`
+  - **Name:** `Volar AI`
+    > ⚠️ Đây CHỈ là field **Name** (tên hiển thị trên App Store) — đổi thành `Volar AI`. **Bundle
+    > ID KHÔNG đổi**, xem dòng ngay dưới đây: vẫn phải chọn đúng `tech.kioh.Volar` (không có
+    > khoảng trắng, không có "AI"). Hai field này độc lập với nhau.
   - **Primary Language:** English (U.S.)
-  - **Bundle ID:** chọn `tech.kioh.Volar` trong danh sách.
+  - **Bundle ID:** chọn `tech.kioh.Volar` trong danh sách (giữ nguyên, KHÔNG phải `tech.kioh.Volar AI`
+    hay bất kỳ biến thể nào khác).
     → Nếu bundle ID này **không có** trong danh sách, DỪNG và báo cáo: người dùng cần tạo App ID
     đó trong Developer portal trước (xem phụ lục cuối file).
   - **SKU:** `volar-macos-001`

@@ -4,10 +4,17 @@
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>tech.kioh.Volar</string>
+	<!--
+	  CFBundleName / CFBundleDisplayName carry the marketing brand "Volar AI" (App Store listing,
+	  under the Dock icon, About box). CFBundleExecutable below is deliberately left as `Volar`,
+	  unrelated to branding — it is the actual binary filename on disk, and it is frozen alongside
+	  CFBundleIdentifier (`tech.kioh.Volar`) for code-signing / path stability. Do not "fix" this
+	  split by renaming the executable to match the display name.
+	-->
 	<key>CFBundleName</key>
-	<string>Volar</string>
+	<string>Volar AI</string>
 	<key>CFBundleDisplayName</key>
-	<string>Volar</string>
+	<string>Volar AI</string>
 	<key>CFBundleShortVersionString</key>
 	<string>1.0.0</string>
 	<key>CFBundleVersion</key>

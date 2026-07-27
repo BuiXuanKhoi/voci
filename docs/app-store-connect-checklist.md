@@ -15,16 +15,24 @@ press "Submit for Review"; the app builds and runs fine without it in the meanti
 
 ---
 
-## 1. Reserve the app name "Volar" — [BLOCKS SUBMISSION]
+## 1. Reserve the app name "Volar AI" — [BLOCKS SUBMISSION]
 1. App Store Connect → Apps → **+** → New App.
 2. Platform: macOS (add iOS later if/when you ship that too — the bundle id and entitlements here
    are macOS-first per `Volar/project.yml`'s `deploymentTarget: macOS: "14.0"`).
-3. Name: **"Volar"**. Apple is the final arbiter of uniqueness across the whole store (not just
-   what you can find by searching) — reserving it here doesn't guarantee it clears review.
-4. **Fallback if "Volar" is taken:** keep the app's internal name/bundle as Volar (no code
-   change needed) but set the *App Store display name* to something disambiguated, e.g.
-   **"Volar — Voice Tasks"**. This is a metadata-only field in App Store Connect, separate from
-   `CFBundleName`/`CFBundleDisplayName` in the binary — no repo change required either way.
+3. Name: **"Volar AI"** (decided 2026-07-27 — was "Volar"). Apple is the final arbiter of
+   uniqueness across the whole store (not just what you can find by searching) — reserving it here
+   doesn't guarantee it clears review. "Volar AI" is more specific than the bare word, so it is
+   also less likely to collide than "Volar" was (the bare name already shares space with Volaris
+   the airline, Volar.js the dev tool, and a "Volar Dating" app).
+4. **Fallback if "Volar AI" is taken:** try **"Volar — Voice Tasks"** or similar. The App Store
+   Name is metadata only; it does NOT have to match `CFBundleName`/`CFBundleDisplayName` in the
+   binary (both now read `Volar AI`) and has nothing to do with the bundle id
+   (`tech.kioh.Volar`, frozen). So a fallback here needs no repo change.
+
+   ⚠️ **Do not "align" the bundle id to whatever name you end up with.** The bundle id is frozen
+   forever once the app ships, the server compares it byte-for-byte against `APPSTORE_BUNDLE_ID`,
+   and the IAP product ids are derived from it. Name and bundle id are allowed to differ — they
+   already do.
 5. SKU: any internal identifier you like (e.g. `volar-macos`), not user-visible.
 6. Primary language / bundle id: pick `tech.kioh.Volar` from the App ID dropdown — this requires
    step 2 below to already exist.
