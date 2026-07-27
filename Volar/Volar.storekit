@@ -1,0 +1,85 @@
+{
+  "identifier" : "7A1C4E90-0001-4B2A-9C31-VOLARSTOREKIT",
+  "nonRenewingSubscriptions" : [
+  ],
+  "products" : [
+  ],
+  "settings" : {
+    "_applicationInternalID" : "0000000000",
+    "_developerTeamID" : "0000000000",
+    "_failTransactionsEnabled" : false,
+    "_lastSynchronizedDate" : 0,
+    "_locale" : "en_US",
+    "_storefront" : "USA",
+    "_storeKitErrors" : [
+    ]
+  },
+  "subscriptionGroups" : [
+    {
+      "id" : "21B7D3F4-0002-4E55-8A10-VOLARPROGROUP",
+      "localizations" : [
+      ],
+      "name" : "Volar Pro",
+      "subscriptions" : [
+        {
+          "adHocOffers" : [
+          ],
+          "codeOffers" : [
+          ],
+          "displayPrice" : "6.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "3C9E1A22-0003-4771-B0D2-VOLARMONTHLY",
+          "introductoryOffer" : {
+            "internalID" : "4D0F2B33-0004-4882-C1E3-VOLARMTRIAL",
+            "paymentMode" : "free",
+            "subscriptionPeriod" : "P2W"
+          },
+          "localizations" : [
+            {
+              "description" : "Cloud speech recognition and unlimited cloud parsing.",
+              "displayName" : "Volar Pro (Monthly)",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "tech.kioh.Volar.pro.monthly",
+          "recurringSubscriptionPeriod" : "P1M",
+          "referenceName" : "Volar Pro Monthly",
+          "subscriptionGroupID" : "21B7D3F4-0002-4E55-8A10-VOLARPROGROUP",
+          "type" : "RecurringSubscription"
+        },
+        {
+          "adHocOffers" : [
+          ],
+          "codeOffers" : [
+          ],
+          "displayPrice" : "49.99",
+          "familyShareable" : false,
+          "groupNumber" : 1,
+          "internalID" : "5E1A3C44-0005-4993-D2F4-VOLARYEARLY",
+          "introductoryOffer" : {
+            "internalID" : "6F2B4D55-0006-4AA4-E3A5-VOLARYTRIAL",
+            "paymentMode" : "free",
+            "subscriptionPeriod" : "P2W"
+          },
+          "localizations" : [
+            {
+              "description" : "Cloud speech recognition and unlimited cloud parsing. Best value.",
+              "displayName" : "Volar Pro (Yearly)",
+              "locale" : "en_US"
+            }
+          ],
+          "productID" : "tech.kioh.Volar.pro.yearly",
+          "recurringSubscriptionPeriod" : "P1Y",
+          "referenceName" : "Volar Pro Yearly",
+          "subscriptionGroupID" : "21B7D3F4-0002-4E55-8A10-VOLARPROGROUP",
+          "type" : "RecurringSubscription"
+        }
+      ]
+    }
+  ],
+  "version" : {
+    "major" : 4,
+    "minor" : 0
+  }
+}
