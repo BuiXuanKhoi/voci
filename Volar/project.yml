@@ -4,6 +4,24 @@ options:
   deploymentTarget:
     macOS: "14.0"
   createIntermediateGroups: true
+# Signing lives HERE, at project level, not in Xcode's Signing & Capabilities pane: `.xcodeproj` is
+# a generated artifact, so anything set through the Xcode UI is wiped by the next
+# `xcodegen generate`. Without `DEVELOPMENT_TEAM` the generated project has no team at all and every
+# build fails with "Volar requires a provisioning profile. Enable development signing and select a
+# provisioning profile."
+#
+# Project level rather than inside the `Volar` target so `VolarTests` inherits it too — a macOS unit
+# test bundle is code-signed as well, and giving only the app target a team makes the test target
+# fail on its own with the same error.
+#
+# `Automatic` lets Xcode create/renew the Apple Development + Apple Distribution certs and the
+# matching profiles itself. It needs the App ID `tech.kioh.Volar` to already carry the capabilities
+# the entitlements file asks for (Sign In with Apple, In-App Purchase) — a mismatch there surfaces
+# as a profile-creation failure naming the capability, not as a signing error.
+settings:
+  base:
+    DEVELOPMENT_TEAM: ZXWAPGR9XP
+    CODE_SIGN_STYLE: Automatic
 configs:
   Debug: debug
   Release: release
