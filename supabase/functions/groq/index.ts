@@ -91,8 +91,17 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     return errorResponse(405, "invalid_request");
   }
 
-  const contentType = (req.headers.get("content-type") ?? "").toLowerCase();
-  if (!contentType.startsWith("multipart/form-data")) {
+  // Keep the header EXACTLY as sent; only the media-type comparison is case-insensitive.
+  //
+  // This used to be `const contentType = (...).toLowerCase()`, and that lowercased string was then
+  // reused verbatim as the content-type of the internal Request the multipart body is reparsed
+  // through (see `reparsed` below) — which lowercased the BOUNDARY along with the media type.
+  // Boundary matching is byte-exact, and the client's boundary is `volar-<UUID>` where Swift's
+  // `UUID.uuidString` is uppercase, so the reparser looked for `--volar-e621e1f8…` in a body
+  // delimited by `--volar-E621E1F8…`, found no parts, threw, and every single cloud-speech request
+  // died as an unlogged `400 invalid_request`.
+  const contentType = req.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().startsWith("multipart/form-data")) {
     return errorResponse(415, "invalid_request");
   }
 
@@ -167,6 +176,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     rawBytes = await readBodyCappedBytes(req, maxAudioBytes);
   } catch (err) {
     if (err instanceof BodyTooLargeError) return errorResponse(413, "payload_too_large");
+    logError("groq_body_read_failed", { message: err instanceof Error ? err.message : "unknown" });
     return errorResponse(400, "invalid_request");
   }
 
@@ -188,12 +198,21 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
       body: new Blob([new Uint8Array(rawBytes)]),
     });
     form = await reparsed.formData();
-  } catch {
+  } catch (err) {
+    // Logged because this branch is otherwise undiagnosable from either side: the client sees a
+    // bare 400 and the server said nothing at all — which is exactly how the lowercased-boundary
+    // bug above survived. `boundaryEcho` is the declared boundary only, never body content.
+    logError("groq_multipart_parse_failed", {
+      message: err instanceof Error ? err.message : "unknown",
+      boundaryEcho: contentType.split("boundary=")[1] ?? "absent",
+      bytes: rawBytes.byteLength,
+    });
     return errorResponse(400, "invalid_request");
   }
 
   const file = form.get("file");
   if (!(file instanceof File)) {
+    logError("groq_missing_file_part", { fields: [...form.keys()].join(",") });
     return errorResponse(400, "invalid_request");
   }
 
