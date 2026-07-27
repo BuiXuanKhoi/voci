@@ -10,7 +10,6 @@ import SwiftUI
 import AppKit
 import ServiceManagement
 import Speech
-import StoreKit
 import UniformTypeIdentifiers
 
 struct SettingsView: View {
@@ -81,6 +80,9 @@ struct SettingsView: View {
     /// the actual redeem call + success/failure state lives on `appState` (`redeemPromoCode(_:)`/
     /// `lastRedeemedUntil`/`accountError`).
     @State private var promoCodeInput = ""
+    /// Drives the `PaywallView` sheet — the ONE purchase surface in the app (replaces the old bare
+    /// `productRow` pair that used to live directly in `upgradeSection`).
+    @State private var showPaywall = false
 
     @Environment(AppState.self) private var appState
     // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
@@ -211,7 +213,7 @@ struct SettingsView: View {
                 }
             }
             if appState.speechEngineChoice == .groq, !GroqEngine.isConfigured {
-                SettingsRow(label: "Groq status", hint: "Groq cloud transcription is a Pro feature — sign in and upgrade in the Account tab to enable it. Until then Volar uses Apple on-device recognition.") {
+                SettingsRow(label: "Groq status", hint: "Cloud transcription needs an account, free or Pro — sign in in the Account tab to enable it (Pro just raises your daily quota). Until then Volar uses Apple on-device recognition.") {
                     Text("Not configured — using Apple on-device")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(VolarColor.textSec)
@@ -950,6 +952,17 @@ struct SettingsView: View {
         VStack(spacing: 12) {
             accountCard
         }
+        .sheet(isPresented: $showPaywall) {
+            // `onNeedSignIn`: the paywall's own CTA routes here instead of attempting a doomed
+            // purchase when signed out (`Entitlements.purchase` throws `.notSignedIn` — see
+            // `PaywallView`'s doc comment). Dismiss the sheet and land on this same Account tab,
+            // where the sign-in forms already are — already the current tab here, but kept explicit
+            // since `showPaywall` isn't necessarily only ever opened from this tab in the future.
+            PaywallView(onNeedSignIn: {
+                showPaywall = false
+                tab = .account
+            })
+        }
     }
 
     /// Single card, same "one `VolarColor.card` block, not several `SettingsRow`s" reasoning as
@@ -1175,37 +1188,27 @@ struct SettingsView: View {
             .clipShape(Capsule())
     }
 
-    /// The two "Volar Pro" products (contract §8) — prices always come from `product.displayPrice`
-    /// (never a hardcoded "$6.99"), so this reads correctly in every storefront/currency.
+    /// Single entry point into `PaywallView` (the one purchase surface in the app — see that file's
+    /// header comment) rather than the plan cards previously inlined directly here. Real
+    /// price/trial/plan copy now lives in exactly one place instead of two independently-maintained
+    /// UIs that could drift apart.
     private var upgradeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Upgrade to Pro — 14-day free trial")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(VolarColor.textPri)
-                .padding(.top, 4)
-            productRow(appState.monthlyProduct, product: .monthly)
-            productRow(appState.yearlyProduct, product: .yearly)
-        }
-    }
-
-    @ViewBuilder
-    private func productRow(_ product: Product?, product which: VolarProduct) -> some View {
-        HStack {
-            Text(product?.displayName ?? (which == .monthly ? "Monthly" : "Yearly"))
-                .font(.system(size: 12))
-                .foregroundStyle(VolarColor.textSec)
-            Spacer()
-            if let product {
-                settingsPillButton(product.displayPrice, solid: true) {
-                    appState.purchase(which)
-                }
-                .disabled(appState.accountBusy)
-            } else {
-                Text("Unavailable")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(VolarColor.textMut)
+        Button {
+            showPaywall = true
+        } label: {
+            HStack(spacing: 8) {
+                VolarIcon(.sparkle, size: 13, color: .white, weight: .medium)
+                Text("Upgrade to Pro")
+                    .font(.system(size: 13, weight: .semibold))
             }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
         }
+        .buttonStyle(.plain)
+        .background(accentColors.solid)
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .padding(.top, 4)
     }
 
     /// macOS has no `AppStore.showManageSubscriptions(in:)` equivalent (that StoreKit 2 call is
