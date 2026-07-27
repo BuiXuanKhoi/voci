@@ -2917,7 +2917,13 @@ final class AppState {
     /// (same as a brand-new task, `resolvedConditions` never includes them) since they're attached
     /// separately, after every draft's real/merge-target id is known (`confirmSave`'s second pass).
     private func mergeTransform(for draft: ConfirmDraft) -> (TaskItem) -> TaskItem {
-        { existing in
+        // `[self]` rather than six `self.` prefixes: this closure escapes (it is handed to
+        // `TaskStore.mergeIntoExisting`), so the compiler requires the capture to be spelled out,
+        // and the capture list says it once at the top instead of repeating it at every call. A
+        // STRONG capture is deliberate and safe here — the closure is applied during the same
+        // `confirmSave()` call and never stored on `self`, so there is no cycle to break; a
+        // `[weak self]` would only add an optional to unwrap on a path that cannot outlive `self`.
+        { [self] existing in
             var merged = existing
             if let deadline = resolvedValue(draft.task.deadline, kind: .deadline, draft: draft) {
                 merged.deadline = deadline
