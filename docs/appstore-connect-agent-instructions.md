@@ -164,19 +164,27 @@ Chỉ làm phần này khi bundle ID `tech.kioh.Volar` chưa tồn tại. Đây 
 - Description: `Volar`
 - Bundle ID: **Explicit** → `tech.kioh.Volar`
 
-### Capabilities — tick ĐÚNG một cái
+### Capabilities — tick ĐÚNG hai cái
 
-☑ **Sign in with Apple** → mở phần Edit của nó và chọn **"Enable as a primary App ID"**.
+Danh sách capability rất dài (~130 dòng, phần lớn là iOS/DriverKit không liên quan). Chỉ tick:
 
-Đó là capability DUY NHẤT app này cần. App có dùng thật (`ASAuthorizationAppleIDProvider`), không
-bật thì nút "Sign in with Apple" trong app hỏng lúc chạy.
+☑ **Sign In with Apple** — dòng này có nút **Configure** bên cạnh. Bấm vào và chọn
+**"Enable as a primary App ID"**. App dùng thật (`ASAuthorizationAppleIDProvider` trong
+`AccountService.swift`); không bật thì nút đăng nhập Apple hỏng lúc chạy.
 
-**In-App Purchase:** Apple bật sẵn cho mọi App ID và thường không hiện thành checkbox chọn được.
-Nếu thấy thì tick; không thấy thì bỏ qua, không phải lỗi.
+☑ **In-App Purchase**
+
+Không tick bất kỳ dòng nào khác.
 
 ### KHÔNG tick những cái này
 
-Push Notifications, iCloud / CloudKit, Associated Domains, App Attest, và mọi capability khác.
+`App Attest`, `App Attest Opt-In`, `Push Notifications`, `iCloud`, `Associated Domains`, `Siri`,
+`StoreKit External Purchases or Offers`, và mọi dòng còn lại.
+
+⚠️ `StoreKit External Purchases or Offers` nghe như liên quan tới bán hàng nhưng **KHÔNG phải** —
+nó dành cho app đưa người dùng ra ngoài hệ thống thanh toán của Apple (link web checkout), cần
+Apple duyệt riêng và kèm ràng buộc báo cáo doanh thu. Volar bán qua IAP chuẩn, tick nhầm cái này
+là tự chuốc một vòng review.
 
 Lý do: app chỉ dùng thông báo **local** (`UNUserNotificationCenter`), không có remote push; dùng
 URL scheme `volar://` chứ không phải universal link; App Attest đã bị gỡ khỏi codebase. Bật thừa
