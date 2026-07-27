@@ -2587,10 +2587,45 @@ final class AppState {
         )
     }
 
-    /// Multi-task confirm (T024): removes one task from the batch entirely (the compact
-    /// reviewable set's per-task "x") without discarding the rest.
-    func removeDraft(_ draftID: ConfirmDraft.ID) {
-        confirmDrafts.removeAll { $0.id == draftID }
+    /// 2026-07-28 (confirm-list UI, Việc 3): the picker's OTHER group — "task done" resolved
+    /// against another DRAFT in this same batch rather than an already-persisted task (see
+    /// `ConfirmDraft.intraBatchTaskDone`'s doc comment for why that has to be a separate map).
+    /// Mirrors `resolveTaskDone`'s "taskID" branch exactly, but writes the sibling map instead and
+    /// clears whatever `resolvedTaskDone` entry might already be there for the same index — the
+    /// two must never both be set (same invariant `resolveTaskDone` enforces in the other
+    /// direction). `target == draftID` is refused defensively (`PopoverView`'s picker already
+    /// excludes the card's own draft from this group, so this should be unreachable from the UI,
+    /// but a self-reference here would be a silent no-op dependency, not a crash, if it ever did
+    /// get through).
+    func resolveTaskDoneToDraft(_ draftID: ConfirmDraft.ID, conditionIndex: Int, target: ConfirmDraft.ID) {
+        guard target != draftID else { return }
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].intraBatchTaskDone[conditionIndex] = target
+        confirmDrafts[index].resolvedTaskDone[conditionIndex] = nil
+        confirmDrafts[index].dismissedConditions.remove(conditionIndex)
+        logCorrection(
+            kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
+            task: confirmDrafts[index].task, correctedValue: "intraBatch:\(target.uuidString)"
+        )
+    }
+
+    /// 2026-07-28 (confirm-list UI, Việc 1): the checkbox's mutator — ticks/unticks whether this
+    /// draft is created at all (see `ConfirmDraft.isIncluded`'s doc comment and `confirmSave()`'s
+    /// `filter(\.isIncluded)`). Deliberately REVERSIBLE, unlike the destructive per-task "x" this
+    /// replaces (`removeDraft`, removed alongside this — its only call site was that button):
+    /// toggling back on restores the draft exactly as it was, since nothing is ever actually
+    /// removed from `confirmDrafts`.
+    func setDraftIncluded(_ draftID: ConfirmDraft.ID, _ included: Bool) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].isIncluded = included
+    }
+
+    /// 2026-07-28 (confirm-list UI, Việc 2): the duplicate-hint picker's resolution — constitution
+    /// II forbids ever choosing `.useExisting` FOR the user (see `ConfirmDraft.duplicateResolution`'s
+    /// doc comment), so this is the ONLY place that ever writes it.
+    func setDuplicateResolution(_ draftID: ConfirmDraft.ID, _ resolution: ConfirmDraft.DuplicateResolution) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].duplicateResolution = resolution
     }
 
     /// T074: dismisses the (at most one) conflict advisory line for one draft — never re-derives

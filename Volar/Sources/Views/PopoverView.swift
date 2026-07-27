@@ -282,18 +282,33 @@ struct PopoverView: View {
 
     // MARK: - Parsed card (T024 — chips v2)
 
+    /// Bounds `parsedCard()`'s scroll area (2026-07-28, confirm-list UI technical constraint:
+    /// "long lists must scroll"). Comfortably fits 2-3 drafts with their new checkbox/duplicate/
+    /// condition rows unscrolled on a typical display; a full 10-task batch (`TaskStore.
+    /// maxBatchSize`) scrolls inside this instead of pushing the panel (`CapturePanelController`,
+    /// out of this task's allowed files — see its own `fitToContent` doc comment) past the bottom
+    /// of the screen. // UNVERIFIED: no Swift/Xcode on this machine to confirm `NSHostingView.
+    /// fittingSize` measures a bounded `ScrollView` the way this assumes (see that same doc
+    /// comment's own note on exactly this risk) — verify on Mac with a 4-5 task batch.
+    private static let parsedCardMaxHeight: CGFloat = 420
+
     /// One `VStack` holding every confirmed draft's chip set, separated by hairlines when there's
     /// more than one (multi-task confirm: a compact reviewable set, still glance-and-dismiss).
+    /// Wrapped in a `ScrollView` (2026-07-28) — previously a bare `VStack` with no scroll affordance
+    /// at all, which was fine while a batch was short but had no ceiling for a full ≤10-task batch.
     private func parsedCard() -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(appState.confirmDrafts.enumerated()), id: \.element.id) { offset, draft in
-                if offset > 0 {
-                    Rectangle().fill(VolarColor.border).frame(height: 0.5)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                ForEach(Array(appState.confirmDrafts.enumerated()), id: \.element.id) { offset, draft in
+                    if offset > 0 {
+                        Rectangle().fill(VolarColor.border).frame(height: 0.5)
+                    }
+                    taskDraftCard(draft, isPrimary: offset == 0)
                 }
-                taskDraftCard(draft, showRemove: appState.confirmDrafts.count > 1, isPrimary: offset == 0)
             }
+            .padding(12)
         }
-        .padding(12)
+        .frame(maxHeight: Self.parsedCardMaxHeight)
         .background(VolarColor.card)
         .overlay(
             // NOW focus ring — this card is the one thing about to be saved (Enter), so its border
@@ -308,9 +323,16 @@ struct PopoverView: View {
     /// `isPrimary` (the first draft) is the NOW task — its title carries the one warm accent this
     /// popover uses. Any additional batched drafts (multi-task confirm) stay neutral, so there's
     /// still exactly one lit focal point even when several tasks are being saved together.
-    private func taskDraftCard(_ draft: ConfirmDraft, showRemove: Bool, isPrimary: Bool) -> some View {
+    ///
+    /// 2026-07-28 (confirm-list UI, Việc 1): the whole card dims (`.opacity`) when `!draft.
+    /// isIncluded` — readable and every control still tappable (SwiftUI `.opacity` never disables
+    /// hit-testing, unlike `.disabled`/`allowsHitTesting(false)`), so unticking is a glance-and-
+    /// reversible decision rather than the old destructive per-task "x" (`showRemove`/`removeDraft`,
+    /// removed alongside this — that was the only call site for either).
+    private func taskDraftCard(_ draft: ConfirmDraft, isPrimary: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
+                inclusionCheckbox(draft)
                 // T-title-edit: was a read-only `Text(draft.task.title)` — now editable in place,
                 // writing through `AppState.updateDraftTitle(_:forDraft:)` (never `task.title`
                 // itself; see `ConfirmDraft`'s doc comment). `.textFieldStyle(.plain)` + no
@@ -351,19 +373,39 @@ struct PopoverView: View {
                     }
                     .onSubmit { appState.confirmSave() }
                 Spacer(minLength: 4)
-                if showRemove {
-                    Button {
-                        appState.removeDraft(draft.id)
-                    } label: {
-                        VolarIcon(.x, size: 9, color: VolarColor.textMut)
-                    }
-                    .buttonStyle(.plain)
-                }
             }
             attributeChips(draft)
             conditionRows(draft)
+            duplicateHintRow(draft)
             conflictAdvisoryRow(draft)
         }
+        .opacity(draft.isIncluded ? 1 : 0.45)
+    }
+
+    /// Việc 1's checkbox — ticked by default (`ConfirmDraft.isIncluded` defaults `true`), shown on
+    /// EVERY draft (even a single-draft batch — the user may still want to bail on the one task
+    /// without dismissing the whole popover). A small custom control rather than SwiftUI's native
+    /// `Toggle`/checkbox styles, matching this card's existing convention of hand-built chip/pill
+    /// affordances (`Chip`, `dependencyPicker`'s dashed pill) rather than stock controls.
+    private func inclusionCheckbox(_ draft: ConfirmDraft) -> some View {
+        Button {
+            appState.setDraftIncluded(draft.id, !draft.isIncluded)
+        } label: {
+            ZStack {
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
+                    .fill(draft.isIncluded ? VolarColor.done.opacity(0.18) : Color.clear)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4, style: .continuous)
+                            .strokeBorder(draft.isIncluded ? VolarColor.done : VolarColor.border, lineWidth: 1)
+                    )
+                if draft.isIncluded {
+                    VolarIcon(.check, size: 9, color: VolarColor.done, weight: .bold)
+                }
+            }
+            .frame(width: 16, height: 16)
+        }
+        .buttonStyle(.plain)
+        .padding(.top, 2) // optically aligns with the title's first line, not its full 1-3 line height
     }
 
     /// T074: AT MOST ONE calm advisory line — never a dialog, never a red/shame color (FR-036),
@@ -406,6 +448,76 @@ struct PopoverView: View {
         case .possibleDuplicate(_, let title, _):
             return "Looks similar to \u{201C}\(title)\u{201D} — add anyway?"
         }
+    }
+
+    /// 2026-07-28 (confirm-list UI, Việc 2): `draft.duplicateCandidates` as an "Add new" vs "use
+    /// existing" choice — never a red/destructive color (this is a HINT, not an error, same
+    /// reasoning as `conflictAdvisoryRow` immediately above) and never auto-picked (constitution
+    /// II — `ConfirmDraft.duplicateResolution` starts, and stays until an explicit tap here, at
+    /// `.addNew`). A candidate UUID that no longer resolves in `openTasks` (deleted mid-confirm) is
+    /// silently skipped rather than rendering a blank row or crashing.
+    @ViewBuilder
+    private func duplicateHintRow(_ draft: ConfirmDraft) -> some View {
+        let candidates: [DuplicateCandidate] = draft.duplicateCandidates.compactMap { id in
+            appState.openTasks.first { $0.id == id }.map { DuplicateCandidate(id: $0.id, title: $0.title) }
+        }
+        if !candidates.isEmpty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Might already exist:")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(VolarColor.reschedule)
+                FlowLayout(spacing: 6) {
+                    duplicateOptionPill(label: "Add new", isSelected: draft.duplicateResolution == .addNew) {
+                        appState.setDuplicateResolution(draft.id, .addNew)
+                    }
+                    ForEach(candidates) { candidate in
+                        duplicateOptionPill(
+                            label: candidate.title,
+                            isSelected: draft.duplicateResolution == .useExisting(candidate.id)
+                        ) {
+                            appState.setDuplicateResolution(draft.id, .useExisting(candidate.id))
+                        }
+                    }
+                }
+                // Not obvious what picking "use existing" actually does (it looks like a filter, not
+                // a merge) — spell out the consequence in one calm line, same "state it, don't make
+                // the user guess" reasoning as every other constitution-II surface in this file.
+                if case .useExisting = draft.duplicateResolution {
+                    Text(
+                        "Won't create a new task — updates the existing one with what you just said "
+                        + "instead, and adds these conditions to it."
+                    )
+                    .font(.system(size: 10.5))
+                    .foregroundStyle(VolarColor.textMut)
+                    .lineLimit(2)
+                }
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    /// One pill in `duplicateHintRow`'s row — same capsule/selection language as `PaywallView.
+    /// planCard` (stronger border + tinted fill when selected) adapted to this popover's smaller
+    /// chip scale, rather than a new selection idiom.
+    private func duplicateOptionPill(label: String, isSelected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .foregroundStyle(isSelected ? VolarColor.textPri : VolarColor.textSec)
+                .padding(.horizontal, 9)
+                .frame(height: 22)
+                .background(isSelected ? VolarColor.instrumentDim.opacity(0.28) : Color.clear)
+                .overlay(
+                    Capsule().strokeBorder(
+                        isSelected ? VolarColor.instrument : VolarColor.border,
+                        lineWidth: isSelected ? 1 : 0.5
+                    )
+                )
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
     }
 
     /// Deadline / estimate / priority / reminder / recurrence / kind — every PRESENT attribute
@@ -553,7 +665,52 @@ struct PopoverView: View {
                 onAccept: nil,
                 onDismiss: { appState.dismissCondition(at: index, forDraft: draft.id) }
             )
+        } else if let targetDraftID = draft.intraBatchTaskDone[index] {
+            intraBatchTaskDoneRow(targetDraftID: targetDraftID, titleQuery: titleQuery, index: index, draft: draft)
         } else {
+            dependencyPicker(titleQuery: titleQuery, index: index, draft: draft)
+        }
+    }
+
+    /// 2026-07-28 (confirm-list UI, Việc 3): renders a `.taskDone` resolved against ANOTHER DRAFT
+    /// in this same batch (`ConfirmDraft.intraBatchTaskDone`), rather than an already-persisted
+    /// task. Two sub-cases: the referenced draft is still ticked (`isIncluded`) — an ordinary
+    /// resolved chip, same shape as the `resolvedTaskDone` branch above, just named off the sibling
+    /// draft's own live title instead of an `openTasks` lookup; or it was UNTICKED after this
+    /// condition pointed at it — that draft will not exist to depend on, and per this task's brief
+    /// this must never be silently dropped for the user (constitution II), so it renders as an
+    /// explicit warning instead, leaving the condition exactly as-is until the user acts (re-tick
+    /// the source, or dismiss this condition themselves via the same "x").
+    @ViewBuilder
+    private func intraBatchTaskDoneRow(targetDraftID: ConfirmDraft.ID, titleQuery: String, index: Int, draft: ConfirmDraft) -> some View {
+        if let target = appState.confirmDrafts.first(where: { $0.id == targetDraftID }) {
+            if target.isIncluded {
+                Chip(
+                    label: "After: \(target.effectiveTitle)",
+                    uncertain: false,
+                    accepted: true,
+                    onAccept: nil,
+                    onDismiss: { appState.dismissCondition(at: index, forDraft: draft.id) }
+                )
+            } else {
+                HStack(spacing: 6) {
+                    Text("Won't be created: \u{201C}\(target.effectiveTitle)\u{201D}")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(VolarColor.reschedule)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                    Button {
+                        appState.dismissCondition(at: index, forDraft: draft.id)
+                    } label: {
+                        VolarIcon(.x, size: 9, color: VolarColor.textMut)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        } else {
+            // Unreachable today (drafts are never removed from `confirmDrafts` anymore — see
+            // `taskDraftCard`'s doc comment), but falls back to the ordinary picker rather than
+            // rendering a chip that points at nothing, in case that ever changes.
             dependencyPicker(titleQuery: titleQuery, index: index, draft: draft)
         }
     }
@@ -561,21 +718,38 @@ struct PopoverView: View {
     /// The task PICKER constitution II mandates for a `.taskDone` below 0.7 confidence — a native
     /// `Menu` (not the custom `Chip`, which bundles its own dismiss button as a `Menu` label
     /// child; nesting a `Button` inside a `Menu`'s label doesn't reliably get its own tap target,
-    /// so the dismiss "x" here is a sibling control instead). Capped defensively at 100 open
-    /// titles — same bound the cloud contract uses — so this stays O(1) to render even at
-    /// hundreds of tasks (self-review "performance"); `openTasks` only ever lists the user's own
-    /// tasks (self-review "security" — no cross-user/global data).
+    /// so the dismiss "x" here is a sibling control instead). Two groups (2026-07-28, Việc 3):
+    /// OTHER drafts in this same batch (excluding this card's own, and excluding any unticked one —
+    /// it will never exist as a real task to depend on) come FIRST, since a single utterance that
+    /// creates several linked tasks is the most likely reason a `.taskDone` condition shows up here
+    /// at all; already-persisted `openTasks` follow, capped defensively at 100 — same bound the
+    /// cloud contract uses — so this stays O(1) to render even at hundreds of tasks (self-review
+    /// "performance"); `openTasks` only ever lists the user's own tasks (self-review "security" —
+    /// no cross-user/global data).
     private func dependencyPicker(titleQuery: String, index: Int, draft: ConfirmDraft) -> some View {
-        HStack(spacing: 4) {
+        let siblingDrafts = appState.confirmDrafts.filter { $0.id != draft.id && $0.isIncluded }
+        return HStack(spacing: 4) {
             Menu {
                 Button("Skip — no dependency") {
                     appState.resolveTaskDone(at: index, to: nil, forDraft: draft.id)
                 }
+                if !siblingDrafts.isEmpty {
+                    Divider()
+                    Section("Task in this capture") {
+                        ForEach(siblingDrafts) { sibling in
+                            Button(sibling.effectiveTitle) {
+                                appState.resolveTaskDoneToDraft(draft.id, conditionIndex: index, target: sibling.id)
+                            }
+                        }
+                    }
+                }
                 if !appState.openTasks.isEmpty {
                     Divider()
-                    ForEach(appState.openTasks.prefix(100)) { task in
-                        Button(task.title) {
-                            appState.resolveTaskDone(at: index, to: task.id, forDraft: draft.id)
+                    Section("Existing tasks") {
+                        ForEach(appState.openTasks.prefix(100)) { task in
+                            Button(task.title) {
+                                appState.resolveTaskDone(at: index, to: task.id, forDraft: draft.id)
+                            }
                         }
                     }
                 }
@@ -858,16 +1032,33 @@ struct PopoverView: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
             .shadow(color: appState.captureState == .saving ? .clear : accent.glow, radius: 10, x: 0, y: 4)
-            .disabled(appState.captureState == .saving)
+            // 2026-07-28 (Việc 1): nothing to save once every draft is unticked — same disabled
+            // treatment `.saving` already gets, so Enter can't fire a no-op save either.
+            .opacity(includedDraftCount == 0 ? 0.5 : 1)
+            .disabled(appState.captureState == .saving || includedDraftCount == 0)
             .keyboardShortcut(.defaultAction)
         }
         .padding(.top, 10)
     }
 
-    /// "Save task" / "Save 3 tasks" — multi-task confirm still saves the whole batch in one Enter
-    /// (glance-and-dismiss, constitution V).
+    /// 2026-07-28 (Việc 1): counts TICKED drafts only, not the whole batch — an unticked draft
+    /// isn't going to be saved, so the button shouldn't claim it will. "Nothing selected" (rather
+    /// than e.g. "Save 0 tasks") when every draft is unticked, paired with `actionsRow` disabling
+    /// the button for that same count — see `includedDraftCount` below.
     private var saveLabel: String {
-        appState.confirmDrafts.count > 1 ? "Save \(appState.confirmDrafts.count) tasks" : "Save task"
+        switch includedDraftCount {
+        case 0: return "Nothing selected"
+        case 1: return "Save task"
+        default: return "Save \(includedDraftCount) tasks"
+        }
+    }
+
+    /// Single source of truth for "how many drafts will `confirmSave()` actually persist" —
+    /// shared by `saveLabel` and `actionsRow`'s `.disabled` so the two can never drift (e.g. button
+    /// text says "Save 2 tasks" while the button itself stays enabled/disabled for a different
+    /// count).
+    private var includedDraftCount: Int {
+        appState.confirmDrafts.filter(\.isIncluded).count
     }
 
     // MARK: - Error retry / consent rows
@@ -1095,6 +1286,14 @@ private struct Chip: View {
     }
 }
 
+/// One already-persisted task resolved from `ConfirmDraft.duplicateCandidates` (a bare `[UUID]`)
+/// against `AppState.openTasks`, for `duplicateHintRow`'s `ForEach`. A tiny `Identifiable` struct
+/// rather than a labeled tuple so `ForEach` can iterate it directly, with no `id:` keypath.
+private struct DuplicateCandidate: Identifiable {
+    let id: UUID
+    let title: String
+}
+
 /// Left-to-right wrapping row for the confirm card's chip set — a fixed `HStack` would clip or
 /// squeeze chips once several attributes are present on the fixed 380pt-wide popover. `Layout`
 /// has been available since macOS 13, well within this project's macOS 14 floor.
@@ -1244,6 +1443,45 @@ private struct BlinkingCaret: View {
             sourceTranscript: "Customer call with Acme tomorrow at 2pm about onboarding feedback, high priority"
         ))
     ]
+    return PopoverView()
+        .environment(state)
+        .padding(40)
+        .background(VolarColor.bg)
+}
+
+/// 2026-07-28 (confirm-list UI): covers all three additions in this pass in one batch — a
+/// duplicate-candidate hint (draft A, against the seeded `openTasks` entry), an unticked draft
+/// (draft B, dimmed) whose condition (draft C's `.taskDone`) is resolved intra-batch to it — so
+/// the picker's "Task in this capture" group and the "won't be created" warning state both render.
+#Preview("Multi-draft: checkbox / duplicate / intra-batch") {
+    let existingTaskID = UUID()
+    let state = AppState(tasks: [
+        TaskItem(id: existingTaskID, title: "Sanitize html tags", priority: .medium, when: .later)
+    ])
+    state.captureState = .parsed
+
+    var draftA = ConfirmDraft(task: ParsedTask(
+        title: "Sanitize html tag this afternoon",
+        sourceTranscript: "sanitize html tag this afternoon"
+    ))
+    draftA.duplicateCandidates = [existingTaskID]
+
+    var draftB = ConfirmDraft(task: ParsedTask(
+        title: "Draft the onboarding deck",
+        sourceTranscript: "draft the onboarding deck, then send it to the client"
+    ))
+    // Unticked — exercises both the dimmed-card rendering AND draft C's "won't be created"
+    // warning below, since draft C's condition points at this draft's id.
+    draftB.isIncluded = false
+
+    var draftC = ConfirmDraft(task: ParsedTask(
+        title: "Send the onboarding deck to the client",
+        conditions: [.taskDone(titleQuery: "draft the onboarding deck", confidence: 0.4)],
+        sourceTranscript: "draft the onboarding deck, then send it to the client"
+    ))
+    draftC.intraBatchTaskDone[0] = draftB.id
+
+    state.confirmDrafts = [draftA, draftB, draftC]
     return PopoverView()
         .environment(state)
         .padding(40)
