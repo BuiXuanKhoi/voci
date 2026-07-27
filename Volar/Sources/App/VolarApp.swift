@@ -294,6 +294,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var textCapturePanelController: CapturePanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Fix (2026-07-27, first real-Mac run): Volar's whole palette (`Design/Theme.swift`,
+        // `VolarColor.bg` etc.) is hardcoded dark — there is no light variant anywhere in this
+        // app. But `Picker`/`Menu`/`TextField`/`Toggle` are backed by real AppKit controls, and
+        // AppKit controls draw themselves according to the SYSTEM appearance, not this app's own
+        // color tokens. On a Mac running Light Mode that meant every dropdown/menu popup painted
+        // its text BLACK on top of Volar's near-black background — unreadable. Forcing the whole
+        // app's `NSApplication.appearance` to `.darkAqua`, once, here at launch, is what fixes
+        // this for every window AND every floating surface AppKit draws on the app's behalf —
+        // including a `Picker`'s popup menu, which AppKit renders in its OWN separate window,
+        // outside the SwiftUI view tree entirely. That's specifically why this is `NSApp.appearance`
+        // and not `.preferredColorScheme(.dark)` on a SwiftUI scene: `.preferredColorScheme` only
+        // reaches views SwiftUI itself draws, and cannot reach an AppKit-owned popup window. Set
+        // as early as possible in the launch sequence (before any window/menu is materialized) so
+        // nothing has a chance to draw once in the wrong appearance first.
+        NSApp.appearance = NSAppearance(named: .darkAqua)
+
         // F1/F2 fix (MAJOR, liveness): `activateServices()` used to be reachable ONLY from the main
         // `Window`'s `.task` above, which never ran while the app launched with that window closed
         // (the normal case back when this was an LSUIElement menu-bar-only app). That

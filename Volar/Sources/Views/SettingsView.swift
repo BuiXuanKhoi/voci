@@ -8,13 +8,15 @@
 // not local `@State` at all.
 import SwiftUI
 import AppKit
+import AVFoundation
 import ServiceManagement
 import Speech
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
-        case general, hotkeys, notifications, appearance, integrations, account, about
+        case general, hotkeys, notifications, permissions, appearance, integrations, account, about
         var id: String { rawValue }
 
         var icon: VolarIconName {
@@ -22,6 +24,12 @@ struct SettingsView: View {
             case .general: return .settings
             case .hotkeys: return .cmd
             case .notifications: return .bell
+            // Same "no dedicated glyph" situation as `.account` below — `VolarIconName` has no
+            // lock/shield icon, and adding one is out of scope for this fix (would mean editing
+            // `Design/VolarIcon.swift`, which this task deliberately leaves alone). `.check` reads
+            // reasonably as "permission granted/verified", even though it now doubles up with
+            // `.account`'s use of the same glyph below.
+            case .permissions: return .check
             case .appearance: return .sparkle
             case .integrations: return .bolt
             // No dedicated "person/account" glyph exists in `VolarIconName` (`Design/VolarIcon.swift`,
@@ -38,6 +46,7 @@ struct SettingsView: View {
             case .general: return "General"
             case .hotkeys: return "Hotkeys"
             case .notifications: return "Notifications"
+            case .permissions: return "Permissions"
             case .appearance: return "Appearance"
             case .integrations: return "Integrations"
             case .account: return "Account"
@@ -66,6 +75,15 @@ struct SettingsView: View {
     // System Settings behind Volar's back at any time (see `LoginItem.swift`'s header comment).
     @State private var loginItemStatus: SMAppService.Status = .notFound
     @State private var loginItemError: String?
+
+    // Permissions tab (Việc 3, 2026-07-27) — live OS-level authorization statuses. Unlike most
+    // `@State` above, these mirror real system state rather than app preferences: they exist so a
+    // user who denied/allowed something can SEE the current truth and, if needed, be routed to
+    // System Settings — see `refreshPermissionStatuses()`. `EventKit`'s own status lives on
+    // `appState.calendarAccess` already (no local copy needed for that one).
+    @State private var micAuthStatus: AVAuthorizationStatus = MicrophonePermission.status
+    @State private var speechAuthStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
+    @State private var notifAuthStatus: UNAuthorizationStatus = .notDetermined
 
     // Account tab (Task 4, account-auth.md contract) — purely local UI state for the sign-in
     // forms; the actual session/tier/quota state lives on `AppState` (`accountEmail`,
@@ -103,6 +121,7 @@ struct SettingsView: View {
                     case .general: generalTab
                     case .hotkeys: hotkeysTab
                     case .notifications: notificationsTab
+                    case .permissions: permissionsTab
                     case .appearance: appearanceTab(appState: appState)
                     case .integrations: integrationsTab
                     case .account: accountTab
@@ -596,6 +615,219 @@ struct SettingsView: View {
         /// set by a future finer-grained editor) rather than crashing on an unrecognized shape.
         init(matching policy: ReminderPolicy) {
             self = Self.allCases.first { $0.policy == policy } ?? .dayHourAt
+        }
+    }
+
+    // MARK: - Permissions (Việc 3, 2026-07-27 fix batch)
+    //
+    // Born from anh Khôi's very first real-Mac run: there was nowhere in the app to SEE whether
+    // Volar actually had microphone/speech/notifications/calendar access, or to get routed to
+    // System Settings when it didn't. This tab is read-mostly — it never invents its own notion of
+    // "granted", it only ever reads the OS's/EventKit's own authorization state and mirrors it.
+
+    /// Coarse three-way status shared by all four rows below. Each real source has its own richer
+    /// enum (`AVAuthorizationStatus`, `SFSpeechRecognizerAuthorizationStatus`, `UNAuthorizationStatus`,
+    /// `CalendarAccess.Status`) — this collapses every one of them down to the one distinction the
+    /// UI actually needs to react to: what to say, and which button (if any) to offer.
+    private enum PermissionState: Equatable {
+        case allowed, notAllowed, notAsked
+
+        var text: String {
+            switch self {
+            case .allowed: return "Allowed"
+            case .notAllowed: return "Not allowed"
+            case .notAsked: return "Not asked yet"
+            }
+        }
+
+        /// Hard "no red for status" rule (this project's convention, see `calendarAccessControl`
+        /// above) does NOT apply here — unlike overdue-task badges, a permission that's actually
+        /// off is a real, actionable state the user should notice, not an ambient nag.
+        var color: Color {
+            switch self {
+            case .allowed: return VolarColor.done
+            case .notAllowed: return VolarColor.destruct
+            case .notAsked: return VolarColor.textSec
+            }
+        }
+    }
+
+    private var micPermissionState: PermissionState {
+        switch micAuthStatus {
+        case .authorized: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied, .restricted: return .notAllowed
+        @unknown default: return .notAllowed
+        }
+    }
+
+    private var speechPermissionState: PermissionState {
+        switch speechAuthStatus {
+        case .authorized: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied, .restricted: return .notAllowed
+        @unknown default: return .notAllowed
+        }
+    }
+
+    private var notifPermissionState: PermissionState {
+        switch notifAuthStatus {
+        case .authorized, .provisional, .ephemeral: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied: return .notAllowed
+        @unknown default: return .notAllowed
+        }
+    }
+
+    private var calendarPermissionState: PermissionState {
+        switch appState.calendarAccess.status {
+        case .granted: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied, .restricted, .unavailable: return .notAllowed
+        }
+    }
+
+    /// Re-reads all four live statuses from their real sources. Called from `permissionsTab`'s
+    /// `.task` (fires every time this tab is switched to — matches `integrationsTab`'s existing
+    /// `.task` convention above for the same "may have changed while the user was elsewhere"
+    /// reason) and again after any "Request" button actually asks the OS for something, so a grant
+    /// or denial is reflected immediately rather than waiting for the next tab switch.
+    private func refreshPermissionStatuses() {
+        micAuthStatus = MicrophonePermission.status
+        speechAuthStatus = SFSpeechRecognizer.authorizationStatus()
+        appState.calendarAccess.refreshStatus()
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            notifAuthStatus = settings.authorizationStatus
+        }
+    }
+
+    /// Opens System Settings' Privacy & Security pane at the given anchor (e.g.
+    /// "Privacy_Microphone"). `URL(string:)` is optional — guarded rather than force-unwrapped, so
+    /// a malformed/renamed anchor just no-ops instead of crashing (mirrors
+    /// `CalendarAccess.openSystemSettings()`'s existing precedent one file over).
+    private func openSystemSettingsPrivacy(anchor: String) {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Same guard-not-force-unwrap reasoning as `openSystemSettingsPrivacy` above — Notifications
+    /// lives under its own pane extension, not the Privacy & Security anchor scheme.
+    private func openNotificationsSystemSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private var permissionsTab: some View {
+        VStack(spacing: 12) {
+            SettingsRow(label: "Microphone", hint: "Needed while you hold the capture hotkey, so Volar can hear what you're saying.") {
+                HStack(spacing: 10) {
+                    Text(micPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(micPermissionState.color)
+                    switch micPermissionState {
+                    case .notAsked:
+                        settingsPillButton("Request") {
+                            Task {
+                                _ = await MicrophonePermission.request()
+                                refreshPermissionStatuses()
+                            }
+                        }
+                    case .notAllowed:
+                        settingsPillButton("Open System Settings") {
+                            openSystemSettingsPrivacy(anchor: "Privacy_Microphone")
+                        }
+                    case .allowed:
+                        EmptyView()
+                    }
+                }
+            }
+            // The one fact that actually resolves anh Khôi's confusion: macOS's mic/speech TCC
+            // prompts are one-shot. If either was answered "Don't Allow" (by anh Khôi or on his
+            // behalf) at any point in the past, Volar cannot make the system ask again — the ONLY
+            // way back in is the user flipping it by hand in System Settings, which is exactly what
+            // the "Open System Settings" buttons above/below route to.
+            Text("macOS only asks for microphone and speech-recognition access once each. If either was ever denied, Volar can't prompt again — turn it back on in System Settings instead.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(VolarColor.textSec)
+                .lineSpacing(2)
+                .padding(.horizontal, 18)
+
+            SettingsRow(label: "Speech Recognition", hint: "Apple's on-device recognizer turns your captured audio into a task title.") {
+                HStack(spacing: 10) {
+                    Text(speechPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(speechPermissionState.color)
+                    switch speechPermissionState {
+                    case .notAsked:
+                        settingsPillButton("Request") {
+                            Task {
+                                // Same `@Sendable`-completion-handler hazard `SpeechCapture
+                                // .requestAuthorization()` documents in detail: this method lives
+                                // on a `@MainActor` view, so a non-`@Sendable` closure literal here
+                                // would be inferred MainActor-isolated — and the Speech framework
+                                // invokes its completion handler on a background queue, which traps
+                                // at the isolation check before the closure body even runs. `@Sendable`
+                                // opts this one out of that inference.
+                                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                                    SFSpeechRecognizer.requestAuthorization { @Sendable _ in
+                                        continuation.resume()
+                                    }
+                                }
+                                refreshPermissionStatuses()
+                            }
+                        }
+                    case .notAllowed:
+                        settingsPillButton("Open System Settings") {
+                            openSystemSettingsPrivacy(anchor: "Privacy_SpeechRecognition")
+                        }
+                    case .allowed:
+                        EmptyView()
+                    }
+                }
+            }
+
+            SettingsRow(label: "Notifications", hint: "Task reminders and delegation nudges arrive as macOS notifications.") {
+                HStack(spacing: 10) {
+                    Text(notifPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(notifPermissionState.color)
+                    if notifPermissionState == .notAllowed {
+                        settingsPillButton("Open System Settings") {
+                            openNotificationsSystemSettings()
+                        }
+                    }
+                }
+            }
+
+            SettingsRow(label: "Calendar", hint: "Lets Volar see which time blocks are free, and — once you turn on mirroring in the General tab — write scheduled tasks into a calendar it creates.") {
+                HStack(spacing: 10) {
+                    Text(calendarPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(calendarPermissionState.color)
+                    switch calendarPermissionState {
+                    case .notAsked:
+                        settingsPillButton("Request") {
+                            Task { await appState.enableCalendarAccess() }
+                        }
+                    case .notAllowed:
+                        settingsPillButton("Open System Settings") {
+                            appState.calendarAccess.openSystemSettings()
+                        }
+                    case .allowed:
+                        EmptyView()
+                    }
+                }
+            }
+        }
+        // Refreshes every time this tab is shown — matches `integrationsTab`'s own `.task` above
+        // (re-checks `claudeDetected`/`claudeConnected` on every appearance for the identical
+        // reason: state that can change OUTSIDE the app, behind Settings' back, while the window
+        // isn't looking). Without this, a user who grants access in System Settings and clicks
+        // back into Volar would still see a stale "Not allowed" — which is precisely the confusion
+        // this whole tab exists to resolve.
+        .task {
+            refreshPermissionStatuses()
         }
     }
 

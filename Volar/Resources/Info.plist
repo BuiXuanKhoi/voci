@@ -39,10 +39,17 @@
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!--
+	  Fix (2026-07-27): both strings below used to promise the audio never leaves the device — true
+	  when this app only had an on-device engine, but no longer true once Groq (cloud) became the
+	  DEFAULT speech engine (see AppState.swift's speech-engine default). Rewritten to describe what
+	  actually happens by default, without promising "unlimited" or "never leaves your device" —
+	  see MicrophonePermission.swift and Speech/GroqEngine.swift for the engine this now describes.
+	-->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Volar listens while you hold the capture hotkey so it can turn what you say into a task. Audio is transcribed entirely on this Mac and never leaves your device.</string>
+	<string>Volar listens while you hold the capture hotkey so it can turn what you say into a task. By default, audio is sent to Volar's cloud speech service to be transcribed; you can switch to fully on-device recognition in Settings.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Volar uses on-device speech recognition to turn what you say into a task title, due date, priority, and duration. Nothing is sent to a server.</string>
+	<string>When you choose on-device recognition in Settings, Volar uses Apple's on-device speech recognizer to turn what you say into a task title, due date, priority, and duration — this recognition itself runs entirely on your Mac.</string>
 	<!--
 	  Calendar access — read AND write (updated: Volar now mirrors scheduled tasks into a calendar
 	  it creates; it used to be read-only, this key's string changed accordingly, keep it truthful).
