@@ -164,6 +164,15 @@ Chỉ làm phần này khi bundle ID `tech.kioh.Volar` chưa tồn tại. Đây 
 - Description: `Volar`
 - Bundle ID: **Explicit** → `tech.kioh.Volar`
 
+> 🔴 **Chữ `V` phải VIẾT HOA.** Gõ đúng `tech.kioh.Volar`, KHÔNG phải `tech.kioh.volar`. Đừng tự
+> chuẩn hoá về chữ thường.
+>
+> Developer portal kiểm trùng theo kiểu không phân biệt hoa thường nên gõ sai nó **vẫn nhận, không
+> báo lỗi gì**. Nhưng server của app so bundle id bằng phép so chuỗi chính xác
+> (`bundleId !== APPSTORE_BUNDLE_ID` trong `supabase/functions/_shared/appstore.ts`), và secret
+> trên server đang là `tech.kioh.Volar`. Lệch một chữ ⇒ **mọi giao dịch mua thật trả 401**, với
+> triệu chứng trông y hệt lỗi chữ ký chứ không gợi ý gì tới hoa thường. Rất khó lần ra.
+
 ### Capabilities — tick ĐÚNG hai cái
 
 Danh sách capability rất dài (~130 dòng, phần lớn là iOS/DriverKit không liên quan). Chỉ tick:
