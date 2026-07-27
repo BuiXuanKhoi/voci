@@ -1,6 +1,8 @@
 // Sources/Parsing/IntentParsing.swift — IntentParser protocol, IntentRouter (FM -> Cloud ->
-// Heuristic), and the shared raw-output decode/validation helper both FoundationModelParser
-// (T020) and CloudParser (T021) funnel through before ever producing a `ParsedTask`.
+// title-only floor; see the 2026-07-28 comment on `IntentRouter.init`/`parse` for why the old
+// Heuristic bottom tier is disconnected, not deleted), and the shared raw-output decode/
+// validation helper both FoundationModelParser (T020) and CloudParser (T021) funnel through
+// before ever producing a `ParsedTask`.
 //
 // Frozen seam: `specs/002-workflow-command-center/contracts/parsing-contract.md`. `ParsedTask`,
 // `ParsedValue<T>`, `ParsedCondition`, `Recurrence`, `ReminderPolicy`, `TaskKind` are owned
@@ -50,11 +52,22 @@ protocol CloudParseGate: Sendable {
 // MARK: - IntentRouter (T019)
 
 /// Routes FM (on-device, if available) -> Cloud (opted-in + online, credential available) ->
-/// Heuristic, per research.md R5. ALWAYS returns a usable, non-empty `[ParsedTask]`: any route
-/// failure (unavailable, decode violation, transport error, 401/5xx) falls through silently to
-/// the next tier; Heuristic is the floor and is unconditionally available. The 10-task cap is
-/// enforced here regardless of which tier produced the result (defense in depth — each producer
-/// is also expected to cap itself).
+/// title-only floor. ALWAYS returns a usable, non-empty `[ParsedTask]`: any route failure
+/// (unavailable, decode violation, transport error, 401/5xx) falls through silently to the next
+/// tier; the title-only floor is unconditional and always available. The 10-task cap is enforced
+/// here regardless of which tier produced the result (defense in depth — each producer is also
+/// expected to cap itself).
+///
+/// anh Khôi chốt 2026-07-28: `HeuristicNLParser` (Sources/Model/NLParser.swift) used to sit
+/// beneath Cloud as a third tier — keyword/regex-guessed deadline/priority/recurrence/conditions
+/// when neither FM nor Cloud were available. That tier is now DISCONNECTED, deliberately, not
+/// deleted: `HeuristicNLParser`'s code is untouched and still fully present in `NLParser.swift`.
+/// When FM and Cloud both fail to produce anything, this router now falls straight to a
+/// title-only task (see `titleOnlyTask` below) instead of a heuristic guess. To reconnect it:
+/// add back a `heuristic: IntentParser` parameter to `init` (defaulting to `HeuristicNLParser()`)
+/// and an `await heuristic.parse(...)` / `await heuristic.breakdown(...)` call ahead of the
+/// title-only fallback in `parse`/`breakdown` below — this exact shape is preserved in git
+/// history (the commit right before this comment landed) if that's ever wanted again.
 @MainActor
 final class IntentRouter: IntentParser {
     /// Hard cap, all tiers, all call sites (contract: "Enforces the 10-task cap centrally").
@@ -62,12 +75,28 @@ final class IntentRouter: IntentParser {
 
     /// Which tier actually produced the last successful result — diagnostics only, never PII
     /// (no transcript/title content), safe to log.
+    ///
+    /// `.heuristic` (2026-07-28: removed) used to name the old keyword/regex floor tier below
+    /// Cloud. It is gone, not renamed to `.titleOnly`, because the two are different claims:
+    /// `.heuristic` meant "a keyword scan guessed at structure"; `.titleOnly` means "no tier
+    /// guessed at anything — the task is exactly, and only, the verbatim transcript as its
+    /// title." Confirmed by repo-wide grep before this change that nothing reads `lastRoute`
+    /// outside this file yet (see `backlog.md`'s "lastCloudQuotaNote/lastRoute chưa có UI đọc"
+    /// note) — so no UI copy needs to change alongside this, but whoever eventually wires a
+    /// reader should know `.heuristic` no longer exists as a case.
     enum Route: String, Sendable, Equatable {
-        case foundationModel, cloud, heuristic
+        case foundationModel, cloud, titleOnly
+        /// Transcript was empty/whitespace-only — `parse` returned `[]` without attempting any
+        /// tier at all. Distinct from `.titleOnly`: that case always means "here is a task whose
+        /// title is the transcript"; this one means there was no transcript to make a title out
+        /// of in the first place.
+        case empty
     }
 
     /// Set at the start of every `parse(...)` call; read by the confirm-card owner afterward.
-    private(set) var lastRoute: Route = .heuristic
+    /// Default mirrors the pre-any-call floor (no call has happened yet, so nothing was actually
+    /// title-only) — same role the old `.heuristic` default played.
+    private(set) var lastRoute: Route = .titleOnly
     /// `true` for exactly the duration between a `parse(...)` call that hit Cloud's 429 and the
     /// NEXT `parse(...)` call (reset at the top of every call) — the confirm-card/UI owner reads
     /// this once per parse to show the one-line gentle note (FR-012, parse-proxy.md 429). This is
@@ -78,28 +107,27 @@ final class IntentRouter: IntentParser {
     private let fm: FoundationModelParser?
     private let cloud: CloudParser?
     private let cloudGate: CloudParseGate?
-    private let heuristic: IntentParser
 
     /// - Parameters:
     ///   - foundationModel: Defaults to the capability-probed singleton-ish factory — `nil` on
     ///     macOS < 26, non-Apple-Silicon, or when the on-device model itself isn't available
     ///     (probe never crashes; see `FoundationModelParser.makeIfAvailable()`).
     ///   - cloud: `nil` disables the Cloud tier entirely (e.g. no `ParseCredentialProvider`
-    ///     composite wired up yet) — router falls straight from FM to Heuristic.
+    ///     composite wired up yet) — router falls straight from FM to the title-only floor.
     ///   - cloudGate: `nil` also disables Cloud (never attempt Cloud without an explicit gate
     ///     that can assert consent).
-    ///   - heuristic: The floor. Defaults to the existing `HeuristicNLParser` (Sources/Model/
-    ///     NLParser.swift) — injectable for tests.
+    ///
+    ///   (2026-07-28: this initializer used to also take a `heuristic: IntentParser` parameter,
+    ///   defaulting to `HeuristicNLParser()`. Removed along with the tier itself — see the class
+    ///   doc comment above for why, and how to bring it back.)
     init(
         foundationModel: FoundationModelParser? = FoundationModelParser.makeIfAvailable(),
         cloud: CloudParser? = nil,
-        cloudGate: CloudParseGate? = nil,
-        heuristic: IntentParser = HeuristicNLParser()
+        cloudGate: CloudParseGate? = nil
     ) {
         self.fm = foundationModel
         self.cloud = cloud
         self.cloudGate = cloudGate
-        self.heuristic = heuristic
     }
 
     func parse(_ transcript: String, now: Date, openTaskTitles: [String]) async -> [ParsedTask] {
@@ -108,7 +136,9 @@ final class IntentRouter: IntentParser {
         guard !trimmed.isEmpty else {
             // Nothing to parse. Callers shouldn't invoke this on empty input, but never crash or
             // fabricate a task out of nothing — an empty result here is the one legitimate `[]`.
-            lastRoute = .heuristic
+            // `.empty`, NOT `.titleOnly`: there is no transcript to make a title out of, so this
+            // is not the same claim as "the task is exactly the transcript, title-only."
+            lastRoute = .empty
             return []
         }
 
@@ -140,18 +170,18 @@ final class IntentRouter: IntentParser {
             }
         }
 
-        lastRoute = .heuristic
-        // R5: every tier sees the SAME (possibly-empty) `titles` list computed once above — this
-        // was previously hardcoded to `[]` here, silently starving the heuristic tier (the ONLY
-        // tier available on macOS 14/15) of dependency-matching context and capping its
-        // taskDone-condition confidence below the 0.7 auto-resolve bar (see
-        // `dependencyConfidence` in `NLParser.swift`).
-        let heuristicResult = await heuristic.parse(transcript, now: now, openTaskTitles: titles)
-        if !heuristicResult.isEmpty {
-            return Self.cap(heuristicResult)
-        }
-        // Defensive floor: even the always-available heuristic returned nothing (shouldn't
-        // normally happen). Never discard the utterance — constitution II.
+        // anh Khôi chốt 2026-07-28: neither FM nor Cloud produced anything usable — fall straight
+        // to the title-only floor instead of the old `HeuristicNLParser` keyword-guess tier (see
+        // this class's doc comment above for the full rationale and how to reconnect it;
+        // `HeuristicNLParser` itself is untouched in `NLParser.swift`, just no longer wired here).
+        //
+        // `titleOnlyTask`'s title carries no guess at all — it is the verbatim (trimmed)
+        // transcript, which is exactly, not approximately, what the user said. `ParsedTask.title`
+        // has no confidence wrapper (it's a plain `String`, documented in `NLParser.swift` as
+        // "required; only guaranteed field") so there is no confidence VALUE to pick here; if
+        // there were, 1.0 would be correct for the same reason — this isn't a model inferring
+        // structure from ambiguous speech, it's the speech itself, unmodified.
+        lastRoute = .titleOnly
         return [Self.titleOnlyTask(transcript)]
     }
 
@@ -164,7 +194,13 @@ final class IntentRouter: IntentParser {
             let steps = await cloud.breakdown(title: title, notes: notes)
             if Self.isValidBreakdown(steps) { return steps }
         }
-        return await heuristic.breakdown(title: title, notes: notes)
+        // anh Khôi chốt 2026-07-28: no more `HeuristicNLParser().breakdown(...)` floor here either
+        // (see the class doc comment above `init`). Breakdown has no honest on-device fallback —
+        // unlike `parse`'s title-only floor (the transcript itself is always a legitimate task
+        // title), there is no non-fabricated way to invent 3...9 step titles without a real model.
+        // So: neither tier available/usable -> `[]`, and the caller (`AppState.fetchBreakdown`)
+        // is responsible for telling the user this needs cloud rather than showing invented steps.
+        return []
     }
 
     // MARK: - Resolve-completion (T0xx: cloud-only paraphrase rescue for `VoiceDone`'s

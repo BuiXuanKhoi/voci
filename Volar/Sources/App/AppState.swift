@@ -124,10 +124,11 @@ enum BreakdownFetchState: Equatable, Sendable {
     /// sign-in instead of suggesting "try again."
     case unavailable
     /// Cloud was attempted (preconditions were met) but produced nothing usable — offline, quota
-    /// exhausted server-side, decode failure, or a request that came back identical to what the
-    /// hard-coded heuristic floor would have produced (the router's own unconditional fallback,
-    /// `HeuristicNLParser.breakdown`, `NLParser.swift` — indistinguishable from a real answer by
-    /// content alone, so `fetchBreakdown` diffs against it directly).
+    /// exhausted server-side, or a decode failure. (2026-07-28: `IntentRouter.breakdown` used to
+    /// have an unconditional hard-coded heuristic-template fallback here too — `HeuristicNLParser
+    /// .breakdown`, `NLParser.swift` — which `fetchBreakdown` diffed the result against to catch
+    /// it in disguise; that fallback is now disconnected from the router entirely, so an empty/
+    /// non-real result reaches here as a plain empty array, not a template needing a diff.)
     case failed
 }
 
@@ -452,8 +453,10 @@ final class AppState {
     /// Replaces the v1 `NLParser` direct call (contract "Confirm + materialize" / T025: "Replace
     /// any v1 direct-HeuristicNLParser call with the router"). `IntentRouter` is owned by the
     /// T019 agent (`Sources/Parsing/IntentParsing.swift`, landed) — constructed with its own
-    /// defaults for `foundationModel`/`heuristic`, wired here with a real `cloudGate:`
-    /// (`DefaultCloudParseGate`, bottom of this file) so the Local↔Cloud choice this file owns
+    /// default for `foundationModel` (2026-07-28: no more `heuristic:` parameter to default —
+    /// that tier was disconnected from the router; see `IntentRouter.init`'s doc comment), wired
+    /// here with a real `cloudGate:` (`DefaultCloudParseGate`, bottom of this file) so the
+    /// Local↔Cloud choice this file owns
     /// (`parseEnginePreference` / `cloudParseConsent` / `resolveCloudConsent`) reaches the router.
     /// `cloud:` is now wired with `ConfigParseCredentialProvider` (a placeholder credential source):
     /// the Cloud tier is fully connected and user-switchable from Settings, but stays inert
@@ -2904,26 +2907,34 @@ final class AppState {
     /// existing `router.parse`/`router.resolveCompletion`) rather than a second networking path
     /// opened directly from a View.
     ///
-    /// `router.breakdown` itself tries FM (on-device, macOS 26+) -> Cloud -> an UNCONDITIONAL
-    /// hard-coded heuristic floor (`HeuristicNLParser.breakdown`, `Sources/Model/NLParser.swift`:
-    /// literally "Gather what's needed for X" / "Start the first small piece" / … / "Wrap up X" —
-    /// a fixed template, not real per-task content). That floor is fine for `router.parse`'s
-    /// "never return an empty result" contract; it is NOT fine here — the task brief is explicit
-    /// that this sheet must never present "generated-looking content that is actually
-    /// hard-coded," and that template is exactly that. So this method adds two safeguards
-    /// `router.breakdown` doesn't have on its own:
+    /// `router.breakdown` itself tries FM (on-device, macOS 26+) -> Cloud -> `[]`.
+    ///
+    /// (2026-07-28, anh Khôi chốt: `router.breakdown` USED to fall through, unconditionally, to a
+    /// hard-coded heuristic floor — `HeuristicNLParser.breakdown`, `Sources/Model/NLParser.swift`:
+    /// literally "Gather what's needed for X" / "Start the first small piece" / … / "Wrap up X",
+    /// a fixed template, not real per-task content. That call is now removed from
+    /// `IntentRouter.breakdown` itself (see the doc comment on `IntentRouter.init` in
+    /// `IntentParsing.swift`) — `HeuristicNLParser`'s code is untouched, just no longer wired in.
+    /// So `steps` below is now genuinely `[]`, not a disguised template, whenever neither FM nor
+    /// Cloud produced a valid breakdown.)
+    ///
+    /// This method still adds two safeguards on top of `router.breakdown`:
     ///   1. A pre-flight check of the same two cloud preconditions the rest of the app already
     ///      surfaces (`cloudParseConsent == true` — the opt-in flag both the onboarding consent
     ///      toggle and the Settings parse-engine picker write — AND `ConfigParseCredentialProvider
     ///      .isConfigured`, i.e. signed in; mirrors `SettingsView`'s own "Cloud parsing status"
     ///      hint). Not signed in, or never opted in, -> `.unavailable` WITHOUT ever calling the
-    ///      router — so the hard-coded floor is never reached for either of those two cases.
+    ///      router.
     ///   2. Even when both preconditions hold, the live network call can still fail right now
-    ///      (offline, quota just exhausted server-side) — `router.breakdown` would silently fall
-    ///      through to that SAME hard-coded floor and return it as if it were real. So the result
-    ///      is diffed against what the heuristic template would deterministically produce for this
-    ///      exact title/notes; an exact match means this IS the hard-coded floor in disguise ->
-    ///      `.failed`, never shown as if it were generated content.
+    ///      (offline, quota just exhausted server-side) — `router.breakdown` now returns `[]` in
+    ///      that case (no more hard-coded floor to fall through to), which `applyBreakdownFetchResult`
+    ///      below maps to `.failed` via its plain "steps is empty" guard. The `heuristicFloor`
+    ///      parameter/comparison further down is kept ONLY because `applyBreakdownFetchResult` is
+    ///      also called directly by `CloudFirstDefaultsAndBreakdownTests.swift` to exercise that
+    ///      exact disguised-floor scenario in isolation — from THIS call site it is now passed `[]`
+    ///      and the comparison is dead weight (never true, since `steps` is non-empty by the time
+    ///      it's reached). Left in place rather than reworking that test's signature, which is out
+    ///      of scope for this change (see backlog.md).
     private func fetchBreakdown(title: String, notes: String?) {
         breakdownSession += 1
         let session = breakdownSession
@@ -2937,13 +2948,12 @@ final class AppState {
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
             let steps = await self.router.breakdown(title: title, notes: notes)
-            // Rule out the hard-coded heuristic floor (see doc comment above) before trusting
-            // `steps` as real content. `HeuristicNLParser.breakdown` is pure/deterministic/no
-            // network, so computing it unconditionally (even on what may turn out to be a stale
-            // result) costs nothing but a little CPU — the actual staleness guard lives in
-            // `applyBreakdownFetchResult` below, checked exactly once, right before any mutation.
-            let heuristicFloor = await HeuristicNLParser().breakdown(title: title, notes: notes)
-            self.applyBreakdownFetchResult(steps, heuristicFloor: heuristicFloor, session: session)
+            // No more `HeuristicNLParser().breakdown(...)` floor to diff against (removed
+            // 2026-07-28 — see doc comment above): pass `[]` for `heuristicFloor` so
+            // `applyBreakdownFetchResult`'s legacy disguised-floor comparison is a no-op from this
+            // call site, while keeping that parameter's signature intact for the existing tests in
+            // `CloudFirstDefaultsAndBreakdownTests.swift` that call it directly with real values.
+            self.applyBreakdownFetchResult(steps, heuristicFloor: [], session: session)
         }
     }
 
@@ -2952,10 +2962,17 @@ final class AppState {
     /// as `applyTextCaptureParseResult(_:session:)` (`TextCaptureTests.swift` already documents
     /// this pattern for the typed-capture flow) and `resolveCloudMatch` elsewhere in this file.
     /// Tests can simulate "the router came back with these steps" (optionally identical to what
-    /// the heuristic floor would have produced, to exercise the `.failed` branch below) and/or "the
-    /// session went stale before the fetch returned" by calling this directly with hand-built
+    /// the old heuristic floor would have produced, to exercise the `.failed` branch below) and/or
+    /// "the session went stale before the fetch returned" by calling this directly with hand-built
     /// `[String]` arrays and/or a stale `session` token, instead of needing a real network round
     /// trip or a real `HeuristicNLParser` call.
+    ///
+    /// (2026-07-28: `IntentRouter.breakdown` no longer has a heuristic floor to disguise itself as
+    /// — see `fetchBreakdown` above — so from the real call site `heuristicFloor` always arrives
+    /// as `[]` and the `steps == heuristicFloor` check below is unreachable dead weight in
+    /// production. It stays because `CloudFirstDefaultsAndBreakdownTests.swift` still calls this
+    /// method directly with non-empty `heuristicFloor` values to test that exact comparison in
+    /// isolation, and reworking that test's signature is out of scope for this change.)
     ///
     /// Not `private` for exactly that reason.
     func applyBreakdownFetchResult(_ steps: [String], heuristicFloor: [String], session: Int) {
@@ -2963,12 +2980,16 @@ final class AppState {
         // while this request was in flight — mirrors `runParse`'s own `captureSession` guard.
         guard breakdownSession == session else { return }
         guard !steps.isEmpty else {
+            // No steps at all -> `.failed` ("Couldn't reach the breakdown service", TaskBreakdownView).
+            // This is now the ONLY path that matters from the real `fetchBreakdown` call site: FM
+            // and Cloud both failed/unavailable, and there is no heuristic floor left to fall back
+            // to (2026-07-28) — never invent step titles, tell the user honestly instead.
             breakdownFetchState = .failed
             return
         }
-        // Same content as the hard-coded heuristic floor -> this WAS that floor in disguise
-        // (Cloud/FM both failed just now despite the preconditions in `fetchBreakdown` passing),
-        // not real generated content -> `.failed`, never `.loaded`.
+        // Legacy check, kept for the direct-call tests only (see doc comment above) — same content
+        // as the hard-coded heuristic floor would mean "this WAS that floor in disguise," but the
+        // real call site can no longer produce that situation since the floor itself is gone.
         if steps == heuristicFloor {
             breakdownFetchState = .failed
             return
