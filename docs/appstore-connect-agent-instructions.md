@@ -61,8 +61,7 @@ Vào **My Apps**. Kiểm tra đã có app nào tên **Volar** hoặc có bundle 
   - **Primary Language:** English (U.S.)
   - **Bundle ID:** chọn `tech.kioh.Volar` trong danh sách.
     → Nếu bundle ID này **không có** trong danh sách, DỪNG và báo cáo: người dùng cần tạo App ID
-    đó trong Developer portal (Certificates, Identifiers & Profiles ▸ Identifiers) và bật khả năng
-    **In-App Purchase** cho nó trước.
+    đó trong Developer portal trước (xem phụ lục cuối file).
   - **SKU:** `volar-macos-001`
   - **User Access:** Full Access
 
@@ -153,3 +152,53 @@ Báo cáo lại đúng những mục sau, không thêm suy đoán:
 
 **Nhắc lại lần cuối:** không ký hợp đồng, không nhập thông tin ngân hàng, không điền tax form,
 không submit for review. Gặp mấy thứ đó thì dừng và báo.
+
+---
+
+## Phụ lục — Nếu phải tạo App ID mới (Developer portal, KHÔNG phải App Store Connect)
+
+Chỉ làm phần này khi bundle ID `tech.kioh.Volar` chưa tồn tại. Đây là site khác:
+**developer.apple.com** ▸ Certificates, Identifiers & Profiles ▸ **Identifiers** ▸ **+**
+
+- Loại: **App IDs** ▸ **App**
+- Description: `Volar`
+- Bundle ID: **Explicit** → `tech.kioh.Volar`
+
+### Capabilities — tick ĐÚNG một cái
+
+☑ **Sign in with Apple** → mở phần Edit của nó và chọn **"Enable as a primary App ID"**.
+
+Đó là capability DUY NHẤT app này cần. App có dùng thật (`ASAuthorizationAppleIDProvider`), không
+bật thì nút "Sign in with Apple" trong app hỏng lúc chạy.
+
+**In-App Purchase:** Apple bật sẵn cho mọi App ID và thường không hiện thành checkbox chọn được.
+Nếu thấy thì tick; không thấy thì bỏ qua, không phải lỗi.
+
+### KHÔNG tick những cái này
+
+Push Notifications, iCloud / CloudKit, Associated Domains, App Attest, và mọi capability khác.
+
+Lý do: app chỉ dùng thông báo **local** (`UNUserNotificationCenter`), không có remote push; dùng
+URL scheme `volar://` chứ không phải universal link; App Attest đã bị gỡ khỏi codebase. Bật thừa
+một capability nghĩa là phải giải thích thêm với App Review và làm phức tạp privacy label mà
+không đổi lại được gì.
+
+### Sáu entitlement sau KHÔNG có trong danh sách Capabilities — đừng đi tìm
+
+```
+com.apple.security.app-sandbox
+com.apple.security.network.client
+com.apple.security.device.audio-input
+com.apple.security.files.user-selected.read-write
+com.apple.security.files.bookmarks.app-scope
+com.apple.security.personal-information.calendars
+```
+
+Chúng là entitlement sandbox khai trong `Volar/Resources/Volar.entitlements` (đã có sẵn trong
+repo), không phải capability của portal. Không thấy chúng là ĐÚNG, không phải thiếu.
+
+**Nguyên tắc chung:** capability nào không có entitlement tương ứng trong `Volar.entitlements` thì
+đừng bật.
+
+> Lưu ý cho người dùng: bật Sign in with Apple làm provisioning profile cũ hết hiệu lực và phải
+> sinh lại. Xcode để Automatic signing thì tự xử lý, không cần làm gì thêm.
