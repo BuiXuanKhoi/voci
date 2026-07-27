@@ -72,8 +72,10 @@ struct MorningFrogView: View {
 
     private var voiceCTA: some View {
         Button {
-            // Answer by voice: kick off the real toggle-capture flow, then dismiss this modal
-            // the same way "Skip today" does.
+            // Answer by voice, then dismiss this modal the same way "Skip today" does. Stays on
+            // `toggleCapture()`: this prompt asks the user to SPEAK an answer, so the one thing it
+            // must never do is silently save some unrelated draft that happened to still be open.
+            // `handleHotkey()` is for the bare ⌃⌥M keypress only — see its own doc comment.
             appState.toggleCapture()
             onSkip()
         } label: {

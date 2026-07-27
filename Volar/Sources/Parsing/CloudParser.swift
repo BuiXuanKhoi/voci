@@ -230,6 +230,172 @@ struct CloudParser: Sendable {
         return steps
     }
 
+    // MARK: - Resolve-completion mode (T0xx: cloud paraphrase rescue for `VoiceDone`'s
+    // empty-candidate case — see `Sources/App/AppState.swift`'s `resolveCompletionViaCloud`).
+    //
+    // WHY this exists: `VoiceDone.classify` (Sources/Speech/VoiceDone.swift) matches a completion
+    // utterance against open-task titles with on-device Jaccard token-set overlap. A paraphrase
+    // ("xong cái vụ report rồi" vs. the real title "Viết báo cáo Q3") shares no tokens and scores
+    // 0.0 — `VoiceDone` correctly reports "phrase present, nothing matched" (empty candidates), and
+    // THIS is the one place that empty-candidates outcome gets a second, semantic-match attempt
+    // before the app gives up and tells the user "no matching task."
+    //
+    // LOCKED wire contract (`mode: "resolve_completion"`, a new mode alongside parse/breakdown on
+    // the same `/functions/v1/parse` route — a parallel agent implements the server half against
+    // this identical contract, so the field names/shapes below are NOT open to renegotiation):
+    //   Request:  { mode, transcript, now, kind: "complete"|"clear_external", candidates: [String] }
+    //   Response: { intent: "complete"|"clear_external"|"none", matchIndex?: Int (1-BASED),
+    //               matchTitle?: String, confidence: Double (0...1) }
+    // `matchIndex` is 1-BASED: `candidates[matchIndex - 1]` is the chosen title. Every touch point
+    // below comments this loudly — getting it wrong marks the WRONG task done.
+
+    /// Wire `kind` for `resolve_completion` — mirrors `VoiceDoneAction`'s two actionable cases
+    /// (`AppState.swift`) at the transport boundary. Kept as its own type here rather than reusing
+    /// `VoiceDoneAction` directly so this file never depends on `VoiceDone.swift`'s frozen seam
+    /// (same separation `CloudParser` already keeps from `ParsedTask`'s owning module elsewhere).
+    enum CompletionKind: Sendable, Equatable {
+        case complete
+        case clearExternal
+
+        /// The exact wire literal the locked contract specifies.
+        fileprivate var wireValue: String {
+            switch self {
+            case .complete: return "complete"
+            case .clearExternal: return "clear_external"
+            }
+        }
+    }
+
+    /// `resolveCompletion`'s result. Deliberately keeps `.none` ("the model looked at the
+    /// candidates and confidently reported no match, or the 200 response failed a defensive
+    /// validation check") distinct from `.unavailable` ("we never got a trustworthy answer at all:
+    /// no consent/credential, offline, timeout, non-200, oversized body, or undecodable JSON").
+    /// Both collapse to the SAME caller behavior today (`AppState` presents "no matching task"
+    /// either way — see `resolveCompletionViaCloud`), but conflating them here would destroy
+    /// information a future retry-only-on-`.none` or telemetry-only-on-`.unavailable` decision
+    /// would need, per this task's own instruction not to blur that distinction in the transport
+    /// layer.
+    enum CompletionResolution: Sendable, Equatable {
+        /// `index` is 1-BASED into the `candidates` array THIS CALL was given (already re-checked
+        /// against `1...candidates.count` below before this case is ever produced) —
+        /// `candidates[index - 1]` is `title`, echoed verbatim (trimmed) from the wire response.
+        /// The caller (`IntentRouter.resolveCompletion` / `AppState.resolveCompletionViaCloud`) is
+        /// still responsible for re-validating `index`/`title` against ITS OWN local snapshot
+        /// before acting — this case only guarantees the WIRE-LEVEL checks below already passed,
+        /// not that the caller's candidate list is still the same one that was sent (constitution
+        /// II: never trust a remote response transitively).
+        case resolved(index: Int, title: String, confidence: Double)
+        /// Well-formed 200 with `intent == "none"`, OR a 200 that failed one of the defensive
+        /// checks below (unrecognized `intent`, non-finite/out-of-range `confidence`,
+        /// missing/non-integer/out-of-range `matchIndex`, missing/empty `matchTitle`) — the server
+        /// DID answer, so this is "found nothing," never a transport failure.
+        case none
+        /// No trustworthy answer: no consent/credential available (`ParseCredentialProvider` gate),
+        /// transport failure (offline/DNS/TLS/timeout), non-200 status, oversized body, or a
+        /// response that failed to decode at all.
+        case unavailable
+    }
+
+    private struct ResolveCompletionResponse: Decodable {
+        var intent: String
+        var matchIndex: Int?
+        var matchTitle: String?
+        var confidence: Double
+    }
+
+    /// Cloud-only semantic-match attempt for a completion/clear-external utterance that `VoiceDone`
+    /// already tried and failed to match locally. Reuses `parseDetailed`'s exact machinery: the
+    /// same credential/consent guard (never sends anything without a resolved `baseURL`/auth
+    /// header), the same `makeRequest`/timeout/formatter helpers, the same `utf16Prefix`
+    /// truncation, and the same 100-entry cap on the candidate-titles list `parseDetailed` applies
+    /// to `open_task_titles`.
+    func resolveCompletion(
+        _ transcript: String, now: Date, kind: CompletionKind, candidates: [String]
+    ) async -> CompletionResolution {
+        let trimmed = Self.utf16Prefix(transcript, maxTranscriptChars)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .unavailable }
+
+        guard let base = try? await credentials.baseURL(),
+              let header = await credentials.authHeader() else {
+            // Identical consent/entitlement/credential gate as `parseDetailed` (same doc comment
+            // applies verbatim): never send an unauthenticated request, not even the candidate
+            // titles, when there is no consent/entitlement/token available right now.
+            return .unavailable
+        }
+
+        // Same defensive cap + per-title truncation `parseDetailed` applies to `open_task_titles`
+        // — this wire field is the same shape (a list of open-task titles), just under the locked
+        // `candidates` name for this mode. `boundedCandidates.count` is what `matchIndex` gets
+        // validated against below, so this MUST be the exact list actually sent on the wire.
+        let boundedCandidates = Array(candidates.prefix(100)).map { Self.utf16Prefix($0, 200) }
+
+        let payload: [String: Any] = [
+            "mode": "resolve_completion",
+            "transcript": trimmed,
+            "now": Self.makeRequestFormatter().string(from: now),
+            "kind": kind.wireValue,
+            "candidates": boundedCandidates,
+        ]
+
+        guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
+            return .unavailable
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            // Transport failure — silent fall-through, no logging (same privacy rationale as
+            // `parseDetailed`'s identical catch block: never log error strings that could echo
+            // request details on some platforms).
+            return .unavailable
+        }
+        guard let http = response as? HTTPURLResponse else { return .unavailable }
+        guard http.statusCode == 200 else {
+            // Follows `parseDetailed`'s existing degrade convention: every non-200 (401 invalid/
+            // expired auth, 403, 429, 5xx) falls through to unavailable. This mode's result shape
+            // has no quota-note case (unlike `CloudParseOutcome.quotaExceeded`) — a 429 here is
+            // just "not available right now," not a distinct signal the caller acts on.
+            return .unavailable
+        }
+        guard data.count <= maxResponseBytes else { return .unavailable }
+        guard let decoded = try? JSONDecoder().decode(ResolveCompletionResponse.self, from: data) else {
+            return .unavailable
+        }
+
+        // TRUST BOUNDARY — this decides which of the user's tasks gets completed. Every violation
+        // below maps to `.none`, never to a patched-up/defaulted `.resolved`.
+        switch decoded.intent {
+        case "complete", "clear_external":
+            break
+        case "none":
+            return .none
+        default:
+            // Unrecognized literal — schema drift or a hostile/corrupted response. Never guess.
+            return .none
+        }
+
+        guard decoded.confidence.isFinite, (0...1).contains(decoded.confidence) else { return .none }
+
+        // `matchIndex` is 1-BASED (locked contract) — bounds-checked against `boundedCandidates`,
+        // the EXACT list this call sent, so `candidates[matchIndex - 1]` (whenever a caller does
+        // that arithmetic) is always in range for THIS response.
+        // Two plain comparisons, not `(1...boundedCandidates.count).contains(matchIndex)`: an
+        // empty `boundedCandidates` (caller passed no candidates at all) makes `1...0` an invalid
+        // `ClosedRange` that TRAPS at construction, before `.contains` ever runs — a hostile/buggy
+        // server response with a non-nil `matchIndex` on a zero-candidate request must degrade to
+        // `.none`, never crash the app.
+        guard let matchIndex = decoded.matchIndex,
+              matchIndex >= 1, matchIndex <= boundedCandidates.count else { return .none }
+
+        guard let matchTitle = decoded.matchTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !matchTitle.isEmpty else { return .none }
+
+        return .resolved(index: matchIndex, title: matchTitle, confidence: decoded.confidence)
+    }
+
     // MARK: - Shared request builder
 
     private static func makeRequest(

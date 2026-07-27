@@ -178,6 +178,48 @@ actor AccountService {
         KeychainStore.clearSession()
     }
 
+    // MARK: - Promo code redemption
+
+    /// `POST /functions/v1/subscription/redeem` (backlog: "1 free month of Pro" promo codes — ONE
+    /// code string shared by many people, each may redeem it exactly once). Requires an account
+    /// (same `validAccessToken()` gate as `deleteAccount()` above) — redemption is meaningless
+    /// without a signed-in identity to attach the grant to, so a `nil` token throws `.signedOut`
+    /// rather than silently no-op'ing.
+    ///
+    /// Normalization happens in `normalizeCode(_:)` below and ONLY there — callers
+    /// (`AppState.redeemPromoCode`) pass through whatever the user typed untouched, so there is
+    /// exactly one seam in the whole client that could ever drift from the server's own
+    /// normalization instead of two call sites that could quietly disagree.
+    func redeemPromoCode(_ code: String) async throws -> RedeemResult {
+        guard let token = try await validAccessToken() else { throw AccountError.signedOut }
+        let normalized = Self.normalizeCode(code)
+        let data = try await functionsRequest(
+            path: "functions/v1/subscription/redeem",
+            body: ["code": normalized],
+            bearer: token,
+            errorMapper: Self.mapRedeemError
+        )
+        guard let result = try? JSONDecoder().decode(RedeemResult.self, from: data) else {
+            throw AccountError.decoding
+        }
+        return result
+    }
+
+    /// The ONE place client-side code normalization happens: trim surrounding whitespace/newlines
+    /// (a pasted code very plausibly carries them — e.g. copied from an email/Slack message with a
+    /// trailing newline) then uppercase, because the server stores/matches codes uppercase (this
+    /// comment is the other half of that agreement — if the server's normalization rule ever
+    /// changes, this is the one line that needs to change to match it).
+    ///
+    /// `nonisolated static` (not `private`, unlike most of this actor's internals) specifically so
+    /// this ONE pure transformation is reachable — and tested — without any networking or actor
+    /// isolation involved, mirroring `AppState.applyTextCaptureParseResult`'s own precedent
+    /// (`AppState.swift`) of loosening a method's access specifically so a test can drive it
+    /// directly instead of only being reachable through a real, network-bound call.
+    nonisolated static func normalizeCode(_ code: String) -> String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
     // MARK: - Networking helpers
 
     private func tokenRequest(query: String, body: [String: Any]) async throws -> AccountSession {
@@ -197,9 +239,24 @@ actor AccountService {
     /// — no `apikey` header, matching the existing `CloudParser`/`GroqTranscriptionClient`
     /// convention of sending Authorization only (config.toml's `verify_jwt = false`, see contract
     /// §7 — the function verifies the account token itself via `auth.getUser()`).
-    private func functionsRequest(path: String, body: [String: Any], bearer: String) async throws -> Data {
+    ///
+    /// `errorMapper` defaults to the shared `Self.mapError` — every existing call site (`redeem`
+    /// is the only exception, see `redeemPromoCode` below) gets the exact same opaque `.http(status:
+    /// code:)` mapping it always has. This is a deliberate seam rather than a second networking
+    /// path: `redeemPromoCode`'s contract hands back SPECIFIC, user-presentable meanings for 404/
+    /// 409/410/429 (see `AccountError`'s doc comments on those cases) that only apply to THAT one
+    /// endpoint — folding that switch into the shared `mapError` would make every OTHER edge
+    /// function on this actor (e.g. `deleteAccount`) misreport an unrelated 404/409 as a promo-code
+    /// failure. Passing a mapper keeps the single 2xx-check-then-throw shape shared by every caller
+    /// while letting the meaning of a non-2xx stay endpoint-specific.
+    private func functionsRequest(
+        path: String,
+        body: [String: Any],
+        bearer: String,
+        errorMapper: (Int, Data) -> AccountError = AccountService.mapError
+    ) async throws -> Data {
         let (status, data) = try await send(path: path, body: body, bearer: bearer, includeApiKey: false)
-        guard (200..<300).contains(status) else { throw Self.mapError(status: status, data: data) }
+        guard (200..<300).contains(status) else { throw errorMapper(status, data) }
         return data
     }
 
@@ -246,6 +303,25 @@ actor AccountService {
     private static func mapError(status: Int, data: Data) -> AccountError {
         let body = try? JSONDecoder().decode(AccountErrorBody.self, from: data)
         return .http(status: status, code: body?.error)
+    }
+
+    /// `redeemPromoCode`'s `errorMapper` — the documented contract (see `POST subscription/redeem`
+    /// in this feature's contract doc) has FOUR statuses with a specific, distinct meaning worth
+    /// surfacing to the user; everything else (400 malformed, 401 dead session, 503, or any status
+    /// this contract didn't document) falls through to the same opaque `.http` shape every other
+    /// endpoint on this actor already uses via `mapError` — deliberately NOT invented a second
+    /// fallback shape just for this one endpoint.
+    ///
+    /// `static` (not `private`, same reasoning as `normalizeCode` above) so this pure status ->
+    /// `AccountError` mapping is directly testable with no networking.
+    static func mapRedeemError(status: Int, data: Data) -> AccountError {
+        switch status {
+        case 404: return .promoCodeInvalid
+        case 409: return .promoCodeAlreadyRedeemed
+        case 410: return .promoCodeExhausted
+        case 429: return .promoCodeTooManyAttempts
+        default: return mapError(status: status, data: data)
+        }
     }
 
     @discardableResult

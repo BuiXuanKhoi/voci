@@ -64,6 +64,25 @@ enum AccountTier: String, Codable, Sendable, Equatable {
     case free, pro
 }
 
+/// `POST /functions/v1/subscription/redeem` 200 body — promo-code redemption (backlog: "1 free
+/// month of Pro" codes the product owner hands out; one code shared by many people, each may
+/// redeem it exactly once). Field names already match the wire JSON exactly (no `CodingKeys`
+/// needed), same as `SubscriptionStatus`/`SubscriptionLinkResponse` right above.
+///
+/// `expiresAt` is a raw ISO8601 `String`, NOT `Date` — deliberately mirrors those two structs'
+/// own `expiresAt: String?` rather than inventing a `Date`-typed field: every `JSONDecoder()` this
+/// file's callers use is a plain `JSONDecoder()` with no `dateDecodingStrategy` set (see
+/// `AccountSession.expiresAt`'s doc comment for the same underlying reason, there solved by
+/// decoding as `Double` instead), so a `Date` field here would silently fail to decode against
+/// the exact same decoder every other model in this file goes through. Any `Date` parsing for
+/// display happens at the call site (`AppState.redeemPromoCode`), not here.
+struct RedeemResult: Codable, Sendable, Equatable {
+    var tier: AccountTier
+    var expiresAt: String?
+    var grantedDays: Int
+    var source: String
+}
+
 /// Opaque server error body, contract §5: `{"error":"<code>"}` (+ `resetAt` on 429, unused by
 /// this subsystem — quota 429s are `CloudParser`'s/`GroqTranscriptionClient`'s concern, not
 /// account auth's).
@@ -89,6 +108,24 @@ enum AccountError: Error, Sendable, Equatable {
     case http(status: Int, code: String?)
     case decoding
     case network(String)
+    /// `POST subscription/redeem` 404 (`code_invalid`) — the server DELIBERATELY collapses
+    /// "unknown code", "expired code", and "deactivated code" into this one opaque outcome (a
+    /// distinguishable error would let someone brute-forcing codes learn which guesses are
+    /// "close"). Do NOT split this back into more specific wording client-side — that would leak
+    /// exactly the distinction the server withholds on purpose.
+    case promoCodeInvalid
+    /// `POST subscription/redeem` 409 (`already_redeemed`) — THIS signed-in user already redeemed
+    /// THIS code. A different user redeeming the same code, or this user redeeming a DIFFERENT
+    /// code, doesn't hit this case.
+    case promoCodeAlreadyRedeemed
+    /// `POST subscription/redeem` 410 (`code_exhausted`) — the code hit its total-redemptions cap
+    /// (a many-people-share-one-code promo running out), independent of whether THIS user
+    /// personally redeemed it before.
+    case promoCodeExhausted
+    /// `POST subscription/redeem` 429 (`too_many_attempts`) — too many wrong tries TODAY (contract
+    /// wording is per-day, not a fixed lockout window), so the message says "tomorrow" rather than
+    /// implying a retry-after countdown this app doesn't have.
+    case promoCodeTooManyAttempts
 }
 
 extension AccountError: LocalizedError {
@@ -99,6 +136,10 @@ extension AccountError: LocalizedError {
         case .http(let status, let code): return "Request failed (\(code ?? "http_\(status)"))."
         case .decoding: return "Couldn't read the server's response."
         case .network(let message): return "Network error: \(message)"
+        case .promoCodeInvalid: return "That code isn't valid."
+        case .promoCodeAlreadyRedeemed: return "You've already used this code."
+        case .promoCodeExhausted: return "This code has been fully claimed."
+        case .promoCodeTooManyAttempts: return "Too many attempts. Try again tomorrow."
         }
     }
 }

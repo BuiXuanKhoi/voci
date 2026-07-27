@@ -10,21 +10,23 @@ Three functions:
 
 - `POST /functions/v1/parse` — task parsing/breakdown (Gemini). Both `free` and `pro` accounts may
   call it; only the daily quota differs.
-- `POST /functions/v1/groq/audio/transcriptions` — Groq Speech-to-Text proxy. **Pro-only**; a free
-  account gets `403 upgrade_required` and falls back to on-device WhisperKit.
-- `subscription` — three routes: `POST /link`, `GET /status`, `POST /delete-account`. See
-  `functions/subscription/index.ts`.
+- `POST /functions/v1/groq/audio/transcriptions` — Groq Speech-to-Text proxy. Both `free` and `pro`
+  accounts may call it; only the daily quota differs (`SPEECH_LIMIT_FREE` / `SPEECH_LIMIT_PRO`).
+- `subscription` — four routes: `POST /link`, `GET /status`, `POST /delete-account`,
+  `POST /redeem`. See `functions/subscription/index.ts`.
 
 ```text
 supabase/
 ├── migrations/
-│   ├── 0001_parse_quota.sql            # SUPERSEDED — old device-keyed tables, dropped by 0002
-│   └── 0002_accounts_entitlements.sql  # entitlements + usage_counters + consume_quota RPC
+│   ├── 0001_parse_quota.sql                    # SUPERSEDED — old device-keyed tables, dropped by 0002
+│   ├── 0002_accounts_entitlements.sql          # entitlements (SUPERSEDED shape, see 0003) + usage_counters + consume_quota RPC
+│   ├── 0003_entitlements_multi_source.sql      # entitlements -> one row per (user_id, source); current shape, see "Auth design" below
+│   └── 0004_promo_codes.sql                    # promo_codes / promo_redemptions / promo_attempts + redeem_promo_code RPC; adds 'promo' to entitlements.source
 └── functions/
     ├── parse/index.ts         # the parse/breakdown route
-    ├── groq/index.ts          # the Groq Speech-to-Text proxy route (Pro-only)
+    ├── groq/index.ts          # the Groq Speech-to-Text proxy route (both tiers, tiered daily cap)
     ├── groq/README.md         # groq's own contract/threat-model/curl notes
-    ├── subscription/index.ts  # /link, /status, /delete-account
+    ├── subscription/index.ts  # /link, /status, /delete-account, /redeem
     └── _shared/               # auth.ts, appstore.ts, quota.ts, schema.ts, gemini.ts, env.ts,
                                 # log.ts, http.ts
 ```
@@ -37,8 +39,11 @@ Requires the [Supabase CLI](https://supabase.com/docs/guides/cli) and a linked p
 supabase login
 supabase link --project-ref <your-project-ref>
 
-# Apply migrations (entitlements / usage_counters tables + consume_quota RPC; also drops the old
-# device-keyed parse_quota / parse_rate_limit objects from 0001)
+# Apply migrations (entitlements / usage_counters tables + consume_quota RPC, entitlements later
+# redefined by 0003 as one row per (user_id, source); also drops the old device-keyed
+# parse_quota / parse_rate_limit objects from 0001; 0004 adds 'promo' as a third entitlements
+# source plus promo_codes / promo_redemptions / promo_attempts and the redeem_promo_code RPC —
+# see "Promo codes" below)
 supabase db push
 
 # Set secrets (see full list below) — repeat `supabase secrets set` per key, or use --env-file
@@ -80,6 +85,7 @@ are logged server-side instead (see `_shared/log.ts`), so an operator can `supab
 | `PARSE_UPSTREAM_TIMEOUT_MS` | optional | Gemini request timeout. Default `20000`. |
 | `PARSE_LIMIT_FREE` | optional | Free-tier daily `/parse` cap per account. Default `20`. |
 | `PARSE_LIMIT_PRO` | optional | Pro-tier daily `/parse` cap per account (fair-use, not a hard sales limit). Default `500`. |
+| `SPEECH_LIMIT_FREE` | optional | Free-tier daily `/groq` cap per account. Default `20`. |
 | `SPEECH_LIMIT_PRO` | optional | Pro-tier daily `/groq` cap per account. Default `500`. |
 | `GROQ_API_KEY` | `groq` | Groq API key for the Speech-to-Text proxy. See `functions/groq/README.md` for this function's full env list (`GROQ_BASE_URL`, `GROQ_MAX_AUDIO_BYTES`, `GROQ_UPSTREAM_TIMEOUT_MS`). |
 | `APPSTORE_BUNDLE_ID` | `subscription` (`/link`) | Your app's bundle id, checked against the verified StoreKit transaction. |
@@ -104,8 +110,14 @@ Supabase Auth session token the client obtained by signing in (Apple, or email O
    authentication, which it is not. `verifyAccount`'s `getUser()` call is the actual authentication
    boundary, done inside the function itself.
 3. Loads `entitlements` (service-role client — RLS-enabled, zero policies, service-role only) and
-   resolves the effective tier: `pro` only if `tier = 'pro' AND expires_at > now()`, else `free`
-   (including "no row at all", the normal state for a free account).
+   resolves the effective tier. Since `migrations/0003_entitlements_multi_source.sql`, `entitlements`
+   is one row per `(user_id, source)` — `'apple'` (StoreKit / Mac App Store) and `'mor'` (the
+   merchant-of-record web checkout used by the Windows build) can both exist for the same user — so
+   this loads ALL of that user's rows, not a single row. The effective tier is "any-row-wins": `pro`
+   if AT LEAST ONE row has `tier = 'pro' AND expires_at > now()`, else `free` (including "no rows at
+   all", the normal state for a free account that never subscribed on any platform). Entitlements
+   from different sources are never summed — a user Pro-until-March on Apple and Pro-until-June on
+   the MoR is Pro until June, not until September.
 
 StoreKit JWS verification (`_shared/appstore.ts`, using Apple's official
 `@apple/app-store-server-library`, pinned `3.1.0`) is a SEPARATE concern from bearer auth: it is
@@ -119,7 +131,7 @@ must have an app record (for the bundle id / Apple ID) even in Sandbox testing.
 
 ## Quota
 
-`PARSE_LIMIT_FREE`, `PARSE_LIMIT_PRO`, `SPEECH_LIMIT_PRO` are all read fresh from env on every
+`PARSE_LIMIT_FREE`, `PARSE_LIMIT_PRO`, `SPEECH_LIMIT_FREE`, `SPEECH_LIMIT_PRO` are all read fresh from env on every
 request — retune by updating the secret, no redeploy needed. The daily counter resets at **00:00
 UTC**, not device-local midnight (`_shared/quota.ts` / the `consume_quota` SQL function both use
 UTC). Counters are stored in Postgres and incremented atomically in one round trip via the
@@ -129,6 +141,60 @@ their OWN independent daily counter (keyed by a `route` column) — this closes 
 device-keyed design had, where both routes shared one bucket and could 429 each other.
 `usage_counters` is never pruned yet; a `pg_cron` cleanup job is a tracked follow-up (comment in the
 migration file / backlog.md).
+
+## Promo codes
+
+`migrations/0004_promo_codes.sql` adds a SHARED promo-code redemption path: one code string (e.g.
+`"VOLARLAUNCH"`), created directly in `promo_codes` (never via a migration — codes are not
+committed to source control), that MANY different accounts can each redeem ONCE for a Pro grant.
+
+- `promo_codes` — one row per code string, stored uppercase. `grant_days` (default 30), an
+  optional `max_redemptions` cap (how many DISTINCT PEOPLE may redeem it — a cost ceiling, separate
+  from the once-per-person rule below), an optional `expires_at`, and an `active` kill switch.
+- `promo_redemptions` — primary key `(code, user_id)`. This table's composite primary key IS the
+  once-per-person enforcement mechanism (not just a log): a bare `insert`, caught for a `23505`
+  unique-violation, is how `redeem_promo_code` detects "this user already redeemed this code".
+- `promo_attempts` — per-`(user_id, day)` brute-force counter (a shared code is guessable; a
+  correct guess is a free month), same atomic increment-and-check shape as `consume_quota`.
+- `redeem_promo_code(p_user, p_code, p_max_attempts default 10)` — one `security definer` RPC that
+  does the entire redemption atomically: normalize the code, check/bump the attempt counter, lock
+  and validate the code row, check `max_redemptions`, insert the once-per-person redemption row,
+  bump `redeemed_count`, and upsert a `source = 'promo'` row onto `entitlements` (stacking: a
+  second redemption while a promo grant is still live EXTENDS it rather than resetting it; an
+  expired old promo grant does not eat the new one). `external_id` is `'<code>:<user_id>'`, not the
+  bare code — `entitlements` carries `unique (source, external_id)` from 0003, so a bare code would
+  let only ONE person in the whole system hold a `'promo'` row. `entitlements.source`'s CHECK
+  constraint is widened from 0003's `('apple', 'mor')` to include `'promo'` as a third, independent
+  grant source (its own row per `(user_id, source)`, exactly like `'apple'`/`'mor'` — see the
+  migration file's own comment for why a promo month cannot safely be a flag on an existing row).
+- `POST /functions/v1/subscription/redeem` (`functions/subscription/index.ts`) is the only caller
+  of this RPC. It maps the RPC's `status` onto the HTTP contract below; an unrecognized status is
+  always a `503`, never a success. The submitted code is NEVER logged and NEVER echoed back in any
+  response body, success or failure — only `userIdHash`, the outcome status, and latency are
+  logged, matching this whole backend's logging discipline (`_shared/log.ts`).
+
+| Case | HTTP | Body |
+|---|---|---|
+| success | 200 | `{"tier":"pro","expiresAt":"<ISO8601>","grantedDays":30,"source":"promo"}` |
+| bad/missing body | 400 | `{"error":"invalid_request"}` |
+| no/invalid token | 401 | existing auth shapes (`auth_missing` / `auth_invalid`) |
+| unknown/expired/inactive code | 404 | `{"error":"code_invalid"}` |
+| already redeemed by this user | 409 | `{"error":"already_redeemed"}` |
+| code hit `max_redemptions` | 410 | `{"error":"code_exhausted"}` |
+| too many wrong attempts today | 429 | `{"error":"too_many_attempts"}` |
+| anything else | 503 | `{"error":"service_unavailable"}` |
+
+These four new codes (`code_invalid`, `already_redeemed`, `code_exhausted`, `too_many_attempts`)
+are specific to `/redeem` and deliberately NOT added to `_shared/http.ts`'s `ApiErrorCode` list —
+`/redeem` builds those particular response bodies itself.
+
+Codes are created directly against the database (never via a migration, never committed to source
+control), e.g.:
+
+```sql
+insert into public.promo_codes (code, grant_days, max_redemptions, note)
+values ('VOLARLAUNCH', 30, 50, 'launch giveaway 2026-07');
+```
 
 ## curl examples
 
@@ -176,6 +242,15 @@ Delete account (Apple Guideline 5.1.1(v)):
 ```bash
 curl -sS -X POST https://<project-ref>.supabase.co/functions/v1/subscription/delete-account \
   -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+Redeem a promo code:
+
+```bash
+curl -sS https://<project-ref>.supabase.co/functions/v1/subscription/redeem \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"code":"VOLARLAUNCH"}'
 ```
 
 ## Local development

@@ -428,7 +428,7 @@ struct TodayView: View {
             // `TaskRow`'s doc comment on why a nested-Button row is safe here.
             .onTapGesture { appState.openDetail(active.id) }
             .contextMenu {
-                Button("Break down into steps…") { appState.showBreakdown = true }
+                Button("Break down into steps…") { appState.openBreakdown(for: active) }
                 Button(active.done ? "Mark not done" : "Mark done") { appState.toggleDone(active.id) }
                 if !active.done {
                     Button("Delegate to Claude…") { appState.delegateTask(active.id) }
@@ -909,7 +909,7 @@ private struct NextPeekRow: View {
         .contentShape(Rectangle())
         .onTapGesture { appState.openDetail(task.id) }
         .contextMenu {
-            Button("Break down into steps…") { appState.showBreakdown = true }
+            Button("Break down into steps…") { appState.openBreakdown(for: task) }
             Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
             Divider()
             Button("Delete", role: .destructive) { appState.deleteTask(task.id) }

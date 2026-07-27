@@ -275,7 +275,9 @@ struct PopoverView: View {
         }
         guard let first = appState.confirmDrafts.first else { return appState.liveTranscript }
         let extra = appState.confirmDrafts.count - 1
-        return extra > 0 ? "\(first.task.title)  +\(extra) more" : first.task.title
+        // `effectiveTitle` (not `task.title`) so this summary line reflects an in-progress edit
+        // from the now-editable title field below, not the stale parser output.
+        return extra > 0 ? "\(first.effectiveTitle)  +\(extra) more" : first.effectiveTitle
     }
 
     // MARK: - Parsed card (T024 — chips v2)
@@ -309,10 +311,45 @@ struct PopoverView: View {
     private func taskDraftCard(_ draft: ConfirmDraft, showRemove: Bool, isPrimary: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 8) {
-                Text(draft.task.title)
+                // T-title-edit: was a read-only `Text(draft.task.title)` — now editable in place,
+                // writing through `AppState.updateDraftTitle(_:forDraft:)` (never `task.title`
+                // itself; see `ConfirmDraft`'s doc comment). `.textFieldStyle(.plain)` + no
+                // background/border keeps the exact look the `Text` had.
+                //
+                // Wraps like the `Text` it replaced (up to 3 lines) — voice-parsed titles are
+                // long, and a title you cannot read is a title you cannot check before saving.
+                //
+                // That costs work to keep "Enter saves": a vertical-axis TextField turns Return into
+                // a newline and never calls `.onSubmit`, and a focused TextField also swallows the
+                // Save button's `.keyboardShortcut(.defaultAction)` (`actionsRow`). So Return is
+                // intercepted here with `.onKeyPress` (macOS 14+, this app's floor) BEFORE the field
+                // can insert it, and `.handled` stops it going further. `.onSubmit` is kept as well:
+                // it costs nothing and still fires if this ever runs as a single-line field.
+                //
+                // UNVERIFIED, and the one thing to check first if Enter misbehaves: whether
+                // `.onKeyPress` sees Return ahead of the text-editing system at all. If it does not,
+                // Enter will insert a newline instead of saving — `effectiveTitle` strips newlines
+                // so a stray one can never reach the saved task, and the fallback is to drop
+                // `axis:`/`lineLimit` and go back to a single-line field, where `.onSubmit` alone is
+                // known to work.
+                TextField(
+                    "",
+                    text: Binding(
+                        get: { draft.effectiveTitle },
+                        set: { appState.updateDraftTitle($0, forDraft: draft.id) }
+                    ),
+                    axis: .vertical
+                )
+                    .textFieldStyle(.plain)
+                    .lineLimit(1...3)
                     .font(.system(size: 13.5, weight: .medium))
                     .foregroundStyle(isPrimary ? VolarColor.nowAccentSoft : VolarColor.textPri)
-                    .lineLimit(3)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onKeyPress(.return) {
+                        appState.confirmSave()
+                        return .handled
+                    }
+                    .onSubmit { appState.confirmSave() }
                 Spacer(minLength: 4)
                 if showRemove {
                     Button {

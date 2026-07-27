@@ -9,7 +9,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>Volar</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundlePackageType</key>
@@ -85,5 +85,12 @@
 			</array>
 		</dict>
 	</array>
+	<!--
+	  Volar only ever talks HTTPS (Supabase Auth/Edge Functions, App Store/StoreKit) — no custom or
+	  proprietary encryption. Declaring that here means every TestFlight/App Store Connect upload
+	  skips the manual export-compliance questionnaire instead of asking every single time.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

@@ -25,6 +25,7 @@ export type Route = "parse" | "speech";
 
 export const DEFAULT_PARSE_LIMIT_FREE = 20;
 export const DEFAULT_PARSE_LIMIT_PRO = 500;
+export const DEFAULT_SPEECH_LIMIT_FREE = 20;
 export const DEFAULT_SPEECH_LIMIT_PRO = 500;
 
 /** `/parse` is available to both tiers, just with a different daily cap. */
@@ -34,7 +35,17 @@ export function parseLimitFor(tier: "free" | "pro"): number {
     : readEnvInt("PARSE_LIMIT_FREE", DEFAULT_PARSE_LIMIT_FREE);
 }
 
-/** `/groq` (speech) is Pro-only (contract §1) — there is no free-tier speech limit to compute. */
+/** `/groq` (speech) is available to both tiers, just with a different daily cap — same shape as
+ *  `parseLimitFor` above. Any tier value other than the literal `"pro"` falls to the FREE cap;
+ *  there is no "unexpected tier" case that ever resolves to the larger Pro budget. */
+export function speechLimitFor(tier: "free" | "pro"): number {
+  return tier === "pro" ? speechLimitForPro() : readEnvInt("SPEECH_LIMIT_FREE", DEFAULT_SPEECH_LIMIT_FREE);
+}
+
+/** Pro-tier speech cap alone. Kept as its own export (rather than folded fully into
+ *  `speechLimitFor`) because `../subscription/index.ts`'s `/status` handler calls it directly for
+ *  its own tier branch — that file is out of scope for the free/paid `/groq` change this module
+ *  was updated for, so its call site and behavior are deliberately left untouched here. */
 export function speechLimitForPro(): number {
   return readEnvInt("SPEECH_LIMIT_PRO", DEFAULT_SPEECH_LIMIT_PRO);
 }

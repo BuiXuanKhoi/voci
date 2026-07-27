@@ -7,6 +7,11 @@
 // Request shapes (validated in ../_shared/schema.ts):
 //   parse mode (default):    { transcript, locale_hint?, now, open_task_titles? }
 //   breakdown mode:          { mode: "breakdown", task_title, notes? }
+//   resolve_completion mode: { mode: "resolve_completion", transcript, now, kind, candidates }
+//     — server-side semantic match for "which open task is the user saying they finished",
+//     since local Jaccard token-set matching on the client can't handle a paraphrase. Consumes
+//     the SAME 'parse' quota route as the other two modes (see TASK brief / usage_counters'
+//     CHECK constraint — only 'parse' and 'speech' are valid route values, no new one added).
 // Auth (../_shared/auth.ts): `Authorization: Bearer <supabase access_token>` — a real user
 // account, verified via `verifyAccount`. Both tiers may call this route; only the daily quota
 // limit differs (`PARSE_LIMIT_FREE` / `PARSE_LIMIT_PRO`).
@@ -32,14 +37,19 @@ import {
   validateBreakdownSteps,
   validateParsedTaskArray,
   validateRequestBody,
+  validateResolveCompletion,
+  type ResolveCompletionOut,
 } from "../_shared/schema.ts";
 import {
   DEFAULT_PARSE_MODEL,
+  RESOLVE_COMPLETION_SYSTEM_PREAMBLE,
   SYSTEM_PREAMBLE,
   buildBreakdownContents,
   buildBreakdownResponseSchema,
   buildParseContents,
   buildParseResponseSchema,
+  buildResolveCompletionContents,
+  buildResolveCompletionResponseSchema,
   callGemini,
   GeminiUpstreamError,
 } from "../_shared/gemini.ts";
@@ -183,32 +193,92 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
       return jsonResponse(200, result.tasks);
     }
 
-    // mode === "breakdown"
-    const contents = buildBreakdownContents({ taskTitle: body.taskTitle, notes: body.notes });
-    const raw = await callGemini({
-      apiKey: geminiCfg.values.GEMINI_API_KEY,
-      model,
-      systemInstruction: SYSTEM_PREAMBLE,
-      contents,
-      responseSchema: buildBreakdownResponseSchema(),
-      timeoutMs,
-    });
-    const steps = validateBreakdownSteps(raw);
-    if (!steps) {
-      logError("parse_output_invalid", { tier: authResult.tier, mode: "breakdown" });
-      return errorResponse(502, "upstream_error");
+    if (body.mode === "breakdown") {
+      const contents = buildBreakdownContents({ taskTitle: body.taskTitle, notes: body.notes });
+      const raw = await callGemini({
+        apiKey: geminiCfg.values.GEMINI_API_KEY,
+        model,
+        systemInstruction: SYSTEM_PREAMBLE,
+        contents,
+        responseSchema: buildBreakdownResponseSchema(),
+        timeoutMs,
+      });
+      const steps = validateBreakdownSteps(raw);
+      if (!steps) {
+        logError("parse_output_invalid", { tier: authResult.tier, mode: "breakdown" });
+        return errorResponse(502, "upstream_error");
+      }
+      logEvent("parse_request", {
+        userIdHash,
+        tier: authResult.tier,
+        status: 200,
+        mode: "breakdown",
+        taskTitleChars: body.taskTitle.length,
+        stepCount: steps.length,
+        quotaUsed,
+        latencyMs: Math.round(performance.now() - startedAt),
+      });
+      return jsonResponse(200, { steps });
     }
+
+    // mode === "resolve_completion" — see module doc comment. Unlike `parse`/`breakdown`, an
+    // invalid/unparseable model response maps to a well-formed 200 `{ intent: "none", confidence:
+    // 0 }` rather than a 502: the client's fallback behavior for "none" and for "server broke" is
+    // identical (leave it to the user to complete the task by hand), so collapsing them into one
+    // response shape keeps the client's handling simple, and it avoids burning a 5xx-triggered
+    // retry loop on what is, from the client's perspective, a completely benign "no match found".
+    const contents = buildResolveCompletionContents({
+      transcript: body.transcript,
+      now: body.now,
+      kind: body.kind,
+      candidates: body.candidates,
+    });
+    let resolved: ReturnType<typeof validateResolveCompletion>;
+    try {
+      const raw = await callGemini({
+        apiKey: geminiCfg.values.GEMINI_API_KEY,
+        model,
+        systemInstruction: RESOLVE_COMPLETION_SYSTEM_PREAMBLE,
+        contents,
+        responseSchema: buildResolveCompletionResponseSchema(),
+        timeoutMs,
+      });
+      resolved = validateResolveCompletion(raw, body.candidates.length);
+      if (!resolved) {
+        // Gemini responded, but the JSON didn't pass validateResolveCompletion (bad intent, bad
+        // confidence, out-of-range index, etc.) — distinct failure mode from the upstream-call
+        // failure below, logged separately so operators can tell "model misbehaved" apart from
+        // "upstream unreachable".
+        logError("parse_output_invalid", { tier: authResult.tier, mode: "resolve_completion" });
+      }
+    } catch (err) {
+      // Upstream failure (timeout/transport/non-2xx/malformed JSON) also folds into a safe
+      // "none" 200 for the same reason as an invalid model response above — see comment there.
+      // Still logged as a failure (via the errorType below) so operators can see upstream health.
+      logError("parse_upstream_failure", {
+        tier: authResult.tier,
+        mode: "resolve_completion",
+        errorType: err instanceof GeminiUpstreamError ? "gemini_upstream" : "unexpected",
+        latencyMs: Math.round(performance.now() - startedAt),
+      });
+      resolved = undefined;
+    }
+    // PRIVACY: never log transcript, candidate titles, matchTitle, or any user id here — only
+    // counts/status/latency + the hashed user id, matching every other log line in this route.
+    const out: ResolveCompletionOut = resolved ?? { intent: "none", confidence: 0 };
     logEvent("parse_request", {
       userIdHash,
       tier: authResult.tier,
       status: 200,
-      mode: "breakdown",
-      taskTitleChars: body.taskTitle.length,
-      stepCount: steps.length,
+      mode: "resolve_completion",
+      kind: body.kind,
+      transcriptChars: body.transcript.length,
+      candidateCount: body.candidates.length,
+      intent: out.intent,
       quotaUsed,
       latencyMs: Math.round(performance.now() - startedAt),
     });
-    return jsonResponse(200, { steps });
+    return jsonResponse(200, out);
   } catch (err) {
     // Covers GeminiUpstreamError (non-2xx, timeout, transport, malformed JSON text) and anything
     // else from this block. NEVER forward `err.message` — it may contain upstream response

@@ -85,6 +85,11 @@ struct Sidebar: View {
 
     private var captureButton: some View {
         Button {
+            // Stays on `toggleCapture()` on purpose. `handleHotkey()` saves a pending confirm card,
+            // which is right for a BARE keypress whose meaning has to depend on state — but this
+            // button says "Tap to speak", and a button that saves your task when its label offers to
+            // listen is a surprise, not a shortcut. Same reasoning keeps the Windows sidebar button
+            // on ToggleCaptureAsync (SidebarControl.xaml.cs's OnCaptureButtonClick).
             appState.toggleCapture()
         } label: {
             HStack(spacing: 7) {

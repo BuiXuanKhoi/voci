@@ -1,11 +1,14 @@
 // Sources/Views/SettingsView.swift — Settings window: 5 tabs (General/Hotkeys/Notifications/
 // Appearance/About), ported from `design/volar-extras.jsx`'s `VolarSettings`. Native-first: a
 // custom top tab strip (icon + label, accent-tinted when selected) switches a `@State tab` with
-// the tab content below. Most rows here are local, cosmetic `@State` (Launch at login, reminder
-// defaults, notification toggles, etc.) — the frozen `AppState` (spec §4) does not own these
-// preferences, only `accent` and `density`, which this view binds for real via `@Bindable`.
+// the tab content below. Most rows here are local, cosmetic `@State` (reminder defaults,
+// notification toggles, etc.) — the frozen `AppState` (spec §4) does not own these preferences,
+// only `accent` and `density`, which this view binds for real via `@Bindable`. "Launch at login"
+// is the one exception below that list: it's wired for real to `SMAppService` via `LoginItem.swift`,
+// not local `@State` at all.
 import SwiftUI
 import AppKit
+import ServiceManagement
 import Speech
 import StoreKit
 import UniformTypeIdentifiers
@@ -47,7 +50,6 @@ struct SettingsView: View {
     @State private var tab: Tab = .general
 
     // Cosmetic-only local settings state (not part of the frozen AppState API).
-    @State private var launchAtLogin = true
     @State private var defaultDuration = 30
     @State private var hyperfocusInterrupt = 90
     @State private var showMorningFrog = true
@@ -59,6 +61,13 @@ struct SettingsView: View {
 
     @State private var themeChoice = "dark"
 
+    // "Launch at login" — unlike every `@State` above this line, this is NOT cosmetic/local: it
+    // mirrors the REAL `SMAppService.mainApp.status` (`LoginItem.swift`), re-read fresh in
+    // `.onAppear` below rather than cached across app launches, since the user can flip it from
+    // System Settings behind Volar's back at any time (see `LoginItem.swift`'s header comment).
+    @State private var loginItemStatus: SMAppService.Status = .notFound
+    @State private var loginItemError: String?
+
     // Account tab (Task 4, account-auth.md contract) — purely local UI state for the sign-in
     // forms; the actual session/tier/quota state lives on `AppState` (`accountEmail`,
     // `accountTier`, `subscriptionStatus`, `accountBusy`, `accountError`), same split as every
@@ -67,6 +76,11 @@ struct SettingsView: View {
     @State private var accountCodeInput = ""
     @State private var accountCodeSent = false
     @State private var showDeleteAccountConfirm = false
+    /// Backlog "1 free month of Pro" promo codes (Task 3, redeem contract). Local `@State`, same
+    /// convention as `accountEmailInput`/`accountCodeInput` above — the FIELD text is view-local,
+    /// the actual redeem call + success/failure state lives on `appState` (`redeemPromoCode(_:)`/
+    /// `lastRedeemedUntil`/`accountError`).
+    @State private var promoCodeInput = ""
 
     @Environment(AppState.self) private var appState
     // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
@@ -98,6 +112,12 @@ struct SettingsView: View {
         }
         .frame(minWidth: 560, minHeight: 460)
         .background(VolarColor.bg)
+        .onAppear {
+            // Real status, re-read every time Settings opens — never trust a stale value left
+            // over from the last time this view appeared, since the user may have toggled Login
+            // Items from System Settings while Settings was closed. See `LoginItem.swift`.
+            loginItemStatus = LoginItem.status
+        }
     }
 
     // MARK: - Tab strip
@@ -240,9 +260,7 @@ struct SettingsView: View {
                 .tint(accentColors.solid)
                 .frame(width: 200)
             }
-            SettingsRow(label: "Launch at login", hint: "Volar starts in the background and lives in your menu bar.") {
-                VolarToggle(isOn: $launchAtLogin)
-            }
+            launchAtLoginRow
             SettingsRow(label: "Default task duration", hint: "Block this much time when a task has no explicit length.") {
                 Segmented(value: $defaultDuration, options: [
                     .init(id: 15, label: "15"), .init(id: 30, label: "30"), .init(id: 60, label: "60 min"),
@@ -282,6 +300,58 @@ struct SettingsView: View {
             if appState.calendarAccess.status == .granted {
                 calendarMirrorRow
             }
+        }
+    }
+
+    /// Wired for real to `SMAppService.mainApp` (`LoginItem.swift`) — see that file's header
+    /// comment for why `loginItemStatus` is re-read live rather than cached. The toggle's `isOn`
+    /// binding calls `LoginItem.setEnabled(_:)` synchronously in its `set:` (no `Task` hop needed
+    /// — `SMAppService`'s register/unregister calls are synchronous) and immediately re-reads
+    /// `status` afterward, so the switch always reflects what macOS actually did, not what the
+    /// user merely requested. `.requiresApproval` is a real, ordinary post-register state (macOS
+    /// posts its own "Volar added a login item" notification and the login item doesn't actually
+    /// fire until the user approves it in System Settings) — surfaced here as its own explanatory
+    /// row + "Open Login Items…" button rather than treated as a toggle failure.
+    @ViewBuilder
+    private var launchAtLoginRow: some View {
+        SettingsRow(
+            label: "Launch at login",
+            hint: "Volar opens automatically when you log in to your Mac."
+        ) {
+            VStack(alignment: .trailing, spacing: 4) {
+                VolarToggle(isOn: Binding(
+                    get: { loginItemStatus == .enabled },
+                    set: { newValue in
+                        do {
+                            try LoginItem.setEnabled(newValue)
+                            loginItemError = nil
+                        } catch {
+                            loginItemError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        }
+                        // Re-read live status regardless of success/failure — a throw can still
+                        // leave `SMAppService` in a different state than before the call (e.g.
+                        // partial unregister), so this is the one honest source of truth either way.
+                        loginItemStatus = LoginItem.status
+                    }
+                ))
+                if let loginItemError {
+                    Text(loginItemError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(VolarColor.reschedule)
+                        .lineLimit(2)
+                }
+            }
+        }
+        if loginItemStatus == .requiresApproval {
+            HStack(spacing: 10) {
+                Text("macOS needs your approval to finish enabling this.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textSec)
+                settingsPillButton("Open Login Items…") {
+                    LoginItem.openLoginItemsSettings()
+                }
+            }
+            .padding(.horizontal, 18)
         }
     }
 
@@ -417,6 +487,13 @@ struct SettingsView: View {
         VStack(spacing: 12) {
             SettingsRow(label: "Quick capture", hint: "Press this combo from anywhere to toggle recording — press to start, press again to stop.") {
                 KeyRecorder(keys: ["\u{2303}", "\u{2325}", "M"])
+            }
+            // Add a task by typing (⌃⌥T, `Sources/Speech/HotkeyManager.swift` /
+            // `Sources/Views/TextCapturePanel.swift`) — the typed equivalent of Quick capture
+            // above, for when speaking isn't an option (a meeting, a café, an open-plan office).
+            // Same `SettingsRow`/`KeyRecorder` structure as every other row in this tab.
+            SettingsRow(label: "Add a task by typing", hint: "Press this combo from anywhere to open a small text box — type, hit Return, done. No speaking required.") {
+                KeyRecorder(keys: ["\u{2303}", "\u{2325}", "T"])
             }
             SettingsRow(label: "Task breakdown (long press)", hint: "Hold the same hotkey \u{2265}1.5s to have AI split the task into steps.") {
                 HStack(spacing: 8) {
@@ -913,6 +990,16 @@ struct SettingsView: View {
 
     private var signedOutAccountBody: some View {
         VStack(alignment: .leading, spacing: 10) {
+            // Dual-identity trap UX (backlog): a reminder of which method worked last time, so a
+            // Pro subscriber who tries the OTHER method doesn't accidentally end up looking at a
+            // brand-new, unrelated `free` account. Informational only — never blocks either button
+            // below, both login paths stay fully available per product decision.
+            if let method = appState.lastAuthMethod {
+                Text("Last time you signed in with \(method.displayName).")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(VolarColor.textMut)
+            }
+
             settingsPillButton("Sign in with Apple", solid: true) {
                 appState.signInWithApple()
             }
@@ -983,7 +1070,20 @@ struct SettingsView: View {
 
             if appState.accountTier == .free {
                 upgradeSection
+                // Dual-identity trap UX (backlog): this account genuinely reads `free` server-side
+                // — but if the user bought Pro using the OTHER sign-in method, Apple's Hide My
+                // Email relay can mean that purchase lives on a totally different `auth.users` row
+                // than the one they're looking at right now. Informational only — deliberately NO
+                // auto-sign-out button here, just a pointer at the fix.
+                if let method = appState.lastAuthMethod {
+                    Text("Already subscribed? Your Pro plan lives with the account you bought it on. If you subscribed using \(method.other.displayName), sign out and sign back in that way — Apple's Hide My Email can create a second, separate account.")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(VolarColor.textSec)
+                        .lineSpacing(2)
+                }
             }
+
+            redeemCodeRow
 
             HStack(spacing: 8) {
                 settingsPillButton("Restore Purchases") { appState.restorePurchases() }
@@ -1006,6 +1106,61 @@ struct SettingsView: View {
             ) {
                 Button("Delete account", role: .destructive) { appState.deleteAccount() }
                 Button("Cancel", role: .cancel) {}
+            }
+        }
+    }
+
+    /// Backlog "1 free month of Pro" promo codes (Task 3, redeem contract). Only reachable from
+    /// `signedInAccountBody` — redemption attaches the grant to the signed-in identity, so showing
+    /// this to a signed-out user would just produce `AccountError.signedOut` on every tap; visible-
+    /// but-disabled was considered and rejected in favor of just not rendering it, matching how
+    /// `upgradeSection`/`Restore Purchases`/"Delete account" are ALSO signed-in-only rows on this
+    /// same card rather than disabled placeholders — same-page precedent, not a new pattern.
+    ///
+    /// Styled identically to the email-OTP field/button pair directly above in
+    /// `signedOutAccountBody` (same `Color.black.opacity(0.25)` field background, `volarHairline`,
+    /// monospaced font matching the 6-digit code field, `settingsPillButton`) — deliberately no new
+    /// visual treatment introduced for this row.
+    private var redeemCodeRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Have a promo code?")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(VolarColor.textMut)
+            HStack(spacing: 8) {
+                TextField("PROMOCODE", text: $promoCodeInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundStyle(VolarColor.textPri)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(Color.black.opacity(0.25))
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .volarHairline(cornerRadius: 7)
+                    // Live-uppercase as the user types — cosmetic only (Task 1's
+                    // `AccountService.redeemPromoCode` is the ONE place that actually normalizes
+                    // what goes on the wire; this just keeps what's on screen matching what will be
+                    // sent, since a pasted lowercase code otherwise LOOKS unnormalized until submit).
+                    // Mutating the bound string directly here (rather than `.textCase(.uppercase)`,
+                    // which only recases the RENDERED glyphs and would leave `promoCodeInput` itself
+                    // mixed-case) is the straightforward option — no fight with the binding, since
+                    // `TextField` already treats `$promoCodeInput` as the single source of truth.
+                    .onChange(of: promoCodeInput) { _, newValue in
+                        let upper = newValue.uppercased()
+                        if upper != newValue { promoCodeInput = upper }
+                    }
+                settingsPillButton("Redeem", solid: true) {
+                    appState.redeemPromoCode(promoCodeInput)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(appState.accountBusy || promoCodeInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            // Success confirmation only — failures already surface through `accountCard`'s existing
+            // `appState.accountError` `Text` right below this whole card, so this does NOT duplicate
+            // that as a second error label (task brief's explicit instruction).
+            if let until = appState.lastRedeemedUntil {
+                Text("Pro until \(until.formatted(date: .abbreviated, time: .omitted))")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.done)
             }
         }
     }

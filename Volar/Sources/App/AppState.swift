@@ -90,6 +90,47 @@ enum VoiceDeliveryMode: String, Sendable, Equatable, Hashable, CaseIterable, Ide
     }
 }
 
+/// One step of a real (server- or on-device-generated) task breakdown, as rendered by
+/// `TaskBreakdownView`. `id` is the step's position, not a UUID — `IntentRouter.breakdown(title:
+/// notes:)` (the frozen `IntentParser` seam this is built from, `Sources/Parsing/
+/// IntentParsing.swift`) returns bare `[String]` titles only; the backend's `POST /parse` with
+/// `mode: "breakdown"` also returns a per-step `estimateMinutes`, but that number never survives
+/// the trip through `CloudParser.breakdown(title:notes:) -> [String]` (it discards everything but
+/// the title before returning — see that file, out of this task's allowed files, for the decode).
+/// So there is no real per-step duration available through this seam today; `TaskBreakdownView`
+/// intentionally shows none rather than inventing one (the OLD hard-coded "10 min"/"5 min" labels
+/// this view used to show were exactly the kind of fake-looking content this feature removes).
+struct BreakdownStep: Identifiable, Equatable, Sendable {
+    let id: Int
+    let title: String
+}
+
+/// State machine for `AppState.fetchBreakdown` (Change 3: real "Save all as tasks"). `TaskBreakdownView`
+/// renders directly off this rather than owning any fetch state of its own.
+enum BreakdownFetchState: Equatable, Sendable {
+    /// No breakdown sheet open, or a fresh `openBreakdown(for:)` hasn't kicked off its fetch yet.
+    case idle
+    /// Request in flight (or about to be — set synchronously by `fetchBreakdown` before the async
+    /// hop, so the sheet never shows a blank frame between opening and "loading").
+    case loading
+    /// Real steps, from either the on-device FoundationModels tier or the actual cloud call —
+    /// never the hard-coded heuristic template (see `fetchBreakdown`'s doc comment for how that's
+    /// ruled out). Empty is not a valid case here; `fetchBreakdown` maps an empty result to `.failed`.
+    case loaded([BreakdownStep])
+    /// Cloud parsing isn't usable AT ALL right now for a KNOWN reason determined before ever
+    /// calling the router — not signed in, or never opted into cloud parsing
+    /// (`AppState.cloudParseConsent != true`). Deliberately distinguished from `.failed` (which
+    /// means an attempt was actually made) so `TaskBreakdownView` can point the user at Settings/
+    /// sign-in instead of suggesting "try again."
+    case unavailable
+    /// Cloud was attempted (preconditions were met) but produced nothing usable — offline, quota
+    /// exhausted server-side, decode failure, or a request that came back identical to what the
+    /// hard-coded heuristic floor would have produced (the router's own unconditional fallback,
+    /// `HeuristicNLParser.breakdown`, `NLParser.swift` — indistinguishable from a real answer by
+    /// content alone, so `fetchBreakdown` diffs against it directly).
+    case failed
+}
+
 /// One attribute a confirm-card chip governs (T024). Deliberately narrower than `ParsedTask`'s
 /// full field list — `title`/`notes`/`subtasks` have no chip (title is the always-shown headline,
 /// notes/subtasks aren't part of the v2 chip set per the contract's "Confirm + materialize"
@@ -140,6 +181,30 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// every other chip on this card — see `PopoverView.conflictAdvisoryRow`). Never re-surfaces
     /// within this confirm session; recording again starts fresh, same as every other draft field.
     var conflictDismissed: Bool = false
+    /// User-edited title from the confirm card's editable title field (`PopoverView.taskDraftCard`).
+    /// `nil` until the user actually types something — mirrors the Windows port's
+    /// `ConfirmDraft.EditedTitle` (`voci-windows/windows/.../CaptureFlowService.cs:126-134`), but
+    /// written through `AppState.updateDraftTitle(_:forDraft:)` rather than an object reference,
+    /// since this is a `struct` (see below). Never written into `task.title` directly — `ParsedTask`
+    /// stays exactly what the parser/router produced, same "never mutated in place" contract this
+    /// whole struct's header comment already documents for every other field.
+    var editedTitle: String?
+    /// The title actually rendered and saved: the user's edit if there is one and it isn't blank
+    /// after trimming, else the parser's original `task.title`. A whitespace-only edit silently
+    /// falls back rather than blocking Save or showing an error (constitution V — glance-and-dismiss,
+    /// never a dead end).
+    var effectiveTitle: String {
+        guard let editedTitle else { return task.title }
+        // Newlines are flattened, not just trimmed at the ends: the confirm card's title field is
+        // multi-line so it can WRAP, never so a task title can contain line breaks. If Return ever
+        // reaches the field instead of saving (see PopoverView's own note on `.onKeyPress`), the
+        // break dies here rather than in the task list.
+        let flattened = editedTitle
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+        let trimmed = flattened.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? task.title : trimmed
+    }
 }
 
 // MARK: - Phase 5 (T036): voice-done confirm state (contract A `VoiceDoneIntent`/`VoiceMatch`)
@@ -255,6 +320,33 @@ final class AppState {
     /// The transcript awaiting a decision in `pendingCloudConsent`, resumed by `resolveCloudConsent`.
     private var pendingParseTranscript: String?
 
+    // MARK: - Typed capture (⌃⌥T, `Sources/Views/TextCapturePanel.swift`) — "type one line, hit
+    // Add task, done." A SEPARATE state machine from `captureState` above, deliberately: the typed
+    // popup is a smaller surface with no recording/parsing-in-place/multi-second-wave visuals, and
+    // — critically — it skips the confirm-card review pause `captureState == .parsed` exists for
+    // (see `submitTextCapture()`'s doc comment for exactly why and how it still reuses the SAME
+    // underlying save path). Mutually exclusive with `captureState`'s voice surface by construction
+    // (`openTextCapture()`/`handleHotkey()` below, and `VolarApp.swift`'s `syncCapturePanel()`) —
+    // never both non-idle/non-closed at once.
+    enum TextCaptureState: Sendable, Equatable {
+        case closed
+        case editing
+        case saving
+        case saved(titles: [String])
+        case failed(String)
+    }
+    var textCapture: TextCaptureState = .closed
+    var textCaptureInput: String = ""
+    /// Monotonic guard mirroring `captureSession`'s role (see that property's doc comment) but
+    /// scoped to the text-capture surface only. Kept as its OWN counter — never shared with
+    /// `captureSession` — because a text capture and a voice capture can never be in flight at the
+    /// same time (mutual exclusion is enforced by tearing the OTHER surface down before opening
+    /// this one; see `openTextCapture()`), so there is no scenario where one counter needs to
+    /// invalidate the other's in-flight work; keeping them separate just avoids one surface's
+    /// cancel/retry accidentally bumping — and thereby invalidating — the other's guard for no
+    /// reason.
+    private var textCaptureSession = 0
+
     // MARK: - Phase 4: reminder / voice-delivery / triage settings (contract E)
 
     /// Persisted (`voiceDeliveryModeKey`); default `.visualPlusVoice` per contract B.
@@ -285,6 +377,40 @@ final class AppState {
 
     var showMorningFrog = false
     var showBreakdown = false
+    /// Which task the "Break down into steps…" context-menu action (`TaskRow.swift`,
+    /// `TodayView.swift` x2, `triageBreakdown(_:)` below) was invoked on — `nil` while the sheet
+    /// is closed. Kept as a SEPARATE property rather than folding it into `showBreakdown` itself
+    /// (e.g. `showBreakdown: TaskItem?`) because `VolarApp.swift` (outside this change's allowed
+    /// files) already binds `.sheet(isPresented:)` to the bare `Bool` and constructs
+    /// `TaskBreakdownView(onSave:onClose:)` from it; changing that shape would require editing a
+    /// file this task is not permitted to touch. `TaskBreakdownView` already receives the full
+    /// `AppState` via `.environment(appState)` in that same `VolarApp.swift` wiring, so it reads
+    /// this property directly instead of needing a new init parameter — no seam is actually
+    /// missing, just routed differently than a single merged property would be.
+    ///
+    /// Every call site that sets `showBreakdown = true` MUST also set this in the same call
+    /// (`openBreakdown(for:)` below is the one place that does both, and is now the only way to
+    /// open the sheet) — the two are logically one piece of state, split only by the file-
+    /// boundary constraint above. A plain (not `private(set)`) `var`, same convention as
+    /// `captureState`/`confirmDrafts`/`textCapture` above: this codebase keeps state-machine
+    /// properties directly test-drivable rather than encapsulated behind a setter method, and
+    /// `Tests/` (this task's one other allowed location) relies on exactly that to unit-test the
+    /// breakdown state machine without awaiting a real network round trip.
+    var breakdownTask: TaskItem?
+    /// Monotonic token guarding the async breakdown fetch (`fetchBreakdown`, mirrors
+    /// `captureSession`/`textCaptureSession`'s exact shape) — bumped by every `openBreakdown(for:)`
+    /// and by `closeBreakdown()`, so a fetch already in flight when the sheet is dismissed (by
+    /// Cancel/Edit, Esc, or the system sheet-close control — `TaskBreakdownView`'s `.onDisappear`
+    /// calls `closeBreakdown()` on ALL of those paths, since `VolarApp.swift`'s `.sheet(
+    /// isPresented:)` binding only flips the bare `Bool` and cannot be taught to call back into
+    /// this file) can never land on — or worse, silently populate — a DIFFERENT task's freshly
+    /// reopened sheet.
+    private var breakdownSession = 0
+    /// State machine for the real (cloud-routed) breakdown fetch — `TaskBreakdownView` renders
+    /// directly off this instead of ever holding its own copy, same "single source of truth,
+    /// View is a pure function of AppState" convention as `confirmDrafts`/`captureState` above.
+    /// Plain `var`, same test-drivability reasoning as `breakdownTask` above.
+    var breakdownFetchState: BreakdownFetchState = .idle
     /// T034/FR-018: the weekly stale-task triage batch card (`TriageView`, sibling-owned §D).
     /// `VolarApp`'s main-window `.task` gates setting this `true` to once per ISO week (mirrors
     /// `frogLastShown`'s once-per-day pattern) and only when `staleTasks` is non-empty — this flag
@@ -383,9 +509,64 @@ final class AppState {
     // right after each one awaits its actor. `SettingsView`'s Account tab reads these directly
     // instead of awaiting an actor itself, matching how every other `SettingsView` tab only ever
     // touches plain `AppState` properties/methods.
+
+    /// 2026-07-27 (dual-identity trap UX, backlog): which sign-in method most recently succeeded.
+    /// Supabase matches identity by EMAIL, and Apple's "Hide My Email" relay issues a
+    /// `@privaterelay.appleid.com` address that never equals the user's real email — so signing in
+    /// with Apple once and with an email OTP another time can silently create TWO separate
+    /// `auth.users` rows (and two separate entitlement rows), leaving someone who bought Pro on one
+    /// seeing `free` on the other. This can't be fixed by blocking either method (both are kept,
+    /// per product decision), only mitigated with UX that reminds the user which one they used —
+    /// see `lastAuthMethod` below and its two call sites in `SettingsView`.
+    enum AuthMethodHint: String, Sendable {
+        case apple, email
+
+        var displayName: String {
+            switch self {
+            case .apple: return "Sign in with Apple"
+            case .email: return "Email code"
+            }
+        }
+
+        /// The OTHER method — used by the free-tier hint ("if you subscribed using X, sign out and
+        /// sign back in that way instead").
+        var other: AuthMethodHint {
+            switch self {
+            case .apple: return .email
+            case .email: return .apple
+            }
+        }
+    }
+
+    /// `nonisolated static let` — NOT a plain `static let` — for the same reason as
+    /// `cloudParseConsentKey` above and `IntentRouter.maxTaskCap`
+    /// (`Sources/Parsing/IntentParsing.swift`): a `static let` declared inside a `@MainActor` type
+    /// inherits that type's isolation (only statics at global/file scope are implicitly
+    /// `nonisolated`), so without this modifier any nonisolated context reading this key fails to
+    /// compile under Swift 6 strict concurrency. This exact bug class has already bitten this repo
+    /// twice — see the two precedents named above — so it's called out explicitly here rather than
+    /// risk a third.
+    nonisolated static let lastAuthMethodKey = "volar.lastAuthMethod"
+
+    /// Which method last successfully signed the user in. Persisted (`lastAuthMethodKey`) and
+    /// loaded in `init` alongside the other persisted settings there. Deliberately survives
+    /// `signOutAccount()` (remembering across a sign-out is the entire point — the badge on the
+    /// signed-out Account tab reads this) but is cleared by `deleteAccount()` (that account no
+    /// longer exists, so there is nothing left to remember signing into).
+    var lastAuthMethod: AuthMethodHint?
+
     var accountEmail: String?
     var accountTier: AccountTier = .free
     var subscriptionStatus: SubscriptionStatus?
+    /// Backlog "1 free month of Pro" promo codes: set by a SUCCESSFUL `redeemPromoCode(_:)` so
+    /// `SettingsView` can show a one-line "Pro until <date>" confirmation, mirroring how
+    /// `accountError` already gives that same method's FAILURE path somewhere to land instead of
+    /// inventing a parallel notification/toast mechanism. `nil` = nothing to confirm (fresh
+    /// session, or the last redeem attempt failed/hasn't happened) — deliberately never cleared
+    /// automatically on the NEXT unrelated account action (matches `accountEmail`/`accountTier`'s
+    /// own "stays until explicitly replaced" convention elsewhere in this section), only ever
+    /// overwritten by another successful redeem.
+    var lastRedeemedUntil: Date?
     /// Inline error text for the Account tab (Apple sign-in / OTP / purchase / delete failures).
     /// Deliberately separate from any other error surface in this file — account actions are
     /// user-initiated from Settings, not part of the capture pipeline's error states.
@@ -569,7 +750,22 @@ final class AppState {
         // system language on first launch. "auto" lets both engines auto-detect until the user
         // picks a specific locale in Settings (see `autoRecognitionLocaleID`'s doc comment).
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? Self.autoRecognitionLocaleID
-        self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .appleOnDevice
+        // Cloud-first default (product decision, 2026-07-27): a NEVER-PERSISTED user gets `.groq`
+        // now, not `.appleOnDevice` — the server side (Groq speech, free tier at 20/day) is live,
+        // so defaulting to on-device meant it went unused. This ONLY changes the fallback on the
+        // right of `??`; `SpeechEngineChoice(rawValue:)` still parses whatever string is ACTUALLY
+        // persisted first, so a user who already picked an engine (in Settings, `setSpeechEngine`
+        // below) keeps exactly that choice on every future launch — this line only fires for a key
+        // that was never written. The existing degradation ladder is untouched: `selectedEngine`
+        // (below) still falls back to `speech` (Apple on-device) whenever Groq isn't actually usable
+        // — not configured (no signed-in session: `GroqEngine.isConfigured` requires
+        // `KeychainStore.loadSession() != nil`, and ONLY that as of 2026-07-27 — the `&&
+        // Entitlements.cachedIsPro` half was removed when cloud speech opened to the free tier at
+        // 20/day, see `GroqTranscriptionClient.swift`) or `groqDegradedThisSession` (a mid-run
+        // 403/429). So a signed-out user with this
+        // new default still transcribes 100% on-device on every capture, exactly as before — the
+        // default only changes WHICH engine gets attempted first once an account is configured.
+        self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .groq
         self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
         self.voiceDeliveryMode = VoiceDeliveryMode(
             rawValue: UserDefaults.standard.string(forKey: Self.voiceDeliveryModeKey) ?? ""
@@ -592,6 +788,10 @@ final class AppState {
         // absent means "never run before" (the honest default for a fresh install), so `Bool` here
         // needs no fallback expression the way `speechEngineChoice`/`voiceDeliveryMode` do.
         self.hasSeenTour = UserDefaults.standard.bool(forKey: Self.hasSeenTourKey)
+        // Dual-identity trap UX: same read-only-override-from-persisted-choice convention as every
+        // other setting above — absent means "never signed in on this install", the honest default.
+        self.lastAuthMethod = UserDefaults.standard.string(forKey: Self.lastAuthMethodKey)
+            .flatMap(AuthMethodHint.init(rawValue:))
         self.voiceFeedback = voiceFeedback
         self.captureState = .idle
         self.liveTranscript = ""
@@ -726,6 +926,14 @@ final class AppState {
         }
     }
 
+    /// Persists which method just successfully signed the user in — see `lastAuthMethod`'s doc
+    /// comment for why this exists. Called ONLY from a success branch (never before the `await`,
+    /// never from a `catch`): a cancelled/failed attempt must not overwrite a real prior method.
+    private func rememberAuthMethod(_ method: AuthMethodHint) {
+        lastAuthMethod = method
+        UserDefaults.standard.set(method.rawValue, forKey: Self.lastAuthMethodKey)
+    }
+
     func signInWithApple() {
         accountBusy = true
         accountError = nil
@@ -735,6 +943,7 @@ final class AppState {
             do {
                 let user = try await AccountService.shared.signInWithApple()
                 self.accountEmail = user.email
+                self.rememberAuthMethod(.apple)
                 await Entitlements.shared.relinkCurrentEntitlements()
                 self.refreshAccountState()
             } catch AccountError.cancelled {
@@ -768,6 +977,7 @@ final class AppState {
             do {
                 let user = try await AccountService.shared.verifyEmailOTP(email: email, code: code)
                 self.accountEmail = user.email
+                self.rememberAuthMethod(.email)
                 await Entitlements.shared.relinkCurrentEntitlements()
                 self.refreshAccountState()
             } catch {
@@ -807,6 +1017,11 @@ final class AppState {
                 self.accountTier = .free
                 self.subscriptionStatus = nil
                 self.accountError = nil
+                // Unlike `signOutAccount()` (which deliberately keeps this — remembering across a
+                // sign-out is the whole point), a DELETED account no longer exists, so there is
+                // nothing left to remember signing back into.
+                self.lastAuthMethod = nil
+                UserDefaults.standard.removeObject(forKey: Self.lastAuthMethodKey)
             } catch {
                 self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             }
@@ -837,6 +1052,45 @@ final class AppState {
             do {
                 try await Entitlements.shared.restorePurchases()
                 self.refreshAccountState()
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
+    /// Backlog "1 free month of Pro" promo codes. Same shape as every other method in this
+    /// section — `accountBusy` flip, one `_Concurrency.Task`, `defer` clears the busy flag, result
+    /// mirrored into `@Observable` state, failure into `accountError`. `code` is passed straight
+    /// through to `AccountService.redeemPromoCode` UNTOUCHED (no trimming/uppercasing here) — that
+    /// method owns the ONE normalization step for the whole client (see its doc comment); this
+    /// method only trims to decide whether the field is blank, which is a UI no-op guard, not a
+    /// second normalization site feeding the network request.
+    func redeemPromoCode(_ code: String) {
+        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                let result = try await AccountService.shared.redeemPromoCode(code)
+                // Source of truth stays the SERVER: never hand-set `accountTier = .pro` (or
+                // anything else) from `result` directly — `refreshAccountState()` re-reads tier/
+                // quota from `subscription/status` exactly like every other successful account
+                // action above does, so a local guess about what was just granted can never drift
+                // from what the account actually has.
+                self.refreshAccountState()
+                // `lastRedeemedUntil` is purely a display convenience for the confirmation banner —
+                // reuses the SAME ISO8601-with-fractional-seconds fallback `ParsedTaskValidation`
+                // already defines (`Sources/Parsing/IntentParsing.swift`) rather than hand-rolling a
+                // second date parser, since `RedeemResult.expiresAt` is the same
+                // Supabase-timestamp-shaped string every other `expiresAt` field in this file's
+                // sibling `AccountModels.swift` already is. A parse failure just leaves the prior
+                // confirmation (or `nil`) in place — the redemption itself already succeeded
+                // (`refreshAccountState()` above is unaffected), so this is display-only best effort.
+                if let expiresAt = result.expiresAt, let date = ParsedTaskValidation.parseISO8601(expiresAt) {
+                    self.lastRedeemedUntil = date
+                }
             } catch {
                 self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             }
@@ -1339,6 +1593,221 @@ final class AppState {
         }
     }
 
+    /// The REAL "user pressed the hotkey / tapped the create-task button" entry point — ⌃⌥M
+    /// (`HotkeyManager`), the sidebar mic button, and the morning-frog voice CTA all route here
+    /// instead of `toggleCapture()` above (kept as-is for whatever else still calls it directly;
+    /// see call-site notes in `HotkeyManager.swift`/`Sidebar.swift`/`MorningFrogView.swift`).
+    ///
+    /// `toggleCapture()`'s plain two-way branch (`.recording` -> stop, everything else -> start)
+    /// has no case for "a confirm card is already up": pressing the hotkey again while
+    /// `captureState == .parsed` used to blow the pending confirm away and open a brand-new
+    /// recording session instead of doing what a user pressing "the capture key" again obviously
+    /// means — save what's already parsed. This method fixes exactly that, and adds the guard the
+    /// old code never had: several other states are ALSO a pending yes/no question the hotkey must
+    /// never silently answer for the user (constitution II) —
+    /// `voiceDoneConfirm`/`voiceDoneNoMatchTranscript` (T036's glance-and-dismiss voice-done card)
+    /// and `pendingCloudConsent`/`pendingServerConsent` (the one-time privacy opt-ins, both of
+    /// which reuse `captureState == .error` as their prompt surface — see those properties' own
+    /// doc comments). None of those four are things "press capture again" should resolve, so this
+    /// bails out before even looking at `captureState` when any of them is active.
+    func handleHotkey() {
+        // Mutual exclusion with the typed-capture popup (⌃⌥T, `openTextCapture()` below): pressing
+        // ⌃⌥M while that popup is open closes it first — "whichever hotkey the user pressed wins"
+        // (task brief). Falls through to the exact same guard/switch below afterward, so ⌃⌥M's own
+        // toggle semantics are completely unchanged by this; it only ever adds "and also close the
+        // OTHER capture surface first" as a side effect when there's something to close.
+        if textCapture != .closed {
+            cancelTextCapture()
+        }
+
+        guard voiceDoneConfirm == nil,
+              voiceDoneNoMatchTranscript == nil,
+              !pendingCloudConsent,
+              !pendingServerConsent
+        else { return }
+
+        switch captureState {
+        case .recording:
+            stopCapture()
+        case .parsed:
+            confirmSave()
+        case .parsing, .saving:
+            // Mid-flight — nothing sane to toggle to; a stray hotkey press here is a no-op rather
+            // than racing `finishRecording`/`confirmSave`.
+            break
+        case .idle, .done, .error:
+            startCapture()
+        }
+    }
+
+    // MARK: - Typed capture (⌃⌥T) — "type one line, hit Add task, done."
+    //
+    // Voice capture's pipeline (unchanged, see above): `finishRecording` -> `proceedToCapture`
+    // (one-time cloud-parse consent gate) -> `runParse` (parses, builds `confirmDrafts`) ->
+    // user reviews the confirm card -> `confirmSave()` commits (batching / `store.addBatch`
+    // chunking / `tasks = store.fetchAll()` / `notifyEligibilityAndScheduleResurface` /
+    // `scheduleRemindersForSavedItems` / `syncCalendarMirror` / `finishSaveUI`). The typed flow
+    // below is IDENTICAL except it skips the review pause: parse -> build `confirmDrafts` exactly
+    // the way `runParse` does -> call `confirmSave()` directly. `submitTextCapture()` therefore
+    // reuses `confirmSave()` verbatim (not a parallel save path) — every side effect
+    // `confirmSave()` produces for a voice save (reminders scheduled, calendar mirror synced,
+    // eligibility/resurface diff computed, `TaskStore.maxBatchSize`-chunked `addBatch` commits)
+    // happens exactly the same way for a typed save.
+
+    /// Opens the typed-capture popup. ⌃⌥T (`HotkeyManager`) is the only real caller.
+    func openTextCapture() {
+        // Mutual exclusion (task brief: "whichever hotkey the user pressed wins" — never show
+        // both capture surfaces at once): opening the typed popup while ANY voice-side surface is
+        // pending — an in-progress recording, a parsed-but-unsaved confirm card, a voice-done
+        // confirm, or a cloud/server consent prompt — tears all of it down uniformly via the
+        // existing `cancelCapture()` (see that method's own doc comment for the exact list it
+        // clears). `captureState != .idle` is true for every one of those cases, so this single
+        // check covers all of them without re-deriving the list here.
+        if captureState != .idle {
+            cancelCapture()
+        }
+        textCaptureSession += 1
+        textCapture = .editing
+        textCaptureInput = ""
+    }
+
+    /// Esc, or ⌃⌥M stealing the surface back (`handleHotkey()` above) — closes the popup and
+    /// discards whatever was typed. Bumping `textCaptureSession` invalidates any parse still in
+    /// flight from a `submitTextCapture()` call the user is backing out of (see that method's
+    /// stale-result guard).
+    func cancelTextCapture() {
+        textCaptureSession += 1
+        textCapture = .closed
+        textCaptureInput = ""
+    }
+
+    /// Parses `textCaptureInput` and saves it — the typed equivalent of the voice flow's
+    /// `finishRecording` -> `runParse` -> (review pause) -> `confirmSave()`, minus the review
+    /// pause (see this section's header comment). Sync entry point; the actual parse is async, so
+    /// this hops through `_Concurrency.Task { @MainActor in ... }` exactly like `runParse` does,
+    /// with the same before-the-`await` session-token capture/guard pattern (`textCaptureSession`,
+    /// mirroring `captureSession`) so a user who hits Esc mid-parse can never have a stale result
+    /// land back on a popup they've already closed/reopened.
+    ///
+    /// CLOUD-CONSENT DIFFERENCE FROM THE VOICE PATH (deliberate — task brief): voice capture routes
+    /// through `proceedToCapture`, which interrupts with the one-time cloud-parse consent prompt
+    /// (`pendingCloudConsent`/`captureState = .error`) the FIRST time a parse is ever attempted.
+    /// This method deliberately does NOT do that — a tiny "type one line" popup is the wrong
+    /// surface to interrupt with a privacy decision; the whole point of this feature is "type →
+    /// Add task → done" with no pause of any kind. Instead this calls `router.parse` directly.
+    /// `IntentRouter` still applies its own `cloudGate.isOptedIn()` (+ `isOnline()`) gate
+    /// internally regardless of caller (see `IntentRouter.parse` in `IntentParsing.swift`), so an
+    /// un-opted-in user simply gets on-device (Heuristic/FoundationModel) parsing here — nothing
+    /// about their text ever reaches Cloud without the SAME consent the voice flow's one-time sheet
+    /// (or the Settings parse-engine picker) already gates. The user can opt in from either of
+    /// those two existing surfaces; this popup just never asks.
+    func submitTextCapture() {
+        // Defensive: the "Add task" button/`.onSubmit` are both disabled/no-ops while `.saving`
+        // per `TextCaptureView`, but this guards the method itself against a double-submit race
+        // (e.g. Return arriving a frame after a click already started saving).
+        guard textCapture != .saving else { return }
+        let trimmed = textCaptureInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        textCapture = .saving
+        textCaptureSession += 1
+        let session = textCaptureSession
+        let now = clock()
+        let titles = openTasks.map(\.title)
+
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let results = await self.router.parse(trimmed, now: now, openTaskTitles: titles)
+            self.applyTextCaptureParseResult(results, session: session)
+        }
+    }
+
+    /// The synchronous back half of `submitTextCapture()` — split out from the `await
+    /// router.parse(...)` call above SPECIFICALLY so it's directly unit-testable without awaiting
+    /// a real (async, even if not truly network-bound for the on-device tiers) parse call, same
+    /// precedent as `resolveCloudMatch` elsewhere in this file (see that method's own doc comment).
+    /// Tests can simulate "the parse came back with N results" or "the session went stale before
+    /// the parse returned" by calling this directly with a hand-built `[ParsedTask]` and/or a
+    /// stale `session` token, instead of needing a real `IntentRouter` round trip.
+    ///
+    /// Not `private` for exactly that reason — every OTHER piece of `submitTextCapture()`'s logic
+    /// (the empty-input guard, the `.saving` re-entrancy guard, the session bump, the delayed
+    /// auto-dismiss) is either trivially pure or already covered indirectly through this method,
+    /// but the stale-session guard and the zero-drafts failure path specifically live here because
+    /// they can only be exercised AFTER an (async) parse result exists.
+    func applyTextCaptureParseResult(_ results: [ParsedTask], session: Int) {
+        // Stale? Esc (`cancelTextCapture`) or a second submit happened while this parse was in
+        // flight — mirrors `runParse`'s own `captureSession`/`captureState` guard exactly, just
+        // against the text-capture counter/state instead of the voice ones.
+        guard textCaptureSession == session, textCapture == .saving else { return }
+
+        // Same construction `runParse` uses: cap to `TaskStore.maxBatchSize`, pre-resolve the
+        // "easy" `.taskDone` conditions, and compute the conflict advisory ONCE against a single
+        // shared `conflictNow` clock read shared by every draft in the batch (T074 — never
+        // recomputed per draft).
+        let capped = Array(results.prefix(TaskStore.maxBatchSize))
+        let conflictNow = clock()
+        let drafts = capped.map { parsed -> ConfirmDraft in
+            var draft = preResolveConditions(ConfirmDraft(task: parsed))
+            draft.conflicts = computeConflicts(for: draft, now: conflictNow)
+            return draft
+        }
+
+        guard !drafts.isEmpty else {
+            // Never close the popup and silently lose what the user typed (task brief) — the
+            // field stays populated (`textCaptureInput` untouched) so they can fix and retry. In
+            // practice every current `IntentParser` tier guarantees a non-empty result for
+            // non-empty input (`IntentRouter.parse`'s own floor fallback,
+            // `Sources/Parsing/IntentParsing.swift`), same as `runParse`'s analogous branch — this
+            // exists as the defensive floor for whatever a future parser tier might legitimately
+            // fail to extract anything from, not a reachable path today.
+            textCapture = .failed("Didn't catch that.")
+            return
+        }
+
+        // THE REUSE: hand the exact same drafts `runParse` would have produced straight to
+        // `confirmSave()` — no parallel materialize/save/schedule/sync logic lives here.
+        // `confirmSave()` is synchronous end-to-end except its own trailing 900ms auto-dismiss
+        // (`finishSaveUI`, guarded by `captureSession` — untouched by anything in this method), so
+        // by the time this call returns, `captureState` already reflects the real outcome: `.done`
+        // on success, or `.error` (with `captureErrorDetail` set) if `TaskStore.addBatch` rejected
+        // the batch (e.g. a dependency cycle).
+        let addedTitles = drafts.map(\.effectiveTitle)
+        confirmDrafts = drafts
+        confirmSave()
+
+        if captureState == .error {
+            // A genuine `TaskStore` rejection (e.g. a dependency cycle) — surface it on the TEXT
+            // popup instead, since the user never saw a voice surface for this save.
+            // `textCaptureInput` is still untouched at this point (only cleared on the success
+            // path below), so — same as the zero-drafts branch above — the field stays populated
+            // for the user to fix and retry.
+            textCapture = .failed(captureErrorDetail ?? "Couldn't save.")
+            // `captureState == .error` here is purely an artifact of routing through the shared
+            // voice-flow method — nothing about the voice popover should be left sitting in an
+            // error state for a failure that surfaced through the TEXT popup instead (see the
+            // mutual-exclusion note on `syncCapturePanel()` in `VolarApp.swift`: the voice panel
+            // is suppressed the whole time `textCapture != .closed` regardless, but there is no
+            // reason to also leave stale error state behind for whenever `textCapture` eventually
+            // closes and voice capture becomes visible again).
+            captureState = .idle
+            captureErrorDetail = nil
+            confirmDrafts = []
+            return
+        }
+
+        textCaptureInput = ""
+        textCapture = .saved(titles: addedTitles)
+        // Same delayed-dismiss convention `finishSaveUI` uses for the voice popover (900ms flash
+        // before returning to the closed state), guarded by the SAME `textCaptureSession` token
+        // captured above rather than a new timer mechanism.
+        _Concurrency.Task { @MainActor [weak self] in
+            try? await _Concurrency.Task.sleep(nanoseconds: 900_000_000)
+            guard let self, self.textCaptureSession == session else { return }
+            self.textCapture = .closed
+        }
+    }
+
     /// Opens System Settings so the user can enable Dictation (which downloads the on-device
     /// speech model). Pane URL differs across macOS versions; falls back to opening System
     /// Settings generally.
@@ -1383,10 +1852,28 @@ final class AppState {
 
     /// Local↔cloud parsing switch surfaced in Settings. Reads the SAME `cloudParseConsent` the
     /// router's Cloud tier is already gated on (`DefaultCloudParseGate`), so this is purely a
-    /// friendlier presentation of that one bit — no second source of truth. A `nil` consent
-    /// (never asked) reads as `.onDevice`, matching the privacy-first "decline ⇒ never cloud" default.
+    /// friendlier presentation of that one bit — no second source of truth.
+    ///
+    /// Cloud-first default (same product decision as `speechEngineChoice`'s `init` fallback
+    /// above): `cloudParseConsent == nil` — NEVER asked, e.g. an install that predates the
+    /// onboarding cloud-consent step, or a corrupted/cleared default — now reads as `.cloud`
+    /// instead of `.onDevice`. An EXPLICIT decision is untouched either way: `false` (the user
+    /// affirmatively declined, either via the voice-capture consent popover's "no" or by picking
+    /// on-device in Settings) still reads `.onDevice`; `true` still reads `.cloud`. So this is a
+    /// three-way match, not a `== true` binary check — flip only the `nil` case.
+    ///
+    /// IMPORTANT — this is a DISPLAY default only, not a consent bypass: `parseEnginePreference`
+    /// is read by `SettingsView`'s picker, never by the actual gate. The real gate a `nil` value
+    /// still trips is `proceedToCapture`'s `guard cloudParseConsent != nil` (below) — an
+    /// un-consented user still sees the one-time cloud-parse consent prompt before the FIRST
+    /// parse, and `DefaultCloudParseGate.isOptedIn()` (bottom of file) still reads the literal
+    /// persisted `UserDefaults` bool, which defaults `false` for an unset key regardless of what
+    /// this computed property displays. So a user who has never actually answered the consent
+    /// question sees "Cloud" pre-highlighted here (matching the new onboarding default) but Cloud
+    /// is still never ATTEMPTED until they explicitly consent somewhere (onboarding's new step,
+    /// the in-flow popover, or this same Settings picker) — no opt-in principle is bypassed.
     var parseEnginePreference: ParseEnginePreference {
-        cloudParseConsent == true ? .cloud : .onDevice
+        cloudParseConsent == false ? .onDevice : .cloud
     }
 
     /// Change the parsing engine from Settings. Persists to the existing `cloudParseConsentKey` so
@@ -1423,8 +1910,16 @@ final class AppState {
         // is always exactly the user's own tasks (self-review "security" — no cross-user/global
         // data reaches `VoiceDone`).
         switch voiceDone.classify(transcript, openTasks: voiceDoneOpenTasks) {
+        case .complete(let candidates) where candidates.isEmpty:
+            // T0xx: local Jaccard matching found the "xong/done" cue but nothing above the floor —
+            // try a cloud semantic-paraphrase rescue before giving up (see
+            // `resolveCompletionViaCloud`'s header comment). Every non-empty case below this one is
+            // untouched: local matches are never second-guessed by a network round trip.
+            resolveCompletionViaCloud(action: .complete, kind: .complete, transcript: transcript)
         case .complete(let candidates):
             presentVoiceDoneConfirm(action: .complete, candidates: candidates)
+        case .clearExternal(let candidates) where candidates.isEmpty:
+            resolveCompletionViaCloud(action: .clearExternal, kind: .clearExternal, transcript: transcript)
         case .clearExternal(let candidates):
             presentVoiceDoneConfirm(action: .clearExternal, candidates: candidates)
         case .notACompletion:
@@ -1489,6 +1984,156 @@ final class AppState {
         // a hostile/corrupted matcher result — mirrors `runParse`'s own defense-in-depth cap.
         voiceDoneConfirm = VoiceDoneConfirm(action: action, candidates: Array(candidates.prefix(10)))
         captureState = .parsed
+    }
+
+    // MARK: - T0xx: cloud completion-paraphrase rescue (empty-candidate case only)
+    //
+    // `VoiceDone.classify` detects a "xong"/"done"/"hoàn thành" cue and Jaccard-matches the rest of
+    // the utterance against open-task titles. A paraphrase ("xong cái vụ report rồi" vs. the real
+    // title "Viết báo cáo Q3") shares no tokens and scores 0.0 — `VoiceDone` correctly reports
+    // "cue present, nothing matched" as EMPTY candidates (not `.notACompletion`; see
+    // `VoiceDoneIntent`'s own doc comment). `finishRecording`'s switch above routes exactly that
+    // empty-candidates outcome here instead of straight to `presentVoiceDoneConfirm`, so a cloud
+    // semantic-match gets one shot before the user has to complete the task by hand.
+    //
+    // Quota/consent (self-review point 5): this is the ONLY call site for
+    // `IntentRouter.resolveCompletion`, and it is reached ONLY from the two empty-candidates switch
+    // arms above — a local match (any non-empty candidate list) never pays a round trip or a quota
+    // unit. `IntentRouter.resolveCompletion` itself re-applies the same `cloudGate.isOptedIn()` +
+    // `isOnline()` gate `parse` uses, so an un-opted-in user never has a transcript leave the Mac
+    // here either.
+
+    /// Confidence bar for a CLOUD-resolved completion match. This is a MODEL-PROBABILITY scale (the
+    /// LLM's own reported confidence that its chosen `matchIndex` is correct) — it is deliberately
+    /// NOT `VoiceDone.highConfidenceThreshold`, which lives on the JACCARD TOKEN-OVERLAP scale (the
+    /// fraction of shared tokens between transcript and title). The two numbers measure different
+    /// things on different scales and are never comparable or interchangeable; this constant exists
+    /// specifically so nobody is tempted to reuse `VoiceDone.highConfidenceThreshold` here instead.
+    /// Not `private` — `resolveCloudMatch` below is exposed for direct unit-testing and tests
+    /// reference this constant rather than duplicating the literal.
+    static let cloudCompletionConfidenceThreshold = 0.7
+
+    /// `finishRecording`'s `.complete`/`.clearExternal` cases call this INSTEAD of
+    /// `presentVoiceDoneConfirm` directly when local Jaccard matching (`VoiceDone`) came back with
+    /// ZERO candidates. Cloud is asked to semantically match the utterance against the SAME
+    /// open-task titles the local matcher already tried and failed on. A decline/failure/low-
+    /// confidence/mismatched-echo/stale-session result all fall through to exactly today's
+    /// behavior — `presentVoiceDoneConfirm(action:candidates: [])`, i.e. "no matching task, offer
+    /// capture instead." No new UI, no new error banner, no new alert.
+    ///
+    /// Never marks a task done automatically (self-review point 4): every exit path below either
+    /// hands a SINGLE resolved `VoiceMatch` to the EXISTING `presentVoiceDoneConfirm` (same one-tap
+    /// confirm the local-match path already uses) or hands it an empty list — there is no path here
+    /// that calls `toggleDone`/`confirmVoiceDone` or otherwise mutates a task directly.
+    private func resolveCompletionViaCloud(action: VoiceDoneAction, kind: CloudParser.CompletionKind, transcript: String) {
+        // Snapshot taken ONCE, before the network call (self-review point 3): the candidate titles
+        // sent to Cloud and the task ids resolved back out of the response MUST come from the exact
+        // same read of `openTasks`. Rebuilding after the `await` would let a reminder firing or a
+        // sync landing mid-flight shift task ordering/membership, so `matchIndex` could end up
+        // pointing at a DIFFERENT task than the one the model actually saw. `snapshot` is capped at
+        // 100 entries up front (matching `CloudParser.resolveCompletion`'s own internal cap) so the
+        // bounds this method re-checks below (`1...snapshot.count`) are checking against the exact
+        // same list whose titles were actually put on the wire — not a longer, uncapped list that
+        // would let an in-range server index silently resolve against the wrong local task.
+        let snapshot: [(id: UUID, title: String)] = Array(openTasks.prefix(100)).map { ($0.id, $0.title) }
+        guard !snapshot.isEmpty else {
+            presentVoiceDoneConfirm(action: action, candidates: [])
+            return
+        }
+
+        // Concurrency (self-review point 2): `finishRecording` is synchronous but resolution is
+        // async, so this hops through `_Concurrency.Task { @MainActor in ... }` — the same pattern
+        // `runParse` uses immediately below for the analogous new-task-parse round trip.
+        // `captureState = .parsing` keeps the UI from looking frozen on a stale state during the
+        // round trip; `captureSession` is bumped and captured BEFORE the `await` (stale-result
+        // guard) so a user who cancels and immediately re-records can never have THIS utterance's
+        // cloud match presented against the NEW recording — every exit path below either calls
+        // `presentVoiceDoneConfirm` (which sets `captureState = .parsed`, a sane terminal state) or,
+        // on a stale session, returns without touching `captureState` at all (the superseding
+        // action already put it wherever it needs to be) — never leaves it stuck in `.parsing`.
+        captureState = .parsing
+        captureSession += 1
+        let session = captureSession
+        let now = clock()
+        let titles = snapshot.map(\.title)
+
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let resolution = await self.router.resolveCompletion(transcript, now: now, kind: kind, candidates: titles)
+            // Stale? Cancel/a fresh capture/anything else that bumps `captureSession` happened
+            // while the cloud round trip was in flight — drop this result entirely rather than
+            // presenting a match for an utterance the user already walked away from (mirrors
+            // `runParse`'s identical guard).
+            guard self.captureSession == session, self.captureState == .parsing else { return }
+
+            guard let match = Self.resolveCloudMatch(resolution, snapshot: snapshot) else {
+                // `.none` (model looked, found nothing), `.unavailable` (never got a trustworthy
+                // answer), or a failed local safety check — all degrade identically to today's "no
+                // matching task" outcome. See `CloudParser.CompletionResolution`'s doc comment for
+                // why the transport layer keeps `.none`/`.unavailable` distinct even though this
+                // call site does not.
+                self.presentVoiceDoneConfirm(action: action, candidates: [])
+                return
+            }
+            // Single resolved match still goes through the EXISTING one-tap confirm card — the
+            // user confirms with one tap/word exactly as they would for a local match.
+            self.presentVoiceDoneConfirm(action: action, candidates: [match])
+        }
+    }
+
+    /// Pure decision logic for `resolveCompletionViaCloud`'s safety checks — split out as a
+    /// `static` function (not `private`) so it is unit-testable directly, without spinning up a
+    /// live `AppState`/`IntentRouter`/network stack (mirrors the file's existing `nonisolated
+    /// static` helper convention, e.g. `IntentRouter.cap`/`isValidBreakdown` in
+    /// `IntentParsing.swift`, for the same testability reason).
+    ///
+    /// Off-by-one (self-review point 1): `resolution`'s `index` is the wire's 1-BASED position.
+    /// The ONLY conversion to a 0-based array index happens right here, at `snapshot[index - 1]` —
+    /// `index == 1` picks `snapshot[0]`, the FIRST candidate, matching the locked contract
+    /// ("`candidates[matchIndex - 1]` is the chosen title"). Every other touch point in this
+    /// feature (`CloudParser.resolveCompletion`, `IntentRouter.resolveCompletion`) passes `index`
+    /// through unchanged — this is deliberately the single place the arithmetic happens, so there
+    /// is exactly one place to audit for the off-by-one class of bug this task calls out by name.
+    ///
+    /// Applies TWO independent safety checks before trusting a server-reported match, plus the
+    /// confidence bar, and returns `nil` (⇒ caller treats identically to "no candidates") unless
+    /// ALL of the following hold:
+    ///   1. `confidence >= cloudCompletionConfidenceThreshold` (model-probability scale, see that
+    ///      constant's own doc comment).
+    ///   2. `index` is in `1...snapshot.count` — re-checked here even though `CloudParser` already
+    ///      validated it against the list length it sent, because `snapshot` (this call's own
+    ///      local state) is never trusted to still agree with what the server saw without a fresh,
+    ///      local bounds check (constitution II: never trust a remote response transitively).
+    ///   3. `title` (the model's verbatim echo of the title it chose) matches, after trimming,
+    ///      `snapshot[index - 1].title` exactly. A disagreement means the model hallucinated/
+    ///      misindexed — or a candidate title was UTF-16-truncated before being sent (see
+    ///      `CloudParser.resolveCompletion`'s 200-unit-per-title cap) and the model echoed back the
+    ///      truncated form. Either way this is treated as NO match, never as "trust whichever of
+    ///      the two disagreeing values looks more plausible" — the failure mode is a false
+    ///      negative (falls back to "no matching task," never wrong), not a false positive.
+    static func resolveCloudMatch(
+        _ resolution: CloudParser.CompletionResolution,
+        snapshot: [(id: UUID, title: String)]
+    ) -> VoiceMatch? {
+        guard case .resolved(let index, let title, let confidence) = resolution else { return nil }
+        guard confidence.isFinite, confidence >= cloudCompletionConfidenceThreshold else { return nil }
+        // Bounds check written as two plain comparisons, not `(1...snapshot.count).contains(index)`:
+        // `ClosedRange(1...0)` (an empty `snapshot`) TRAPS at range construction before `.contains`
+        // ever runs. `resolveCompletionViaCloud` never calls this with an empty snapshot (guarded
+        // before the network call), but this function is `static` specifically so it's exercised
+        // directly from unit tests too — it must not crash on a malicious/malformed input the caller
+        // didn't happen to pre-filter.
+        guard index >= 1, index <= snapshot.count else { return nil }
+        let expected = snapshot[index - 1] // the ONE off-by-one conversion point, see doc comment above
+        guard expected.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                == title.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        // `VoiceMatch.score` is documented (`VoiceDone.swift`) as a Jaccard token-overlap value in
+        // [0, 1]; there is no separate field to carry a match's provenance (local-Jaccard vs.
+        // cloud-model-confidence). Both are already bounded to [0, 1] so this never breaks any
+        // existing consumer's range assumptions, but it IS a different scale under the same field
+        // — flagged here since this is the one place that substitution happens, and `VoiceDone.swift`
+        // itself (out of scope for this change) is not touched.
+        return VoiceMatch(taskId: expected.id, title: expected.title, score: confidence)
     }
 
     // MARK: - T042: voice delegation intent (phase6-contract.md §C, US4)
@@ -1846,6 +2491,19 @@ final class AppState {
         confirmDrafts[index].conflictDismissed = true
     }
 
+    /// The confirm card's editable title `TextField` (`PopoverView.taskDraftCard`) calls this on
+    /// every keystroke. `ConfirmDraft` is a VALUE type (`struct`, unlike the Windows port's
+    /// `ConfirmDraft` class) — mutating a local copy of the draft would silently lose the edit the
+    /// instant that copy goes out of scope, so this MUST reach through `confirmDrafts[index]` the
+    /// same way every other chip mutator in this section already does (self-review "value-type
+    /// trap": the array is the only thing `PopoverView`/`materialize` actually read back from).
+    /// Deliberately does NOT call `logCorrection` — a title edit isn't a chip attribute correction,
+    /// it's free-text authorship, same reason `task.title` itself was never a `ChipKind`.
+    func updateDraftTitle(_ title: String, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedTitle = title
+    }
+
     /// Constitution V / FR-044: every chip edit is logged locally (never egressed) as the signal
     /// for improving parsing over time. Goes through `TaskStore.recordCorrection` (added
     /// alongside this task, since `ParseCorrectionLog.record` — the real T026 API,
@@ -1985,7 +2643,7 @@ final class AppState {
         let kind = draft.dismissed.contains(.kind) ? .task : task.kind
 
         return TaskItem(
-            title: task.title,
+            title: draft.effectiveTitle,
             // `details` is the voice read-back copy (`AppState.speakDetails`'s frozen-field
             // meaning, distinct from `notes` — see TaskItem.swift) — prefer explicit notes, else
             // fall back to the verbatim transcript so read-back is never empty.
@@ -2296,9 +2954,117 @@ final class AppState {
         showMorningFrog = false
     }
 
-    /// Task-breakdown sheet: "Save all as tasks" — persists each step title as a real `TaskItem`
-    /// (medium priority, `.later`, no deadline/duration — the breakdown generator doesn't produce
-    /// those yet), then dismisses.
+    /// Task-breakdown sheet entry point: EVERY "Break down into steps…" call site (`TaskRow.swift`,
+    /// `TodayView.swift` x2, `triageBreakdown` below) routes through here now, instead of the old
+    /// bare `showBreakdown = true` that opened the sheet onto 5 hard-coded sample rows
+    /// ("Open Framer", "Draft headline + subhead", …) regardless of which task — or whether ANY
+    /// task — was actually clicked. Kicks off the real fetch immediately so the sheet opens
+    /// straight into `.loading` rather than needing a second explicit trigger from the View.
+    func openBreakdown(for task: TaskItem) {
+        breakdownTask = task
+        showBreakdown = true
+        fetchBreakdown(title: task.title, notes: task.notes)
+    }
+
+    /// `TaskBreakdownView`'s `.onDisappear` calls this on EVERY dismissal path (Cancel, Edit-as-
+    /// cancel, Esc, the system sheet-close control) — not just the `onClose()` closure
+    /// `VolarApp.swift` wires to the Cancel/Edit buttons, since SwiftUI can tear a sheet down
+    /// without that closure ever running. Bumping `breakdownSession` here is what stops a fetch
+    /// already in flight for the task just dismissed from landing on — or silently populating —
+    /// whichever task's sheet opens next: same stale-token shape as `captureSession`/
+    /// `textCaptureSession` elsewhere in this file.
+    func closeBreakdown() {
+        breakdownSession += 1
+        breakdownTask = nil
+        breakdownFetchState = .idle
+    }
+
+    /// The actual async breakdown fetch, split out of `openBreakdown(for:)` so the session bump +
+    /// `.loading` assignment happen SYNCHRONOUSLY before the `_Concurrency.Task` hop — exactly
+    /// `runParse`'s own shape (`captureSession`/`captureState = .parsing` set synchronously, THEN
+    /// the async router call, further down this file). Routes through the SAME `IntentRouter` the
+    /// rest of cloud parsing already uses (`router.breakdown(title:notes:)`, alongside the
+    /// existing `router.parse`/`router.resolveCompletion`) rather than a second networking path
+    /// opened directly from a View.
+    ///
+    /// `router.breakdown` itself tries FM (on-device, macOS 26+) -> Cloud -> an UNCONDITIONAL
+    /// hard-coded heuristic floor (`HeuristicNLParser.breakdown`, `Sources/Model/NLParser.swift`:
+    /// literally "Gather what's needed for X" / "Start the first small piece" / … / "Wrap up X" —
+    /// a fixed template, not real per-task content). That floor is fine for `router.parse`'s
+    /// "never return an empty result" contract; it is NOT fine here — the task brief is explicit
+    /// that this sheet must never present "generated-looking content that is actually
+    /// hard-coded," and that template is exactly that. So this method adds two safeguards
+    /// `router.breakdown` doesn't have on its own:
+    ///   1. A pre-flight check of the same two cloud preconditions the rest of the app already
+    ///      surfaces (`cloudParseConsent == true` — the opt-in flag both the onboarding consent
+    ///      toggle and the Settings parse-engine picker write — AND `ConfigParseCredentialProvider
+    ///      .isConfigured`, i.e. signed in; mirrors `SettingsView`'s own "Cloud parsing status"
+    ///      hint). Not signed in, or never opted in, -> `.unavailable` WITHOUT ever calling the
+    ///      router — so the hard-coded floor is never reached for either of those two cases.
+    ///   2. Even when both preconditions hold, the live network call can still fail right now
+    ///      (offline, quota just exhausted server-side) — `router.breakdown` would silently fall
+    ///      through to that SAME hard-coded floor and return it as if it were real. So the result
+    ///      is diffed against what the heuristic template would deterministically produce for this
+    ///      exact title/notes; an exact match means this IS the hard-coded floor in disguise ->
+    ///      `.failed`, never shown as if it were generated content.
+    private func fetchBreakdown(title: String, notes: String?) {
+        breakdownSession += 1
+        let session = breakdownSession
+        breakdownFetchState = .loading
+
+        guard cloudParseConsent == true, ConfigParseCredentialProvider.isConfigured else {
+            breakdownFetchState = .unavailable
+            return
+        }
+
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let steps = await self.router.breakdown(title: title, notes: notes)
+            // Rule out the hard-coded heuristic floor (see doc comment above) before trusting
+            // `steps` as real content. `HeuristicNLParser.breakdown` is pure/deterministic/no
+            // network, so computing it unconditionally (even on what may turn out to be a stale
+            // result) costs nothing but a little CPU — the actual staleness guard lives in
+            // `applyBreakdownFetchResult` below, checked exactly once, right before any mutation.
+            let heuristicFloor = await HeuristicNLParser().breakdown(title: title, notes: notes)
+            self.applyBreakdownFetchResult(steps, heuristicFloor: heuristicFloor, session: session)
+        }
+    }
+
+    /// The synchronous tail of `fetchBreakdown` above, split out SPECIFICALLY so it's directly
+    /// unit-testable without awaiting a real `IntentRouter.breakdown` round trip — same precedent
+    /// as `applyTextCaptureParseResult(_:session:)` (`TextCaptureTests.swift` already documents
+    /// this pattern for the typed-capture flow) and `resolveCloudMatch` elsewhere in this file.
+    /// Tests can simulate "the router came back with these steps" (optionally identical to what
+    /// the heuristic floor would have produced, to exercise the `.failed` branch below) and/or "the
+    /// session went stale before the fetch returned" by calling this directly with hand-built
+    /// `[String]` arrays and/or a stale `session` token, instead of needing a real network round
+    /// trip or a real `HeuristicNLParser` call.
+    ///
+    /// Not `private` for exactly that reason.
+    func applyBreakdownFetchResult(_ steps: [String], heuristicFloor: [String], session: Int) {
+        // Stale? The sheet was dismissed (`closeBreakdown()`) or reopened on a different task
+        // while this request was in flight — mirrors `runParse`'s own `captureSession` guard.
+        guard breakdownSession == session else { return }
+        guard !steps.isEmpty else {
+            breakdownFetchState = .failed
+            return
+        }
+        // Same content as the hard-coded heuristic floor -> this WAS that floor in disguise
+        // (Cloud/FM both failed just now despite the preconditions in `fetchBreakdown` passing),
+        // not real generated content -> `.failed`, never `.loaded`.
+        if steps == heuristicFloor {
+            breakdownFetchState = .failed
+            return
+        }
+        breakdownFetchState = .loaded(
+            steps.enumerated().map { BreakdownStep(id: $0.offset, title: $0.element) }
+        )
+    }
+
+    /// Task-breakdown sheet: "Save all as tasks" — persists each REAL step title `fetchBreakdown`
+    /// produced as its own `TaskItem` (medium priority, `.later`, no deadline/duration — the
+    /// breakdown generator doesn't produce those yet), then dismisses and resets the breakdown
+    /// state so the next `openBreakdown(for:)` starts clean.
     func saveBreakdown(_ titles: [String]) {
         for t in titles {
             addTask(TaskItem(
@@ -2315,6 +3081,9 @@ final class AppState {
             ))
         }
         showBreakdown = false
+        breakdownTask = nil
+        breakdownSession += 1
+        breakdownFetchState = .idle
     }
 
     /// Menu-bar "Preview reminder": surfaces the in-app notification banner for the current
@@ -2501,16 +3270,12 @@ final class AppState {
         dismissBatchSheetsIfEmpty()
     }
 
-    /// Triage "Break down": opens the existing breakdown sheet.
-    ///
-    /// NOTE (self-review "conflict"/seam, flagged in final report): the current `TaskBreakdownView`
-    /// sheet (mounted in `VolarApp.swift`, pre-existing Phase-3 wiring, `backlog.md` ~line 50) has
-    /// no per-task target yet — it always shows its fixed sample content regardless of which task
-    /// triggered it, exactly like the existing context-menu "Break down into steps…" entry point.
-    /// This reuses that same limitation rather than fixing it (fixing it touches
-    /// `TaskBreakdownView.swift`, not one of this task's 5 owned files).
+    /// Triage "Break down": opens the real per-task breakdown sheet for `item` via
+    /// `openBreakdown(for:)` (Change 3 fix — this call site used to just set `showBreakdown =
+    /// true` with no per-task target, same bug the context-menu entry points had; see
+    /// `openBreakdown(for:)`'s doc comment for the full fix).
     func triageBreakdown(_ item: TaskItem) {
-        showBreakdown = true
+        openBreakdown(for: item)
         dismissBatchSheetsIfEmpty()
     }
 
@@ -2680,7 +3445,7 @@ final class AppState {
     // MARK: - Service activation (Phase 3: call once from the main window's `.task`)
 
     /// Starts the global ⌃⌥M toggle-capture hotkey. `HotkeyManager.start` already calls
-    /// `appState.toggleCapture()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`);
+    /// `appState.handleHotkey()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`);
     /// toggle mode has no use for key-up, so neither `onKeyDown` nor `onKeyUp` needs wiring here.
     /// `HotkeyManager` registers the hotkey via Carbon's `RegisterEventHotKey` — a sandbox-legal
     /// Carbon Event Manager API that needs no Accessibility permission and has no local-monitor

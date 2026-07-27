@@ -181,3 +181,100 @@ chú ý bước 3 — đó là regression của **FIX 1 (bug trùng event)** v�
    tới stop cuối → xác nhận copy card đúng "Volar can read your calendar to see what's already
    booked..." (không còn nói "read-only" nữa) → bấm "Enable Calendar" tại đây cũng phải mirror ngay
    lập tức nếu mirroring đã bật sẵn từ trước (không cần đợi task edit kế tiếp).
+
+## E. Launch at login (`LoginItem.swift`/`SMAppService`) + dual-identity auth hint — verify thủ công
+## (thêm 2026-07-27, submission-prep pass)
+
+Feature: `Volar/Sources/App/LoginItem.swift` (mới) + `SettingsView.swift`/`AppState.swift`/
+`VolarApp.swift` sửa theo. CHƯA build/chạy trên Mac lần nào — mọi bước dưới đây phải làm bằng tay
+trên máy Mac thật. Đặc biệt chú ý bước 4 — đó là `// UNVERIFIED` `launchIsDefaultUserInfoKey`, rủi
+ro cao nhất trong pass này.
+
+1. **Bật "Launch at login":** Settings → General → toggle "Launch at login" ON → xác nhận macOS
+   hiện thông báo hệ thống kiểu "Volar" đã được thêm mục khởi động (login item) → mở System Settings
+   ▸ General ▸ Login Items → xác nhận **Volar có trong danh sách**. Nếu trạng thái là "cần phê
+   duyệt" (`.requiresApproval`), xác nhận Settings hiện đúng dòng giải thích + nút "Open Login
+   Items…" mở đúng pane đó → bấm phê duyệt trong System Settings → quay lại Settings (đóng/mở lại
+   cửa sổ Settings) → xác nhận toggle giờ đọc ON thật (không còn dòng "cần phê duyệt" nữa). Reboot
+   máy (hoặc log out/log in) → xác nhận **Volar tự khởi động**.
+2. **Tắt "Launch at login":** toggle OFF → xác nhận Volar **biến mất khỏi** System Settings ▸
+   General ▸ Login Items ngay lập tức (không cần đóng/mở lại System Settings).
+3. **Tắt từ System Settings sau lưng app (nguồn sự thật là `SMAppService.status`, không phải bản
+   cache):** bật lại toggle ở bước 1 → tắt Accessibility... à không, tắt đúng mục "Volar" trực tiếp
+   trong System Settings ▸ General ▸ Login Items (KHÔNG qua Settings của Volar) → quay lại app, mở
+   lại cửa sổ Settings (đóng hẳn rồi mở lại để `.onAppear` chạy lại) → xác nhận toggle đọc **OFF** —
+   đây chính là điều chứng minh `loginItemStatus` đọc `SMAppService.mainApp.status` sống mỗi lần mở
+   Settings, không phải một bản cache đứng yên nói dối.
+4. **Cửa sổ chính có tự mở lúc login hay không (`// UNVERIFIED`):** với "Launch at login" đang ON,
+   log out rồi log in lại (hoặc reboot) → quan sát: Volar có tự mở cửa sổ chính lên màn hình không,
+   hay chỉ có Dock icon + menu bar mà không có cửa sổ nào bật lên? **Ghi lại kết quả quan sát được
+   dù là gì** — đây là hành vi `NSApplication.launchIsDefaultUserInfoKey` không thể verify từ
+   Windows (xem comment trong `VolarApp.swift`'s `applicationDidFinishLaunching`). Nếu cửa sổ VẪN
+   tự mở dù đã thêm guard này, đó là residual gap đã ghi chú sẵn trong code (scene `Window` đứng
+   đầu `body` có thể tự mở bất kể `showMainWindow()` có gọi hay không) — cần một fix khác (không
+   phải hack close()-sau-khi-mở mù quáng), ghi lại để xử lý tiếp chứ đừng tự sửa ngay tại bước verify
+   này.
+5. **Badge "Last time you signed in with…":** đăng xuất hết (nếu đang có tài khoản) → Sign in with
+   Apple → sau khi đăng nhập thành công, Sign out → quay lại tab Account (trạng thái signed-out) →
+   xác nhận dòng **"Last time you signed in with Sign in with Apple."** hiện phía trên nút "Sign in
+   with Apple". Lặp lại với email OTP (Send code → Verify → Sign out) → xác nhận badge đổi thành
+   **"Last time you signed in with Email code."**
+6. **Gợi ý dual-identity ở tài khoản free đã đăng nhập:** đăng nhập bằng MỘT trong hai phương thức
+   (account free, chưa mua Pro) → tab Account → xác nhận phía dưới khối "Upgrade to Pro" hiện đúng
+   dòng nhắc tên phương thức CÒN LẠI (VD nếu vừa đăng nhập bằng Apple, dòng nhắc phải nói
+   "...you subscribed using Email code, sign out and sign back in that way..." — tức PHƯƠNG THỨC
+   KIA, không phải phương thức vừa dùng). Xác nhận không có nút tự động sign-out nào ở dòng này —
+   chỉ là text hướng dẫn.
+
+## F. ⌃⌥T typed capture ("type → Add task → done") — verify thủ công (thêm 2026-07-27)
+
+Feature: hotkey thứ hai `Sources/Speech/HotkeyManager.swift` (⌃⌥T, `id: 2`, độc lập với ⌃⌥M) +
+`Sources/Views/TextCapturePanel.swift` (mới) + `Sources/Views/CapturePanel.swift` (generalize để
+host 2 nội dung khác nhau) + `AppState.swift` (`textCapture`/`openTextCapture`/`cancelTextCapture`/
+`submitTextCapture` — tái dùng nguyên `router.parse` + `confirmSave()` của luồng voice, KHÔNG có
+bước review confirm-card) + `VolarApp.swift` (`textCapturePanelController` thứ hai +
+`observeTextCaptureState()` + guard mutual-exclusion trong `syncCapturePanel()`). CHƯA build/chạy
+trên Mac lần nào — mọi bước dưới đây làm bằng tay trên máy Mac thật. Rủi ro cao nhất:
+`GetEventParameter(..., typeEventHotKeyID, ...)` (shape suy đoán, `// UNVERIFIED` trong
+`HotkeyManager.swift`) và `@FocusState` auto-focus trong `NSPanel` borderless/non-activating
+(`// UNVERIFIED` trong `TextCapturePanel.swift`).
+
+1. **⌃⌥T mở popup KHÔNG cướp focus của app khác:** mở một app bất kỳ (VD TextEdit), gõ dở vài chữ
+   vào một document → bấm ⌃⌥T → xác nhận popup nhỏ "What needs doing?" hiện lên phía trên (upper
+   third màn hình) VÀ ô text field đã tự có caret (không cần click) → xác nhận app TextEdit **vẫn
+   còn đúng những gì vừa gõ dở**, không bị mất/không bị chèn ký tự lạ do hotkey.
+2. **Gõ + Return tạo task:** với popup đang mở, gõ "mua sữa" → nhấn Return (hoặc bấm "Add task") →
+   xác nhận: (a) popup hiện dòng xác nhận "Added "mua sữa"" trong chớp nhoáng rồi tự đóng (~900ms,
+   giống hệt nhịp "Saved" của popover voice); (b) mở cửa sổ chính → task "mua sữa" đã xuất hiện
+   thật trong danh sách (Today/Inbox tuỳ deadline) — tức đã đi qua đúng `confirmSave()`, không phải
+   một đường lưu song song giả.
+3. **Nhiều task trong 1 dòng:** bấm ⌃⌥T → gõ "mua sữa và gọi mẹ" (hoặc "buy milk and call mom") →
+   Return → xác nhận dòng xác nhận đọc **"Added 2 tasks"** (số nhiều, không phải chỉ 1) → xác nhận
+   cả 2 task đều xuất hiện trong danh sách.
+4. **Esc đóng popup, không mất gì quan trọng:** bấm ⌃⌥T → gõ vài chữ → Esc → xác nhận popup đóng
+   ngay, KHÔNG có task nào được tạo, và bấm lại ⌃⌥T lần nữa → ô field phải TRỐNG (không phải còn
+   giữ chữ cũ từ lần Esc trước — `cancelTextCapture()` phải xoá `textCaptureInput`).
+5. **Parse thất bại giữ nguyên chữ đã gõ:** khó ép được trường hợp này qua UI thật (parser hiện tại
+   luôn trả về ít nhất 1 task cho input không rỗng — xem comment trong `AppState.submitTextCapture()`),
+   nhưng NẾU quan sát được dòng lỗi "Didn't catch that" (hoặc lỗi `TaskStore` thật, VD dependency
+   cycle) xuất hiện: xác nhận ô field **vẫn còn nguyên chữ đã gõ** (không bị xoá/không bị đóng popup)
+   để sửa và bấm lại "Add task".
+6. **⌃⌥T trong lúc đang ghi âm voice → huỷ ghi âm, mở popup gõ:** bấm ⌃⌥M bắt đầu ghi âm (hoặc để
+   confirm-card voice đang chờ save) → trong lúc đó bấm ⌃⌥T → xác nhận: (a) waveform/popover voice
+   **biến mất ngay** (ghi âm bị huỷ qua `cancelCapture()`, không phải chỉ ẩn UI trong khi mic vẫn
+   chạy ngầm); (b) popup gõ chữ hiện ra thay thế, field trống, sẵn sàng gõ.
+7. **⌃⌥M trong lúc popup gõ đang mở → đóng popup, bắt đầu ghi âm:** bấm ⌃⌥T mở popup, gõ dở vài chữ
+   → bấm ⌃⌥M → xác nhận: (a) popup gõ chữ đóng ngay (chữ dở dang bị bỏ, đúng thiết kế
+   `cancelTextCapture()`); (b) waveform/popover voice hiện ra và mic thật sự bắt đầu ghi (không phải
+   chỉ đóng popup mà không làm gì tiếp).
+8. **Popover voice KHÔNG được flash lên trong lúc lưu bằng chữ:** bấm ⌃⌥T → gõ 1 task → Return →
+   quan sát THẬT KỸ khoảnh khắc lưu (nếu cần, thử vài lần liên tiếp với các task khác nhau) → xác
+   nhận **popover voice (waveform/confirm-card kiểu voice) không hề xuất hiện dù chỉ 1 frame** trong
+   suốt quá trình lưu — đây chính là guard `syncCapturePanel()` kiểm tra `textCapture != .closed`;
+   nếu popover voice thoáng hiện lên, đây là bug cần sửa ngay (self-review point 4 của task này).
+9. **Xung đột hotkey ⌃⌥T với app khác → log, không tắt ⌃⌥M:** dùng một app/tool nào đó chiếm sẵn
+   combo ⌃⌥T (VD một global-hotkey app khác đăng ký ⌃⌥T trước) → khởi động lại Volar → xác nhận: (a)
+   Console.app (hoặc log Xcode) có dòng `[Volar.HotkeyManager] RegisterEventHotKey(⌃⌥T) failed:
+   status ...`; (b) ⌃⌥T không mở được popup gõ chữ (chấp nhận được — app kia đang giữ combo); (c)
+   **⌃⌥M vẫn hoạt động bình thường** (mở/đóng ghi âm voice như chưa có gì xảy ra) — hai hotkey đăng
+   ký độc lập, một cái fail không được kéo cái kia chết theo.

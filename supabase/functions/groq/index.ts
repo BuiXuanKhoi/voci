@@ -1,11 +1,12 @@
 // supabase/functions/groq/index.ts — Edge Function for POST /functions/v1/groq/audio/transcriptions
 //
-// Pro-only Groq Speech-to-Text proxy. See README.md in this directory and
-// specs/002-workflow-command-center/contracts/account-auth.md §1/§3 for the product/architecture
-// rationale this implements: cloud speech (Groq Whisper) is Pro-only in the freemium matrix — free
-// accounts get a `403 upgrade_required` and fall back to on-device WhisperKit, unlike ../parse
-// (both tiers, different daily caps). Structure, error shapes, and logging discipline deliberately
-// mirror ../parse/index.ts; read that file first if this one is unclear.
+// Groq Speech-to-Text proxy, open to both tiers. See README.md in this directory for the product
+// rationale: cloud speech (Groq Whisper) used to be Pro-only, but the product is moving cloud-first
+// — on-device recognition is now a fallback floor, not the default experience — so free accounts
+// are let through too, just with a smaller daily cap (`SPEECH_LIMIT_FREE`, default 20/day) than Pro
+// (`SPEECH_LIMIT_PRO`, default 500/day). This makes the route structurally the same shape as
+// ../parse (both tiers, different daily caps). Structure, error shapes, and logging discipline
+// deliberately mirror ../parse/index.ts; read that file first if this one is unclear.
 //
 // Route: the client always appends "audio/transcriptions" to its configured base URL, so the only
 // path this function answers on is one ending in that suffix (locally
@@ -41,7 +42,7 @@ import { requireEnv, readEnvInt } from "../_shared/env.ts";
 import { logEvent, logError } from "../_shared/log.ts";
 import { BodyTooLargeError, errorResponse, jsonResponse, readBodyCappedBytes } from "../_shared/http.ts";
 import { createServiceRoleClient, hashUserId, verifyAccount } from "../_shared/auth.ts";
-import { consumeQuota, speechLimitForPro } from "../_shared/quota.ts";
+import { consumeQuota, speechLimitFor } from "../_shared/quota.ts";
 
 /** Under Groq's own documented 25 MB request limit (see GroqTranscriptionClient.swift's
  *  `maxAudioBytes`) so an over-cap request never reaches upstream at all. Override without a
@@ -95,9 +96,8 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
     return errorResponse(415, "invalid_request");
   }
 
-  // --- Auth: any real account may authenticate; tier is checked separately right below (a free
-  // user's credential IS valid, it just isn't entitled to this route). Any rejection here is the
-  // same opaque shape ../parse uses. ---
+  // --- Auth: any real account may authenticate. Any rejection here is the same opaque shape
+  // ../parse uses. ---
   const authResult = await verifyAccount(req);
   if (!authResult.ok) {
     logEvent("groq_auth_rejected", {
@@ -108,15 +108,9 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   }
   const userIdHash = await hashUserId(authResult.userId);
 
-  // --- Tier gate: Pro-only route (contract §1/§3). Free tier -> 403 upgrade_required, client
-  // falls back to on-device WhisperKit; this must happen BEFORE quota/body work. ---
-  if (authResult.tier !== "pro") {
-    logEvent("groq_upgrade_required", {
-      userIdHash,
-      latencyMs: Math.round(performance.now() - startedAt),
-    });
-    return errorResponse(403, "upgrade_required");
-  }
+  // --- Tier: both free and pro may call /groq now; only the daily limit differs (mirrors
+  // ../parse's `parseLimitFor`). This must still run BEFORE any body work. ---
+  const limit = speechLimitFor(authResult.tier);
 
   const supabase = createServiceRoleClient();
   if (!supabase) {
@@ -126,12 +120,12 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
   const now = new Date();
   let quotaUsed: number;
   try {
-    const limit = speechLimitForPro();
     const check = await consumeQuota(supabase, authResult.userId, "speech", limit, now);
     quotaUsed = check.used;
     if (!check.allowed) {
       logEvent("groq_request", {
         userIdHash,
+        tier: authResult.tier,
         status: 429,
         quotaUsed: check.used,
         latencyMs: Math.round(performance.now() - startedAt),
@@ -251,6 +245,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
       await upstreamRes.arrayBuffer().catch(() => {}); // drain; body never logged/forwarded
       logEvent("groq_request", {
         userIdHash,
+        tier: authResult.tier,
         status: 429,
         quotaUsed,
         audioBytes: rawBytes.length,
@@ -286,6 +281,7 @@ async function handle(req: Request, startedAt: number): Promise<Response> {
 
     logEvent("groq_request", {
       userIdHash,
+      tier: authResult.tier,
       status: 200,
       quotaUsed,
       audioBytes: rawBytes.length,

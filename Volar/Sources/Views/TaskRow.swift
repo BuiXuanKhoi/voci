@@ -93,7 +93,7 @@ struct TaskRow: View {
         .animation(VolarMotion.hover, value: isActive)
         .animation(VolarMotion.press, value: isPressed)
         .contextMenu {
-            Button("Break down into steps…") { appState.showBreakdown = true }
+            Button("Break down into steps…") { appState.openBreakdown(for: task) }
             Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
             Divider()
             Button("Delete", role: .destructive) { appState.deleteTask(task.id) }

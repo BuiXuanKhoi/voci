@@ -167,6 +167,40 @@ final class IntentRouter: IntentParser {
         return await heuristic.breakdown(title: title, notes: notes)
     }
 
+    // MARK: - Resolve-completion (T0xx: cloud-only paraphrase rescue for `VoiceDone`'s
+    // empty-candidate case)
+    //
+    // Deliberately a SEPARATE method from `parse` above, not folded into it: `parse` answers "turn
+    // this utterance into new tasks"; this answers "which existing task did the user just finish."
+    // Different question, different prompt, different failure handling — merging them would
+    // degrade both (per this task's own instruction).
+    //
+    // Cloud-only, no FM/Heuristic tier: FoundationModels and the on-device heuristic parser have
+    // nothing to contribute to a semantic-paraphrase match. In fact the HEURISTIC layer here *is*
+    // `VoiceDone`'s own Jaccard token-set matcher (`Sources/Speech/VoiceDone.swift`), which already
+    // ran, on-device, before the caller (`AppState.resolveCompletionViaCloud`) ever reaches this
+    // method — this method only exists for the case that matcher already reported "nothing above
+    // the floor." There is no local fallback tier left to try; unavailable Cloud means "no
+    // resolution," full stop, and the caller degrades to today's existing "no matching task" UI.
+    func resolveCompletion(
+        _ transcript: String, now: Date, kind: CloudParser.CompletionKind, candidates: [String]
+    ) async -> CloudParser.CompletionResolution {
+        // Same cloud opt-in + reachability gate `parse` applies above (R5: explicit one-time
+        // privacy consent "regardless of tier" + best-effort reachability) — never sends a
+        // transcript or candidate list without both being true, and (like `parse`) `cloud`/
+        // `cloudGate` being `nil` (Cloud tier not wired up at all) is treated identically to "not
+        // opted in."
+        guard let cloud, let cloudGate, await cloudGate.isOptedIn(), await cloudGate.isOnline() else {
+            return .unavailable
+        }
+        // Same defensive cap `parse` applies to `openTaskTitles` before it ever reaches
+        // `CloudParser` — belt-and-suspenders alongside `CloudParser.resolveCompletion`'s own
+        // internal 100-entry cap, since this is a second, independent call site into that
+        // transport.
+        let bounded = Array(candidates.prefix(100))
+        return await cloud.resolveCompletion(transcript, now: now, kind: kind, candidates: bounded)
+    }
+
     // MARK: - Cap + floor helpers
     //
     // `nonisolated` on these `static func`s is deliberate, not decorative: `IntentRouter` is

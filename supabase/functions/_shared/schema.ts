@@ -55,7 +55,25 @@ export interface BreakdownRequest {
   notes?: string;
 }
 
-export type ParsedRequestBody = ParseRequest | BreakdownRequest;
+/** Third request mode: "given this utterance and this numbered list of the user's open task
+ *  titles, which ONE is the user saying they finished — or none?" Exists because local Jaccard
+ *  token-set matching on the client cannot handle a paraphrase ("xong cái vụ report rồi" vs the
+ *  real title "Viết báo cáo Q3") — it needs a model that understands meaning, not token overlap.
+ *
+ *  PRIVACY: `candidates` carries TITLES ONLY, never task ids — the client maps the returned
+ *  1-based index back to a task id locally. Never add a task-id field to this wire shape.
+ *
+ *  Wire field names are snake_case (`resolve_completion`, `clear_external`, `candidates`),
+ *  matching `open_task_titles`/`locale_hint` elsewhere in this file. */
+export interface ResolveCompletionRequest {
+  mode: "resolve_completion";
+  transcript: string;
+  now: string; // ISO8601 WITH ZONE — see isIso8601WithZone
+  kind: "complete" | "clear_external";
+  candidates: string[]; // the numbered list, in order; index 0 here == candidate "1." in the prompt
+}
+
+export type ParsedRequestBody = ParseRequest | BreakdownRequest | ResolveCompletionRequest;
 
 type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -98,11 +116,12 @@ export function validateRequestBody(body: unknown): ValidationResult<ParsedReque
 
   const modeRaw = body.mode;
   const mode = modeRaw === undefined ? "parse" : modeRaw;
-  if (mode !== "parse" && mode !== "breakdown") {
-    return { ok: false, error: "mode must be 'parse' or 'breakdown' when present" };
+  if (mode !== "parse" && mode !== "breakdown" && mode !== "resolve_completion") {
+    return { ok: false, error: "mode must be 'parse', 'breakdown', or 'resolve_completion' when present" };
   }
 
   if (mode === "breakdown") return validateBreakdownRequest(body);
+  if (mode === "resolve_completion") return validateResolveCompletionRequest(body);
   return validateParseRequest(body);
 }
 
@@ -176,6 +195,52 @@ function validateBreakdownRequest(body: Record<string, unknown>): ValidationResu
     notes = body.notes;
   }
   return { ok: true, value: { mode: "breakdown", taskTitle, notes } };
+}
+
+function validateResolveCompletionRequest(
+  body: Record<string, unknown>,
+): ValidationResult<ResolveCompletionRequest> {
+  if (!isNonEmptyString(body.transcript)) {
+    return { ok: false, error: "transcript is required and must be a non-empty string" };
+  }
+  if (body.transcript.length > MAX_TRANSCRIPT_CHARS) {
+    return { ok: false, error: `transcript exceeds ${MAX_TRANSCRIPT_CHARS} chars` };
+  }
+  if (!isIso8601WithZone(body.now)) {
+    return { ok: false, error: "now is required and must be ISO8601 with zone" };
+  }
+  if (body.kind !== "complete" && body.kind !== "clear_external") {
+    return { ok: false, error: "kind must be 'complete' or 'clear_external'" };
+  }
+
+  const rawCandidates = body.candidates;
+  if (!Array.isArray(rawCandidates) || rawCandidates.length === 0) {
+    // An empty/missing list is a client bug — there is nothing to match against, so this is
+    // rejected outright rather than paying for a model call that can only ever answer "none".
+    return { ok: false, error: "candidates is required and must be a non-empty array" };
+  }
+  if (rawCandidates.length > MAX_OPEN_TASK_TITLES) {
+    return { ok: false, error: `candidates exceeds ${MAX_OPEN_TASK_TITLES} entries` };
+  }
+  for (const c of rawCandidates) {
+    if (typeof c !== "string" || c.length === 0 || c.length > MAX_OPEN_TASK_TITLE_CHARS) {
+      return {
+        ok: false,
+        error: `candidates entries must be non-empty strings <= ${MAX_OPEN_TASK_TITLE_CHARS} chars`,
+      };
+    }
+  }
+
+  return {
+    ok: true,
+    value: {
+      mode: "resolve_completion",
+      transcript: body.transcript,
+      now: body.now,
+      kind: body.kind,
+      candidates: rawCandidates as string[],
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -433,4 +498,79 @@ export function validateBreakdownSteps(v: unknown): BreakdownStepOut[] | undefin
     steps.push({ title: s.title, estimateMinutes: clamped });
   }
   return steps;
+}
+
+// ---------------------------------------------------------------------------------------------
+// resolve_completion response (model -> us -> client).
+//
+// **`matchIndex` is 1-BASED, and this is load-bearing and dangerous.** The prompt numbers the
+// candidate list "1." through "N." (matching how the request's `candidates` array is presented
+// to the model), so the model answers in that 1-based space. `candidates[matchIndex - 1]` is the
+// resolved title — an off-by-one here marks the WRONG task done, not a cosmetic bug. The client
+// re-verifies `matchTitle` against `candidates[matchIndex - 1]` as a SECOND, INDEPENDENT check
+// before acting on this response — do not "simplify" `matchTitle` away as redundant with
+// `matchIndex`; it is the client's cross-check against exactly this class of indexing bug.
+// ---------------------------------------------------------------------------------------------
+
+export interface ResolveCompletionOut {
+  intent: "complete" | "clear_external" | "none";
+  // 1-BASED index into the request's `candidates` (i.e. candidate "1." in the prompt == index 1
+  // here == `candidates[0]` in the request array). Present iff `intent !== "none"`.
+  matchIndex?: number;
+  // The model's verbatim echo of the matched candidate title — the client's independent
+  // cross-check against `candidates[matchIndex - 1]`. Present iff `intent !== "none"`.
+  matchTitle?: string;
+  confidence: number; // 0.0 .. 1.0
+}
+
+/** Validates the model's resolve_completion-mode output. Returns `undefined` (never throws) on
+ *  ANY structural mismatch — the caller maps `undefined` to a safe `{ intent: "none", confidence:
+ *  0 }` rather than guessing or best-effort-repairing, per constitution II: this decides which of
+ *  the user's tasks gets marked done, so untrusted model output is never partially trusted.
+ *
+ *  `candidateCount` is the length of the REQUEST's `candidates` array — `matchIndex` must be an
+ *  integer in `1...candidateCount` inclusive (reject 0, reject `candidateCount + 1`, reject
+ *  non-integers like 2.5). See the module-level comment above for why 1-based indexing here is
+ *  load-bearing. */
+export function validateResolveCompletion(
+  v: unknown,
+  candidateCount: number,
+): ResolveCompletionOut | undefined {
+  if (!isPlainObject(v)) return undefined;
+
+  if (v.intent !== "complete" && v.intent !== "clear_external" && v.intent !== "none") {
+    return undefined;
+  }
+
+  // Confidence is NEVER clamped — a model emitting e.g. 7 is a model not following instructions,
+  // and this decides task completion, so it is rejected outright rather than silently coerced
+  // into range.
+  if (!isFiniteNumber(v.confidence) || v.confidence < 0 || v.confidence > 1) return undefined;
+
+  if (v.intent === "none") {
+    // matchIndex/matchTitle must be absent or null when intent is "none" — anything else means
+    // the model is contradicting its own "none" answer with a dangling match.
+    if (v.matchIndex !== undefined && v.matchIndex !== null) return undefined;
+    if (v.matchTitle !== undefined && v.matchTitle !== null) return undefined;
+    return { intent: "none", confidence: v.confidence };
+  }
+
+  // intent === "complete" | "clear_external": matchIndex MUST be a 1-based integer in range, and
+  // matchTitle MUST be a non-empty string (the client's independent cross-check field).
+  if (
+    !isFiniteNumber(v.matchIndex) ||
+    !Number.isInteger(v.matchIndex) ||
+    v.matchIndex < 1 ||
+    v.matchIndex > candidateCount
+  ) {
+    return undefined;
+  }
+  if (!isNonEmptyString(v.matchTitle)) return undefined;
+
+  return {
+    intent: v.intent,
+    matchIndex: v.matchIndex,
+    matchTitle: v.matchTitle,
+    confidence: v.confidence,
+  };
 }

@@ -1,15 +1,24 @@
-// Sources/Views/CapturePanel.swift — floating NSPanel host for the existing capture UI
+// Sources/Views/CapturePanel.swift — floating NSPanel host for the capture UI (voice + typed)
 //
 // THE BUG: Volar is a menu-bar (`LSUIElement`) app. The global ⌃⌥M hotkey works system-wide, but
 // before this file existed the ONLY mount point for `PopoverView` was inside `TodayView`, gated on
 // `appState.captureState != .idle`. Since the main window is normally CLOSED for a menu-bar app,
 // pressing the hotkey while the window was closed recorded audio into a UI nobody could see.
 //
-// THE FIX: `CapturePanelController` owns a borderless, non-activating `NSPanel` that hosts the
-// SAME `PopoverView` (unchanged bindings/behavior — only WHERE it mounts changes) via
-// `NSHostingView`, floats above every Space/full-screen app, and is driven purely by
-// `appState.captureState` from `AppDelegate` (see `VolarApp.swift`). This is now the single mount
-// point for `PopoverView` — the old in-`TodayView` mount has been removed.
+// THE FIX: `CapturePanelController` owns a borderless, non-activating `NSPanel` that hosts
+// arbitrary SwiftUI content via `NSHostingView`, floats above every Space/full-screen app, and is
+// driven by whatever state its owner chooses to watch (originally, and still primarily,
+// `appState.captureState` from `AppDelegate` — see `VolarApp.swift`).
+//
+// TWO INSTANCES (⌃⌥T typed-capture popup, added alongside `Sources/Views/TextCapturePanel.swift`):
+// this controller no longer hardcodes `PopoverView` — `init(content:)` takes whatever `AnyView` the
+// caller wants hosted, so `VolarApp.swift`/`AppDelegate` now owns TWO separate
+// `CapturePanelController` instances, one hosting `PopoverView` (voice capture, unchanged) and one
+// hosting `TextCaptureView` (typed capture, new). They are MUTUALLY EXCLUSIVE BY CONSTRUCTION, not
+// by anything in this file: `AppDelegate.syncCapturePanel()` (the voice controller's driver) hides
+// the voice panel whenever `appState.textCapture != .closed`, and `observeTextCaptureState()`'s
+// analogous sync method only ever shows the text panel while that same condition holds — this file
+// itself has no idea the other controller/panel exists and enforces nothing about their exclusion.
 import SwiftUI
 import AppKit
 
@@ -43,13 +52,16 @@ final class CapturePanelController {
     private let panel: KeyablePanel
     private let hostingView: NSHostingView<AnyView>
 
-    /// `PopoverView().environment(appState)` — matches the `.environment(appState)` pattern used
-    /// everywhere else `AppState` is injected (`VolarApp.swift`'s `Window`/`MenuBarExtra` scenes,
-    /// `TodayView`'s own `@Environment(AppState.self)`). Wrapped in `AnyView` because
-    /// `.environment(_:)`'s concrete return type is an unspeakable opaque type — `NSHostingView`
-    /// needs a nameable generic parameter, and `AnyView` is the standard way to erase it.
-    init(appState: AppState) {
-        let content = AnyView(PopoverView().environment(appState))
+    /// `content` is whatever the caller built — `AnyView(PopoverView().environment(appState))` for
+    /// the voice-capture instance, `AnyView(TextCaptureView().environment(appState))` for the
+    /// typed-capture instance (both call sites live in `VolarApp.swift`/`AppDelegate`, matching the
+    /// `.environment(appState)` pattern used everywhere else `AppState` is injected). `AnyView`
+    /// rather than a generic `<Content: View>` parameter because this controller's own stored
+    /// properties (`hostingView`) need a single concrete, nameable type regardless of which content
+    /// a given instance hosts — and `.environment(_:)`'s concrete return type is itself an
+    /// unspeakable opaque type, so callers already have to erase to `AnyView` before this
+    /// initializer would even see a nameable type to be generic over.
+    init(content: AnyView) {
         let hosting = NSHostingView(rootView: content)
         self.hostingView = hosting
 

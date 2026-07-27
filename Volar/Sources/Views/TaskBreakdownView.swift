@@ -1,33 +1,43 @@
 // Sources/Views/TaskBreakdownView.swift — AI task-breakdown artboard, ported from
-// `design/volar-extras.jsx`'s `VolarTaskBreakdown`. Steps are still static/sample content by
-// design — wiring a real breakdown generator into VolarCore/NLParser is a later phase — but the
-// sheet is now live: Phase 3 mounts it from `TaskRow`'s "Break down into steps…" context-menu
-// item, and "Save all as tasks" persists the sample step titles as real `TaskItem`s via
-// `AppState.saveBreakdown(_:)`.
+// `design/volar-extras.jsx`'s `VolarTaskBreakdown`.
+//
+// CHANGE 3 (2026-07-27): this sheet used to show 5 hard-coded sample rows ("Open Framer", "Draft
+// headline + subhead", …) under a hard-coded title ("Launch landing page") regardless of which
+// task's context menu opened it, with "Save all as tasks" permanently `.disabled(true)` — every
+// call site opened the sheet via a bare `appState.showBreakdown = true` with no way to say WHICH
+// task, so wiring Save up would have persisted the sample junk into the user's real list. Now:
+// every call site routes through `AppState.openBreakdown(for:)`, which records the real task
+// (`AppState.breakdownTask`) and kicks off a REAL fetch (`AppState.fetchBreakdown`, routed through
+// the same `IntentRouter` cloud parsing already uses) — this view is now a pure function of
+// `AppState.breakdownFetchState`: loading while the request is in flight, the real steps once they
+// land, or an honest "needs cloud" / "couldn't reach it" line if they don't. See
+// `AppState.fetchBreakdown`'s doc comment for exactly how a hard-coded fallback is ruled out before
+// ever reaching `.loaded` — this view never has to re-derive that guarantee itself.
 import SwiftUI
 
 struct TaskBreakdownView: View {
-    private struct Step: Identifiable {
-        var id: Int { number }
-        let number: Int
-        let label: String
-        let duration: String
-    }
-
-    private let steps: [Step] = [
-        Step(number: 1, label: "Open Framer", duration: "10 min"),
-        Step(number: 2, label: "Draft headline + subhead", duration: "5 min"),
-        Step(number: 3, label: "Drop in demo screenshot", duration: "10 min"),
-        Step(number: 4, label: "Test email signup form", duration: "10 min"),
-        Step(number: 5, label: "Publish + share link", duration: "5 min"),
-    ]
-    private let totalLabel = "40 min"
-
     var onSave: ([String]) -> Void = { _ in }
     var onClose: () -> Void = {}
 
     @Environment(AppState.self) private var appState
     private var accentColors: Accent { appState.accent.accent }
+
+    /// Real steps once (and only once) `breakdownFetchState` is `.loaded` — the ONLY source
+    /// `stepsCard`/`summary`/the Save button read from. There is no other array anywhere in this
+    /// file a step row could come from, which is itself the guarantee against ever showing sample/
+    /// hard-coded content again (self-review point 4).
+    private var loadedSteps: [BreakdownStep] {
+        if case .loaded(let steps) = appState.breakdownFetchState { return steps }
+        return []
+    }
+
+    private var isSaveEnabled: Bool {
+        !loadedSteps.isEmpty
+    }
+
+    private var taskTitle: String {
+        appState.breakdownTask?.title ?? "this task"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -40,6 +50,15 @@ struct TaskBreakdownView: View {
         .padding(16)
         .frame(width: 480, height: 540)
         .volarGlass(level: .heavy, cornerRadius: 16)
+        // Covers EVERY dismissal path — Cancel, Edit-as-cancel, Esc, the system sheet-close
+        // control — not just the two buttons below that call `onClose()`. `VolarApp.swift` (out
+        // of this change's allowed files) only flips the bare `showBreakdown` Bool on dismiss and
+        // has no way to also call back into `AppState`'s breakdown-specific cleanup, so this view
+        // does it here instead: `.onDisappear` fires regardless of WHY the sheet went away. See
+        // `AppState.closeBreakdown()`'s doc comment for why this matters (a fetch already in
+        // flight for the task just dismissed must never land on the next task's freshly opened
+        // sheet).
+        .onDisappear { appState.closeBreakdown() }
     }
 
     // MARK: - Header
@@ -51,7 +70,7 @@ struct TaskBreakdownView: View {
                     .font(.system(size: 11, weight: .medium))
                     .tracking(0.77)
                     .foregroundStyle(VolarColor.textMut)
-                Text("\u{201C}Launch landing page\u{201D}")
+                Text("\u{201C}\(taskTitle)\u{201D}")
                     .font(.system(size: 16, weight: .medium))
                     .foregroundStyle(VolarColor.textPri)
                     .lineLimit(2)
@@ -73,21 +92,75 @@ struct TaskBreakdownView: View {
         }
     }
 
-    // MARK: - Steps card
+    // MARK: - Steps card (loading / loaded / unavailable / failed — a pure switch over
+    // `appState.breakdownFetchState`, never any content of this view's own)
 
+    @ViewBuilder
     private var stepsCard: some View {
-        VStack(spacing: 2) {
-            ForEach(steps) { step in
-                stepRow(step)
+        switch appState.breakdownFetchState {
+        case .idle, .loading:
+            statusCard {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Breaking it down\u{2026}")
+                    .font(.system(size: 13))
+                    .foregroundStyle(VolarColor.textSec)
+            }
+        case .loaded(let steps) where !steps.isEmpty:
+            VStack(spacing: 2) {
+                ForEach(steps) { step in
+                    stepRow(step)
+                }
+            }
+            .padding(6)
+            .background(VolarColor.card)
+            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .volarHairline(cornerRadius: 12)
+        case .loaded:
+            // Defensive only — `fetchBreakdown` maps an empty result to `.failed`, never
+            // `.loaded([])`, but this view still degrades honestly if that guarantee ever slips.
+            statusCard {
+                Text("Didn't get any steps back.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(VolarColor.textSec)
+            }
+        case .unavailable:
+            statusCard {
+                Text("Breakdown needs cloud parsing.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                Text("Sign in and turn on cloud parsing in Settings to break this task into steps.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textSec)
+                    .multilineTextAlignment(.center)
+            }
+        case .failed:
+            statusCard {
+                Text("Couldn't reach the breakdown service.")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                Text("Check your connection and try again from the task's context menu.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textSec)
+                    .multilineTextAlignment(.center)
             }
         }
-        .padding(6)
+    }
+
+    /// Shared frame for the three non-`.loaded` states above — same card chrome as the real steps
+    /// list so the sheet doesn't visibly jump size between loading/error/success.
+    private func statusCard(@ViewBuilder content: () -> some View) -> some View {
+        VStack(spacing: 8) {
+            content()
+        }
+        .frame(maxWidth: .infinity, minHeight: 160)
+        .padding(16)
         .background(VolarColor.card)
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .volarHairline(cornerRadius: 12)
     }
 
-    private func stepRow(_ step: Step) -> some View {
+    private func stepRow(_ step: BreakdownStep) -> some View {
         HStack(spacing: 12) {
             VStack(spacing: 2) {
                 ForEach(0..<3, id: \.self) { _ in
@@ -96,7 +169,7 @@ struct TaskBreakdownView: View {
             }
             .opacity(0.35)
 
-            Text("\(step.number)")
+            Text("\(step.id + 1)")
                 .font(.system(size: 11, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(accentColors.solid)
@@ -105,22 +178,18 @@ struct TaskBreakdownView: View {
                 .clipShape(Circle())
                 .overlay(Circle().stroke(accentColors.solid.opacity(0.2), lineWidth: 0.5))
 
-            Text(step.label)
+            Text(step.title)
                 .font(.system(size: 13))
                 .foregroundStyle(VolarColor.textPri)
                 .lineLimit(1)
 
             Spacer(minLength: 8)
-
-            Text(step.duration)
-                .font(.system(size: 11))
-                .monospacedDigit()
-                .foregroundStyle(VolarColor.textSec)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 2)
-                .background(VolarColor.veil(0.04))
-                .clipShape(Capsule())
-                .overlay(Capsule().stroke(VolarColor.border, lineWidth: 0.5))
+            // No per-step duration badge here (the old "10 min"/"5 min" labels were hard-coded
+            // sample values) — `IntentRouter.breakdown(title:notes:) -> [String]` (the frozen seam
+            // this view is built from) only carries step titles; the backend's `estimateMinutes`
+            // never survives that trip (see `BreakdownStep`'s doc comment in `AppState.swift`).
+            // Showing an invented number here would be exactly the "generated-looking content
+            // that is actually hard-coded" this whole change exists to remove.
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 10)
@@ -130,21 +199,26 @@ struct TaskBreakdownView: View {
 
     private var summary: some View {
         HStack {
-            (
-                Text("Total: ")
-                    .foregroundStyle(VolarColor.textSec)
-                + Text(totalLabel)
-                    .foregroundStyle(VolarColor.textPri)
-                + Text(" \u{00B7} \(steps.count) sub-tasks")
-                    .foregroundStyle(VolarColor.textSec)
-            )
-            .font(.system(size: 12))
-            Spacer()
-            Text("Drag to reorder \u{00B7} click to edit")
+            Text(summaryLabel)
                 .font(.system(size: 12))
-                .foregroundStyle(VolarColor.textMut)
+                .foregroundStyle(VolarColor.textSec)
+            Spacer()
+            if isSaveEnabled {
+                Text("Drag to reorder \u{00B7} click to edit")
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textMut)
+            }
         }
         .padding(.horizontal, 6)
+    }
+
+    private var summaryLabel: String {
+        switch appState.breakdownFetchState {
+        case .loaded(let steps) where !steps.isEmpty:
+            return "\(steps.count) sub-task\(steps.count == 1 ? "" : "s")"
+        default:
+            return " "
+        }
     }
 
     // MARK: - Actions
@@ -153,8 +227,8 @@ struct TaskBreakdownView: View {
         VStack(alignment: .trailing, spacing: 6) {
             HStack(spacing: 8) {
                 Button {
-                    // Real per-step editing lands with the AI-breakdown generator; for now, "Edit"
-                    // just dismisses like Cancel.
+                    // Real per-step editing lands with a later phase; for now, "Edit" just
+                    // dismisses like Cancel.
                     onClose()
                 } label: {
                     Text("Edit")
@@ -182,15 +256,12 @@ struct TaskBreakdownView: View {
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .volarHairline(cornerRadius: 9)
 
-                // FIX G: the 5 steps above are hard-coded sample content ("Open Framer", "Draft
-                // headline + subhead", ...) — this button used to persist them as real tasks via
-                // `onSave`/`AppState.saveBreakdown`, silently adding sample junk to the user's list
-                // regardless of which task's context menu opened this sheet. Disabled (with an
-                // explanatory caption below) until a real breakdown generator actually produces
-                // per-task steps; `AppState.saveBreakdown` itself is untouched so wiring this back
-                // up later is a one-line change (drop `.disabled`).
+                // Enabled ONLY once `breakdownFetchState == .loaded([...])` with real, non-empty
+                // steps (`isSaveEnabled`) — never on `.idle`/`.loading`/`.unavailable`/`.failed`.
+                // `onSave` forwards straight to `AppState.saveBreakdown(_:)`, unmodified, exactly
+                // the titles `fetchBreakdown` put in `loadedSteps` — never a hard-coded array.
                 Button {
-                    onSave(steps.map(\.label))
+                    onSave(loadedSteps.map(\.title))
                 } label: {
                     HStack(spacing: 8) {
                         Text("Save all as tasks")
@@ -205,11 +276,24 @@ struct TaskBreakdownView: View {
                 .background(accentColors.solid)
                 .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
                 .shadow(color: accentColors.glow, radius: 12, y: 4)
-                .disabled(true)
+                .disabled(!isSaveEnabled)
             }
-            Text("Breakdown generator coming soon")
-                .font(.system(size: 11))
-                .foregroundStyle(VolarColor.textMut)
+            // Only for the two states `stepsCard` above doesn't already narrate on its own
+            // ("Breaking it down…" during `.idle`/`.loading` would make this line redundant) —
+            // `.unavailable`/`.failed` get a second, action-oriented line here specifically.
+            if let caption = actionsCaption {
+                Text(caption)
+                    .font(.system(size: 11))
+                    .foregroundStyle(VolarColor.textMut)
+            }
+        }
+    }
+
+    private var actionsCaption: String? {
+        switch appState.breakdownFetchState {
+        case .unavailable: return "Turn on cloud parsing in Settings to generate real steps."
+        case .failed: return "Breakdown failed \u{2014} nothing was saved."
+        default: return nil
         }
     }
 }

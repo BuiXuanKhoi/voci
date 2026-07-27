@@ -285,6 +285,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// choice: it also tolerates `observeCaptureState()` firing before that assignment somehow did.
     private var capturePanelController: CapturePanelController?
 
+    /// ⌃⌥T's typed-capture popup — a SECOND, independent `CapturePanelController` instance hosting
+    /// `TextCaptureView` instead of `PopoverView` (`CapturePanel.swift`'s `init(content:)` no
+    /// longer hardcodes which view it hosts — see that file's header comment for the "two
+    /// instances, mutually exclusive by construction" note). Same lazy-construction reasoning as
+    /// `capturePanelController` above, driven by `observeTextCaptureState()`/`syncTextCapturePanel()`
+    /// below instead of `observeCaptureState()`/`syncCapturePanel()`.
+    private var textCapturePanelController: CapturePanelController?
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         // F1/F2 fix (MAJOR, liveness): `activateServices()` used to be reachable ONLY from the main
         // `Window`'s `.task` above, which never ran while the app launched with that window closed
@@ -326,6 +334,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // just above — this is what makes ⌃⌥M capture visible even while `Window("Volar")` is
         // closed (still reachable via ⌘W even though the window now opens at launch).
         observeCaptureState()
+        // ⌃⌥T typed-capture popup: same window-independent mirroring, off `appState.textCapture`
+        // instead of `appState.captureState` — see `observeTextCaptureState()`'s own doc comment.
+        observeTextCaptureState()
 
         // 2026-07-26: guarantee the main window is actually on screen at launch. Dropping
         // LSUIElement + declaring `Window` as the first scene in `VolarApp.body` SHOULD be enough
@@ -335,6 +346,42 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // already opened and fronted the window, `showMainWindow()` is a no-op re-front; if it
         // didn't, this is what puts it on screen.
         //
+        // 2026-07-27 (Task 1c, login-item feature): this call must be SKIPPED when the launch was
+        // not a normal, user-initiated one — most importantly, launching because Volar is now a
+        // real login item (`LoginItem.swift`/`SMAppService`). Nobody wants their desktop to open a
+        // window on top of everything else the instant they log in; a login launch should be as
+        // quiet as any other menu-bar-only launch used to be, with the menu bar (and Dock icon,
+        // clickable to reopen via `applicationShouldHandleReopen` below) as the way back in.
+        //
+        // `NSApplication.launchIsDefaultUserInfoKey` is Apple's own signal for exactly this:
+        // `notification.userInfo` carries `false` for launches that are NOT a normal user
+        // double-click/Dock-click/Spotlight open — Apple's header doc lists opening a file, a
+        // service invocation, being resumed, and (the case that matters here) being launched as a
+        // login item, as all reporting `false`. Defaulting to `true` when the key is absent errs
+        // toward the OLD behavior (window opens) rather than toward hiding it, since a missing key
+        // is far more likely to mean "this OS version doesn't bother setting it for a default
+        // launch" than "silently suppress the window nobody asked to suppress".
+        //
+        // // UNVERIFIED: not exercised on a real Mac — cannot confirm from Windows that
+        // `launchIsDefaultUserInfoKey` actually reports `false` for a login-item launch on macOS
+        // 14/15/26, or that AppKit populates `userInfo` at all by the time this delegate method
+        // fires. The failure mode is BENIGN either way: if the key doesn't report login launches
+        // as expected, `isDefaultLaunch` stays `true` and `showMainWindow()` runs exactly like it
+        // does today — i.e. NOT a regression, just this guard being a no-op. Must be verified on a
+        // real Mac (`docs/mac-verify-checklist.md`) before relying on it.
+        //
+        // RESIDUAL KNOWN GAP (also flagged in `docs/mac-verify-checklist.md`): `VolarApp.swift`'s
+        // scene order was deliberately changed on 2026-07-26 so the SwiftUI `Window` scene comes
+        // FIRST specifically so it opens automatically at launch. Suppressing this EXPLICIT
+        // `showMainWindow()` call may not be sufficient on its own to stop THAT SwiftUI-internal
+        // behavior from opening the window anyway on a login launch — SwiftUI's own "open the
+        // first scene at launch" logic is not something this delegate method controls or can
+        // observe. Whether an additional fix (e.g. closing the window immediately after it opens)
+        // is needed is a Mac-verify question; deliberately NOT adding a blind close()-after-the-
+        // fact hack here without first observing the real behavior.
+        let isDefaultLaunch = notification.userInfo?[NSApplication.launchIsDefaultUserInfoKey] as? Bool ?? true
+        guard isDefaultLaunch else { return }
+
         // Deferred one run-loop turn: SwiftUI may not have materialized the scene's NSWindow yet
         // at `applicationDidFinishLaunching` time, so looking for it synchronously here can find
         // nothing at all.
@@ -402,6 +449,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    /// ⌃⌥T typed-capture popup — same `withObservationTracking` re-arming pattern as
+    /// `observeCaptureState()` above (see that method's own doc comment for why re-subscribing
+    /// must happen from INSIDE the deferred `Task { @MainActor in ... }` hop rather than before
+    /// it — skip that and this fires exactly once, ever), just tracking `appState.textCapture`
+    /// instead of `appState.captureState`.
+    ///
+    /// Also re-runs `syncCapturePanel()` (not just `syncTextCapturePanel()`) on every change —
+    /// `syncCapturePanel()`'s mutual-exclusion guard below reads `appState.textCapture`, so the
+    /// voice panel's suppression needs re-evaluating whenever THAT value changes too, not only
+    /// when `captureState` itself does. Concretely: `openTextCapture()` can set
+    /// `textCapture = .editing` while `captureState` was already `.idle` (and therefore never
+    /// fires `observeCaptureState()`'s own tracking) — without this second call, the voice
+    /// panel's suppression would only ever get (re-)confirmed by whatever `captureState` happens
+    /// to do next, which is not guaranteed to happen promptly (or at all) for that transition.
+    private func observeTextCaptureState() {
+        withObservationTracking {
+            _ = appState?.textCapture
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.syncTextCapturePanel()
+                self?.syncCapturePanel()
+                self?.observeTextCaptureState()
+            }
+        }
+    }
+
     /// Lazily creates `capturePanelController` (see that property's doc comment for why lazy),
     /// then shows/refits or hides it to match the CURRENT `appState.captureState` — `.idle` hides,
     /// anything else shows (first time) or re-fits (already visible; see
@@ -409,11 +482,56 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func syncCapturePanel() {
         guard let appState else { return }
         if capturePanelController == nil {
-            capturePanelController = CapturePanelController(appState: appState)
+            capturePanelController = CapturePanelController(
+                content: AnyView(PopoverView().environment(appState))
+            )
         }
         guard let controller = capturePanelController else { return }
 
+        // MUTUAL EXCLUSION (self-review point 4, task brief): `AppState.confirmSave()` — the
+        // SAME method `AppState.submitTextCapture()` calls to reuse the voice save path — mutates
+        // `captureState` itself (`.saving`, then `.done` via `finishSaveUI`). Without this guard,
+        // a typed-capture save would make THIS method see a non-`.idle` `captureState` mid-save
+        // and show the voice popover for a save the user never triggered by voice.
+        // `appState.textCapture != .closed` is true for the ENTIRE duration the typed popup is
+        // open/saving/reporting an outcome (`AppState.openTextCapture()` through
+        // `cancelTextCapture()`/the post-save auto-dismiss), so it unconditionally wins over
+        // whatever `captureState` happens to be doing underneath — the voice panel simply never
+        // shows while the text popup owns the surface, regardless of how many times this method
+        // gets re-invoked (from either observer) during that window.
+        if appState.textCapture != .closed {
+            controller.hide()
+            return
+        }
+
         if appState.captureState == .idle {
+            controller.hide()
+        } else {
+            controller.presentOrRefit()
+        }
+    }
+
+    /// Lazily creates `textCapturePanelController` (see that property's doc comment), then
+    /// shows/refits or hides it to match the CURRENT `appState.textCapture` — mirrors
+    /// `syncCapturePanel()`'s own show/hide/refit split exactly, just against
+    /// `AppState.TextCaptureState.closed` instead of `AppState.CaptureState.idle`. Deliberately
+    /// has NO analogous "hide because the other surface owns it" guard the way `syncCapturePanel()`
+    /// does — `AppState.openTextCapture()` already tears the voice surface down (via
+    /// `cancelCapture()`) BEFORE ever setting `textCapture` to anything non-`.closed`, so by the
+    /// time this method could show the text panel, there is nothing left on the voice side to
+    /// race against (the reverse direction, voice winning back the surface, is `cancelTextCapture()`
+    /// via `AppState.handleHotkey()`, which flips `textCapture` back to `.closed` and this method
+    /// hides the panel exactly like any other close).
+    private func syncTextCapturePanel() {
+        guard let appState else { return }
+        if textCapturePanelController == nil {
+            textCapturePanelController = CapturePanelController(
+                content: AnyView(TextCaptureView().environment(appState))
+            )
+        }
+        guard let controller = textCapturePanelController else { return }
+
+        if appState.textCapture == .closed {
             controller.hide()
         } else {
             controller.presentOrRefit()
