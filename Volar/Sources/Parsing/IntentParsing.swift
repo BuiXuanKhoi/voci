@@ -148,11 +148,19 @@ final class IntentRouter: IntentParser {
             ? Array(openTaskTitles.prefix(100))
             : []
 
+        // Read once per `parse` call (not once per tier) so both tiers below see the exact same
+        // number even if a Settings write races between them — negligible in practice, but this is
+        // the cheap-and-correct way to write it either way.
+        let defaultDurationMinutes = Self.currentDefaultDurationMinutes()
+
         if let fm {
             let result = await fm.parse(transcript, now: now, openTaskTitles: titles)
             if !result.isEmpty {
                 lastRoute = .foundationModel
-                return Self.cap(result)
+                // `applyStartTimeDerivation` runs here AND at the Cloud return below — same
+                // static function, one implementation, so the two tiers can never diverge on this
+                // rule (see the function's own doc comment for the full rationale).
+                return Self.applyStartTimeDerivation(Self.cap(result), defaultMinutes: defaultDurationMinutes)
             }
         }
 
@@ -160,7 +168,7 @@ final class IntentRouter: IntentParser {
             switch await cloud.parseDetailed(transcript, now: now, openTaskTitles: titles) {
             case .tasks(let tasks) where !tasks.isEmpty:
                 lastRoute = .cloud
-                return Self.cap(tasks)
+                return Self.applyStartTimeDerivation(Self.cap(tasks), defaultMinutes: defaultDurationMinutes)
             case .tasks:
                 break // decoded but empty — fall through same as any other Cloud non-result
             case .quotaExceeded:
@@ -259,6 +267,119 @@ final class IntentRouter: IntentParser {
             && steps.allSatisfy { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
+    // MARK: - Default task duration setting (2026-07-29)
+    //
+    // anh Khôi chốt 2026-07-29: "cái 30ph là estimate trong setting của user ... task cứ default
+    // lấy từ setting ra cho duration task" — the 30-minute figure `applyStartTimeDerivation` below
+    // used to hard-code is now a real user-configurable `AppState.defaultTaskDurationMinutes`
+    // setting, read here via the same "non-`@MainActor`-reachable static helper reads `UserDefaults`
+    // directly" seam `ReminderScheduler.currentGlobalReminderPolicy()` (`Sources/Reminders/
+    // ReminderScheduler.swift`) already established for the identical problem (a Settings value
+    // `AppState` owns, needed from a call site with no frozen init parameter to thread it through).
+
+    /// Reads the user's default-task-duration setting straight out of `UserDefaults`. Reads
+    /// `AppState.defaultTaskDurationMinutesKey` BY NAME, never a duplicated string literal, so this
+    /// and `AppState`'s own read in `init` can never drift onto two different keys. Same 5...480
+    /// bound and same 30-minute fallback as `AppState.setDefaultTaskDurationMinutes` — including the
+    /// `UserDefaults.integer(forKey:)` returns-`0`-for-an-absent-key trap that bound also guards
+    /// against.
+    nonisolated static func currentDefaultDurationMinutes() -> Int {
+        let stored = UserDefaults.standard.integer(forKey: AppState.defaultTaskDurationMinutesKey)
+        return (5...480).contains(stored) ? stored : 30
+    }
+
+    // MARK: - Emergency-utterance deadline derivation (2026-07-28)
+    //
+    // anh Khôi chốt 2026-07-28: no new "emergency" task kind/flag. Instead, for an urgent
+    // utterance ("làm task disposition code ngay lập tức") both the Cloud (Gemini) and on-device
+    // tiers report `priority: 1`, `startTime` = "right now", and DELIBERATELY omit `deadline` (see
+    // `supabase/functions/_shared/gemini.ts`'s prompt and this file's `FoundationModelParser`
+    // prompt rules — never invent a deadline the user didn't imply). Every other part of the app
+    // (sort order, reminders, the confirm card's deadline chip) keys off `deadline`, not
+    // `startTime` — this function bridges that gap by deriving a PROVISIONAL deadline so a
+    // startTime-only task still behaves like every other task downstream, without ever inventing
+    // one for a task that already has a real, user-stated deadline.
+    nonisolated static func applyStartTimeDerivation(
+        _ tasks: [ParsedTask], defaultMinutes: Int = 30
+    ) -> [ParsedTask] {
+        tasks.map { task in
+            // Only derive when there IS a startTime AND there is NOT already a deadline — a task
+            // that states both ("làm ngay, 5 giờ chiều phải xong" -> startTime = now AND
+            // deadline = 17:00) keeps its user-stated deadline completely untouched (constitution
+            // II: never overwrite/second-guess what the user actually said).
+            guard let startTime = task.startTime, task.deadline == nil else { return task }
+
+            // `estimateMinutes` wins over the default when the model/user also gave a duration
+            // estimate for the task ("ngay lập tức, chắc mất 45 phút" -> startTime + 45', not the
+            // flat 30' default). `ParsedTask.estimateMinutes` is `ParsedValue<Int>?` (confirmed by
+            // reading `NLParser.swift`'s `ParsedTask` declaration) — `.value` is already an `Int`
+            // of minutes, no unit conversion needed here.
+            let minutes = task.estimateMinutes?.value ?? defaultMinutes
+
+            // `Calendar.current.date(byAdding: .minute, value:, to:)` — never raw `TimeInterval`
+            // second-math (`startTime.value.addingTimeInterval(Double(minutes) * 60)` would also
+            // work numerically today, but adding via `Calendar` is the deliberate, DST-safe choice
+            // per this task's instruction). Foundation's contract allows this to return `nil`
+            // (calendrical overflow); on `nil` the task is returned completely unmodified rather
+            // than crashing or fabricating a deadline from a failed computation.
+            guard let derivedDeadline = Calendar.current.date(
+                byAdding: .minute, value: minutes, to: startTime.value
+            ) else {
+                return task
+            }
+
+            var derived = task
+            // 2026-07-29, anh Khôi chốt — REVERSED from this function's original design, on
+            // purpose, so read this before touching either number below:
+            //
+            // This confidence used to be a deliberately LOW 0.35 — well under `ParsedValue.
+            // isUncertain`'s `confidence < 0.7` threshold (`Sources/Model/NLParser.swift:25`) — so
+            // the confirm card's deadline chip rendered dashed and required an explicit accept tap
+            // before the derived deadline would ever commit, exactly like any other low-confidence
+            // attribute (constitution II: never silently commit a guess).
+            //
+            // That was tried, and it broke the very feature it belongs to: `AppState.resolvedValue`
+            // (`Sources/App/AppState.swift`, ~line 3208) drops any `ParsedValue` below 0.7 unless the
+            // user explicitly taps to accept it. So a user who said "làm task X ngay lập tức" and
+            // then just hit Save — the entire point of an "urgent" utterance being fast — got a task
+            // persisted with `deadline == nil`: it never sorted to the top, never got a reminder,
+            // never did the one thing this feature exists to do. Requiring an extra confirm tap
+            // defeats "ngay lập tức" as thoroughly as fabricating the deadline silently would have.
+            //
+            // Fix: 0.75 — ABOVE the 0.7 bar, so this auto-commits on a plain Save with zero extra
+            // taps — plus `deadlineIsEstimated = true` on the task (see that field's own doc comment
+            // in `NLParser.swift`), which is the explicit, separate signal `PopoverView.
+            // DeadlineControl` uses to still label the chip as a guess (e.g. "· est") without gating
+            // it behind an accept. 0.75, not 1.0: this is still a machine estimate, not something the
+            // user said — if a future caller ever needs to distinguish "fully certain" from "quite
+            // sure, but a guess," 0.75 already tells that story; 1.0 would falsely claim the former.
+            //
+            // DO NOT drop this back below 0.7 without also re-solving the `resolvedValue` interaction
+            // above — that combination is exactly what silently broke the feature the first time.
+            derived.deadline = ParsedValue(value: derivedDeadline, confidence: 0.75)
+            derived.deadlineIsEstimated = true
+
+            // 2026-07-29, anh Khôi chốt: also fill in `estimateMinutes` itself when the model/user
+            // never gave one — this is the "duration" half of the same setting (`AppState.
+            // defaultTaskDurationMinutes`), not a second, independent number. Deliberately the SAME
+            // 0.75 confidence as `deadline` right above (not the low, pre-reversal confidence this
+            // function used to use — see that comment block) for the identical reason: below 0.7,
+            // `AppState.resolvedValue` (`Sources/App/AppState.swift`, ~line 3206) drops any
+            // unaccepted `ParsedValue`, so a plain Save would persist the derived deadline but leave
+            // `TaskItem.durationMinutes` empty — the estimate chip and the deadline chip would then
+            // disagree about how long the task takes, exactly the confusion this single-setting
+            // design exists to prevent. When the model/user DID supply an estimate, `minutes` above
+            // already equals that value and this branch is skipped entirely — `task.estimateMinutes`
+            // (with its own original confidence) is preserved completely untouched, per this
+            // function's existing "never second-guess what was already stated" rule.
+            if task.estimateMinutes == nil {
+                derived.estimateMinutes = ParsedValue(value: minutes, confidence: 0.75)
+            }
+
+            return derived
+        }
+    }
+
     /// The absolute floor: a task with only a title (the source transcript, trimmed) and the
     /// transcript retained verbatim. Never crashes, never discards.
     nonisolated static func titleOnlyTask(_ transcript: String) -> ParsedTask {
@@ -267,6 +388,7 @@ final class IntentRouter: IntentParser {
             title: trimmed.isEmpty ? transcript : trimmed,
             notes: nil,
             deadline: nil,
+            startTime: nil,
             estimateMinutes: nil,
             priority: nil,
             reminderOverride: nil,
@@ -351,6 +473,12 @@ struct RawParsedTask: Sendable {
     var notes: RawConfidence<String>?
     /// ISO8601 string.
     var deadline: RawConfidence<String>?
+    /// ISO8601 string. The instant the speaker begins WORKING on the task (distinct from
+    /// `deadline`, the instant it must be DONE) — only ever emitted for urgent/"do it right now"
+    /// phrasing where the server/on-device model reports `priority: 1` and no `deadline` of its
+    /// own; `IntentRouter.applyStartTimeDerivation` derives a provisional `deadline` from this
+    /// (2026-07-28, anh Khôi chốt: no new task "kind"/flag for this — just this one extra field).
+    var startTime: RawConfidence<String>?
     var estimateMinutes: RawConfidence<Double>?
     var priority: RawConfidence<Int>?
     var recurrence: RawConfidence<RawParsedRecurrence>?
@@ -365,6 +493,7 @@ struct RawParsedTask: Sendable {
         title: RawConfidence<String>,
         notes: RawConfidence<String>? = nil,
         deadline: RawConfidence<String>? = nil,
+        startTime: RawConfidence<String>? = nil,
         estimateMinutes: RawConfidence<Double>? = nil,
         priority: RawConfidence<Int>? = nil,
         recurrence: RawConfidence<RawParsedRecurrence>? = nil,
@@ -377,6 +506,7 @@ struct RawParsedTask: Sendable {
         self.title = title
         self.notes = notes
         self.deadline = deadline
+        self.startTime = startTime
         self.estimateMinutes = estimateMinutes
         self.priority = priority
         self.recurrence = recurrence
@@ -438,6 +568,15 @@ enum ParsedTaskValidation {
         }
 
         let deadline: ParsedValue<Date>? = raw.deadline.flatMap { c in
+            guard validConfidence(c.confidence), let date = parseISO8601(c.value) else { return nil }
+            return ParsedValue(value: date, confidence: c.confidence)
+        }
+
+        // `startTime` goes down the EXACT same path as `deadline` above (same `validConfidence` +
+        // `parseISO8601` helpers) — per-attribute fallback (constitution II / this enum's own doc
+        // comment): a malformed `startTime` (bad ISO8601 string, or confidence outside 0...1) drops
+        // ONLY this field, never the rest of the task.
+        let startTime: ParsedValue<Date>? = raw.startTime.flatMap { c in
             guard validConfidence(c.confidence), let date = parseISO8601(c.value) else { return nil }
             return ParsedValue(value: date, confidence: c.confidence)
         }
@@ -530,6 +669,7 @@ enum ParsedTaskValidation {
             title: title,
             notes: notes,
             deadline: deadline,
+            startTime: startTime,
             estimateMinutes: estimateMinutes,
             priority: priority,
             reminderOverride: reminderOverride,

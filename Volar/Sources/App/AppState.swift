@@ -145,6 +145,57 @@ enum ChipKind: String, CaseIterable, Hashable, Sendable {
     /// every other attribute, defaulting ON (dismissing it is the exception, not the rule) but
     /// removable before Save.
     case followUpReview
+    /// T-disposition (2026-07-28, "làm ngay lập tức" / urgent-task disposition): `ParsedTask.
+    /// startTime` — the instant the user said they'd START, as opposed to `.deadline` (when it's
+    /// DUE). Same dismissible/uncertain-gated chip shape as every other scalar attribute above; see
+    /// `TaskItem.startTime`'s own doc comment for why this is deliberately inert (never drives
+    /// ordering/eligibility/reminders on its own — that's still `.deadline`'s job).
+    case startTime
+}
+
+/// T-overdue (2026-07-28, confirm-card overdue nudge): the confirm card's client-side,
+/// deterministic answer to "did the parser hand back a deadline that's already in the past AT
+/// CAPTURE TIME" (e.g. "submit the report this morning" said at 3pm) — a plain `Date` comparison,
+/// never a model call; the server side is separately instructed to return exactly the instant the
+/// user said (never to silently push a spoken-past time into the future itself), so detecting
+/// "did that instant already pass" is this app's job, not the parser's. `originalDeadline` is
+/// `ParsedTask.deadline`'s raw value at the moment this was computed; `suggestedDeadline` is
+/// `originalDeadline` moved forward by whole calendar day(s) — never a raw 86_400-second add,
+/// which would land an hour off across a DST boundary — until it clears "now" (see
+/// `OverdueSuggestion.makeIfOverdue` below for the exact loop + its hard cap). This is a SUGGESTION
+/// only: constitution II forbids ever moving a deadline without an explicit tap, so nothing reads
+/// `suggestedDeadline` unless the user acts on it via `AppState.applyOverdueSuggestion`.
+struct OverdueSuggestion: Equatable, Sendable {
+    let originalDeadline: Date
+    let suggestedDeadline: Date
+
+    /// Pure, deterministic, and `static` so it's directly unit-testable without constructing an
+    /// `AppState`/`ConfirmDraft` at all (this task's own test guidance) — the ONE place this
+    /// task's whole "was this overdue, and what's a sane fix" logic lives; `AppState.
+    /// buildConfirmDrafts` just calls it. Calendar-DAY arithmetic, not a raw 86_400-second add:
+    /// adding seconds crosses a DST boundary an hour off in any timezone that observes one;
+    /// `Calendar.date(byAdding: .day, value: 1, to:)` preserves the wall-clock time of day across
+    /// that boundary instead (self-review "correctness"). A deadline that's several days in the
+    /// past — a stale transcript re-parsed days later, or "last Monday" said today — may STILL be
+    /// in the past after just +1 day, so this walks forward a day at a time until the candidate
+    /// clears `now`, capped at 366 iterations (a little over a year) so a corrupt/adversarial
+    /// deadline can never spin this loop forever (self-review "client-exploit"). Returns `nil`
+    /// when there's no deadline, the deadline is already in the future (the common case — no
+    /// nudge needed), `Calendar.date(byAdding:...)` returns `nil` (should not happen for `.day`,
+    /// but its `Optional` is never force-unwrapped), or the cap is hit without ever clearing `now`
+    /// — all three mean "no sane suggestion to offer," never a crash or a still-wrong suggestion.
+    static func makeIfOverdue(deadline: Date?, now: Date, calendar: Calendar = .current) -> OverdueSuggestion? {
+        guard let deadline, deadline < now else { return nil }
+        var candidate = deadline
+        for _ in 0..<366 {
+            guard let next = calendar.date(byAdding: .day, value: 1, to: candidate) else { return nil }
+            candidate = next
+            if candidate >= now {
+                return OverdueSuggestion(originalDeadline: deadline, suggestedDeadline: candidate)
+            }
+        }
+        return nil
+    }
 }
 
 /// One confirmed task's editable confirm-card state, layered OVER a router-parsed `ParsedTask`
@@ -202,6 +253,31 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// every other chip on this card — see `PopoverView.conflictAdvisoryRow`). Never re-surfaces
     /// within this confirm session; recording again starts fresh, same as every other draft field.
     var conflictDismissed: Bool = false
+    /// T-overdue: computed ONCE, at the same time and for the same reason as `conflicts`/
+    /// `duplicateCandidates` right above and below — never recomputed per chip edit (self-review
+    /// "performance": re-deriving this on every keystroke would mean re-running `OverdueSuggestion.
+    /// makeIfOverdue`'s `Calendar` math on every render for no reason, since the answer to "was
+    /// this already overdue when the confirm card first appeared" cannot change mid-session — only
+    /// the user's own action, `applyOverdueSuggestion`, ever changes it, and that clears it
+    /// directly rather than re-deriving it). `nil` means either there is no deadline at all, or the
+    /// deadline was still in the future at capture time — `PopoverView.overdueAdvisoryRow` renders
+    /// nothing in either case.
+    var overdueSuggestion: OverdueSuggestion?
+    /// User tapped the overdue advisory row's text (not its "Move to tomorrow" action) to dismiss
+    /// it — same one-way, never-re-surfaces-this-session convention as `conflictDismissed` above.
+    /// Deliberately independent of `dismissed.contains(.deadline)`: dismissing the deadline CHIP
+    /// itself already hides this row too (see `PopoverView.overdueAdvisoryRow`'s render guard), so
+    /// this field only needs to cover "I saw the nudge, I don't want it" without touching the chip.
+    var overdueDismissed: Bool = false
+    /// User-edited deadline, written only by `AppState.applyOverdueSuggestion` today. `nil` until
+    /// the user actually taps "Move to tomorrow" — mirrors `editedTitle`/`effectiveTitle` below
+    /// EXACTLY: `ParsedTask` stays exactly what the parser/router produced, never mutated in place;
+    /// every edit lives in this draft layer overlaid on top instead (same "never mutated in place"
+    /// contract `editedTitle`'s own doc comment documents). Named/shaped generally (a `Date?`, not
+    /// an "overdue-fix-only" type) so a future free-form deadline picker could reuse this same
+    /// field rather than needing a second one — `applyOverdueSuggestion` just happens to be its
+    /// only writer today.
+    var editedDeadline: Date?
     /// 2026-07-28 (confirm-list data layer, Việc 3): up to 3 already-persisted tasks whose title
     /// looks like it might BE this same task, worth surfacing so the user can say "oh, I already
     /// have that" instead of ending up with two rows for the same thing. Computed EXACTLY ONCE,
@@ -247,6 +323,47 @@ struct ConfirmDraft: Identifiable, Equatable {
             .joined(separator: " ")
         let trimmed = flattened.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? task.title : trimmed
+    }
+    /// The deadline actually resolved and saved: `editedDeadline` if the user has set one — via
+    /// the overdue nudge's "Move to tomorrow" (`applyOverdueSuggestion`) OR a direct manual edit
+    /// through the confirm card's `DatePicker` (`AppState.setDraftDeadline`, T-edit-deadline
+    /// 2026-07-28 — the SAME write path whether the draft already had a deadline or had none at
+    /// all) — else the parser's original `task.deadline`. Same "draft layer overlays the frozen
+    /// parse" shape `effectiveTitle` above already establishes. Confidence is pinned to `1.0`
+    /// (never inherited from `task.deadline`'s own confidence) whenever `editedDeadline` is set:
+    /// the user explicitly choosing that exact instant — whether by tapping a suggestion or
+    /// picking a time by hand — IS full confidence by definition, and anything less would let it
+    /// fall into `ChipKind.deadline`'s "<0.7 needs an explicit accept" gate (`resolvedValue`) —
+    /// silently requiring a SECOND tap on the deadline chip before an already-explicit user edit
+    /// actually saves, which would make the edit a lie. `AppState.confirmSave`/`materialize`/
+    /// `mergeTransform` (and `PopoverView`'s deadline chip) all read the deadline through THIS
+    /// property, never `task.deadline` directly, specifically so any edit takes effect everywhere
+    /// the original value used to be read (self-review "save path" — see this task's final report
+    /// for the full call-site audit).
+    var effectiveDeadline: ParsedValue<Date>? {
+        if let editedDeadline {
+            return ParsedValue(value: editedDeadline, confidence: 1.0)
+        }
+        return task.deadline
+    }
+    /// User-edited notes/description from the confirm card's notes editor
+    /// (`PopoverView.notesEditor`, T-edit-notes 2026-07-28 — anh Khôi: users need to fix a
+    /// misheard/misparsed description right on the card, not just the title). `nil` until the
+    /// user actually types something — same "overlay, never mutate `ParsedTask`" contract
+    /// `editedTitle` documents above; written through `AppState.updateDraftNotes(_:forDraft:)`.
+    var editedNotes: String?
+    /// The notes actually saved: the user's edit if there is one and it isn't blank after
+    /// trimming, else the parser's original `task.notes` — same fallback shape as `effectiveTitle`
+    /// above, with ONE deliberate difference: newlines are NOT flattened here. A task title is
+    /// conceptually single-line (it only wraps for display), but notes/description is genuinely
+    /// multi-line free text — a grocery list or a set of instructions someone dictated is exactly
+    /// the kind of note where line breaks are part of the content, not an artifact of the text
+    /// field wrapping. Only the ENDS are trimmed (leading/trailing whitespace/newlines from
+    /// however the field left focus), never anything in the middle.
+    var effectiveNotes: String? {
+        guard let editedNotes else { return task.notes }
+        let trimmed = editedNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? task.notes : trimmed
     }
 }
 
@@ -398,6 +515,14 @@ final class AppState {
     private(set) var voiceDeliveryMode: VoiceDeliveryMode
     /// Persisted (`globalReminderPolicyKey`); default `ReminderPolicy.defaultPolicy`.
     private(set) var globalReminderPolicy: ReminderPolicy
+    /// Persisted (`defaultTaskDurationMinutesKey`); default `30`. anh Khôi chốt 2026-07-29: ONE
+    /// setting doing two jobs — the `estimateMinutes` a task gets when the model/user didn't give
+    /// one, AND the number of minutes added to `startTime` to derive a deadline for an urgent,
+    /// no-deadline utterance (`IntentRouter.applyStartTimeDerivation`). Same number both places on
+    /// purpose, so the confirm card's estimate chip and its deadline chip can never disagree about
+    /// how long the task is meant to take. Valid range 5...480 minutes — see `setDefaultTaskDurationMinutes`
+    /// and this property's `init` read below for why out-of-range/absent values fall back to 30.
+    private(set) var defaultTaskDurationMinutes: Int
     /// FR-018 weekly triage: task id -> instant last explicitly "kept" via `triageKeep(_:)`, so
     /// `staleTasks` doesn't immediately re-offer something the user just decided to keep. Falls
     /// back to `createdAt` for any task never explicitly kept (best available staleness proxy —
@@ -685,6 +810,14 @@ final class AppState {
     /// Same seam as above, for the global default `ReminderPolicy` (used when a task has no
     /// `reminderOverride`) — JSON-encoded `ReminderPolicy` (`Recurrence.swift`).
     static let globalReminderPolicyKey = "volar.globalReminderPolicy"
+    /// Same seam as `globalReminderPolicyKey` above, one level down (2026-07-29): `internal`, NOT
+    /// `private` — `IntentRouter.currentDefaultDurationMinutes()` (`Sources/Parsing/
+    /// IntentParsing.swift`) reads this exact key directly (no frozen init parameter to thread a
+    /// value through, same reasoning as `voiceDeliveryModeKey`'s doc comment above). Referenced BY
+    /// NAME from that file (`AppState.defaultTaskDurationMinutesKey`) rather than a duplicated
+    /// string literal, so the two sides can never drift apart — see `IntentParsing.swift` for the
+    /// read side.
+    static let defaultTaskDurationMinutesKey = "volar.defaultTaskDurationMinutes"
     /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
     /// file; no sibling reads this one.
     private static let triageKeptAtKey = "volar.triageKeptAt"
@@ -778,6 +911,12 @@ final class AppState {
         } else {
             self.globalReminderPolicy = .defaultPolicy
         }
+        // `UserDefaults.integer(forKey:)` returns `0` for a key that has never been set — that is
+        // NOT the same claim as "the user chose 0 minutes" (0 isn't even in the valid 5...480
+        // range), so a missing key and a corrupted/out-of-range stored value both fall back to the
+        // same 30-minute default rather than persisting/using 0.
+        let storedDuration = UserDefaults.standard.integer(forKey: Self.defaultTaskDurationMinutesKey)
+        self.defaultTaskDurationMinutes = (5...480).contains(storedDuration) ? storedDuration : 30
         if let raw = UserDefaults.standard.dictionary(forKey: Self.triageKeptAtKey) as? [String: Double] {
             self.triageKeptAt = raw.reduce(into: [:]) { partial, pair in
                 guard let id = UUID(uuidString: pair.key) else { return }
@@ -2376,6 +2515,13 @@ final class AppState {
         drafts = preResolveConditions(drafts, openTasks: existingTasks)
         for i in drafts.indices {
             drafts[i].conflicts = computeConflicts(for: drafts[i], now: conflictNow)
+            // T-overdue: same "computed once, against the shared `conflictNow` clock read" rule
+            // as `conflicts` immediately above — reusing `conflictNow` (rather than a fresh
+            // `clock()`/`Date()` call here) keeps every draft in a multi-task batch scored against
+            // the exact same "now" instant, same reasoning `conflictNow`'s own doc comment gives.
+            drafts[i].overdueSuggestion = OverdueSuggestion.makeIfOverdue(
+                deadline: drafts[i].task.deadline?.value, now: conflictNow
+            )
         }
         return drafts
     }
@@ -2636,6 +2782,31 @@ final class AppState {
         confirmDrafts[index].conflictDismissed = true
     }
 
+    /// T-overdue: the overdue advisory row's ONE tap-to-act affordance ("Move to tomorrow HH:mm",
+    /// `PopoverView.overdueAdvisoryRow`) — writes `editedDeadline`, never `task.deadline` directly
+    /// (see that field's own doc comment), so `effectiveDeadline` — and everything that reads
+    /// through it (`confirmSave`/`materialize`/`mergeTransform`/`computeConflicts`/the deadline
+    /// chip) — picks up the new instant. Clears `overdueSuggestion` right after so the advisory
+    /// row disappears once acted on (there's nothing left to suggest — the deadline IS the
+    /// suggestion now). Deliberately does NOT touch `dismissed`/`overdueDismissed`: constitution II
+    /// says dismiss always wins, and there is no dismiss here to "undo" — if the deadline CHIP
+    /// itself was already dismissed, `PopoverView.overdueAdvisoryRow`'s own render guard keeps this
+    /// row hidden regardless of what this method does to `overdueSuggestion`.
+    func applyOverdueSuggestion(forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }),
+              let suggestion = confirmDrafts[index].overdueSuggestion
+        else { return }
+        confirmDrafts[index].editedDeadline = suggestion.suggestedDeadline
+        confirmDrafts[index].overdueSuggestion = nil
+    }
+
+    /// T-overdue: dismisses the overdue advisory row WITHOUT changing the deadline — same one-way,
+    /// never-re-surfaces-this-session convention as `dismissConflictAdvisory` immediately above.
+    func dismissOverdueSuggestion(forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].overdueDismissed = true
+    }
+
     /// The confirm card's editable title `TextField` (`PopoverView.taskDraftCard`) calls this on
     /// every keystroke. `ConfirmDraft` is a VALUE type (`struct`, unlike the Windows port's
     /// `ConfirmDraft` class) — mutating a local copy of the draft would silently lose the edit the
@@ -2647,6 +2818,30 @@ final class AppState {
     func updateDraftTitle(_ title: String, forDraft draftID: ConfirmDraft.ID) {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].editedTitle = title
+    }
+
+    /// T-edit-deadline (2026-07-28, anh Khôi: manual in-place time edit on the confirm card): the
+    /// deadline `DatePicker`'s (`PopoverView.DeadlineControl`) write side — sets `editedDeadline`,
+    /// never `task.deadline` directly, same "never mutate the parser's `ParsedTask`" contract
+    /// `updateDraftTitle` above already follows for the title. Works identically whether the draft
+    /// already had a deadline (editing it) or had none at all (`DeadlineControl`'s "Add time"
+    /// affordance) — either way this is the ONLY write path, so `effectiveDeadline` picks it up
+    /// the same way in both cases; there is no separate "first time" branch to keep in sync.
+    func setDraftDeadline(_ date: Date, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedDeadline = date
+    }
+
+    /// T-edit-notes (2026-07-28, same request as `setDraftDeadline` above): the notes editor's
+    /// write side, same value-type/array-mutation-trap reasoning `updateDraftTitle`'s own doc
+    /// comment already gives (`confirmDrafts[index]`, never a local copy). Deliberately does NOT
+    /// trim/flatten here — `effectiveNotes` (see `ConfirmDraft`) is where that normalization
+    /// happens, exactly once, at read time; storing the raw in-progress text here (including a
+    /// trailing newline mid-edit) is what lets a multi-line `TextField`/`TextEditor` keep working
+    /// normally while the user is still typing.
+    func updateDraftNotes(_ notes: String, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedNotes = notes
     }
 
     /// Constitution V / FR-044: every chip edit is logged locally (never egressed) as the signal
@@ -2674,6 +2869,7 @@ final class AppState {
         case .recurrence: return task.recurrence.map { "\($0.value)" } ?? ""
         case .kind: return task.kind.rawValue
         case .followUpReview: return "\(task.followUpReview)"
+        case .startTime: return task.startTime.map { "\($0.value)" } ?? ""
         case nil: return "" // condition corrections describe themselves via `attribute`
         }
     }
@@ -2911,8 +3107,16 @@ final class AppState {
     /// accepted if uncertain — the SAME gate a brand-new task's `materialize(_:id:now:)` already
     /// applies) — `nil` from `resolvedValue` here means "this utterance said nothing about this
     /// attribute," so the existing task's value is left exactly as it was, never cleared. Anh Khôi
-    /// deliberately did NOT ask for title/kind/notes to be touched by a merge, so this leaves those
-    /// alone. Conditions are UNIONED (de-duplicated), never replaced — anh Khôi: "có thể merge tất
+    /// deliberately did NOT ask for `title`/`kind` to be touched by a merge, so this leaves those
+    /// alone — merging `title` would mean renaming an already-existing task, a different and
+    /// unrequested feature. `notes` is DIFFERENT (anh Khôi chốt 2026-07-29): it used to sit in this
+    /// same "left alone" group, but that was only ever true because notes couldn't be edited on the
+    /// confirm card at all — once T-edit-notes (2026-07-28) added `PopoverView.NotesEditorControl`,
+    /// picking "use existing" + typing a note started silently discarding whatever the user just
+    /// typed on Save, with no warning. So `notes` now merges too, via `mergeNotesAppending` below —
+    /// see that function's own doc comment for why it APPENDS rather than overwrites like every
+    /// scalar attribute in this method, and why it writes through to `details` as well as `notes`.
+    /// Conditions are UNIONED (de-duplicated), never replaced — anh Khôi: "có thể merge tất
     /// cả condition vào" — intra-batch `.taskDone` entries are excluded from this union on purpose
     /// (same as a brand-new task, `resolvedConditions` never includes them) since they're attached
     /// separately, after every draft's real/merge-target id is known (`confirmSave`'s second pass).
@@ -2925,8 +3129,22 @@ final class AppState {
         // `[weak self]` would only add an optional to unwrap on a path that cannot outlive `self`.
         { [self] existing in
             var merged = existing
-            if let deadline = resolvedValue(draft.task.deadline, kind: .deadline, draft: draft) {
+            // T-overdue (self-review "save path"): reads through `effectiveDeadline`, NOT
+            // `draft.task.deadline` directly — a merge that resolved from a "Move to tomorrow" tap
+            // must carry the EDITED deadline into the existing task, same as a brand-new task's
+            // `materialize` below.
+            if let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft) {
                 merged.deadline = deadline
+            }
+            // T-disposition (self-review "save path"): `startTime` is a SCALAR overlay, same shape
+            // as `deadline`/`priority`/`estimate`/`reminder`/`recurrence` right around it — NOT in
+            // the title/kind group this method's own doc comment says anh Khôi deliberately
+            // excluded from merges. It's a plain "when did they mean to start" instant, not
+            // free-text authorship, so it follows the scalar convention: present, not dismissed,
+            // and confident (or explicitly accepted) overwrites the existing task's value exactly
+            // like every other attribute here.
+            if let startTime = resolvedValue(draft.task.startTime, kind: .startTime, draft: draft) {
+                merged.startTime = startTime
             }
             if let priorityRaw = resolvedValue(draft.task.priority, kind: .priority, draft: draft) {
                 merged.priority = Self.uiPriority(from: priorityRaw)
@@ -2940,11 +3158,61 @@ final class AppState {
             if let recurrence = resolvedValue(draft.task.recurrence, kind: .recurrence, draft: draft) {
                 merged.recurrence = recurrence
             }
+            // T-notes-merge (self-review "save path", anh Khôi chốt 2026-07-29): notes APPEND
+            // rather than overwrite — the one deliberate exception to every scalar attribute
+            // above. Base is `existing.notes` (not `existing.details`): `materialize` always
+            // writes the SAME `effectiveNotes` value into both fields whenever the user actually
+            // authored a note, so `existing.notes == existing.details` in that case and either
+            // would do; but when a task has never had a real note, `existing.notes` is `nil`
+            // while `existing.details` may still hold the sourceTranscript read-back copy
+            // `materialize` falls back to for brand-new tasks — that fallback text is filler, not
+            // authorship, so `notes` (the one field that is `nil` unless a human actually typed
+            // something) is the correct "does this already have a real note" signal to append
+            // onto. The result is written to BOTH fields so they stay in the same lockstep
+            // `materialize` established — `details` is what `TaskDetailView`/`speakDetails`
+            // actually show the user, so writing only `notes` would merge data nobody ever sees.
+            if let mergedNotes = Self.mergeNotesAppending(existing: existing.notes, incoming: draft.effectiveNotes) {
+                merged.notes = mergedNotes
+                merged.details = mergedNotes
+            }
             for condition in resolvedConditions(draft) where !merged.conditions.contains(condition) {
                 merged.conditions.append(condition)
             }
             return merged
         }
+    }
+
+    /// Combines an existing (already-persisted) task's notes with a confirm draft's incoming
+    /// notes for a merge-into-existing save — pure so it can be unit-tested directly without
+    /// standing up an `AppState`/`ConfirmDraft` (see `mergeTransform` above for the one call site
+    /// and the reasoning for why `notes` appends here while every OTHER attribute in that method
+    /// overwrites). Intentionally `internal`, not `private`, for exactly that direct testability —
+    /// every other helper around it is `private` because nothing needs to reach them from outside
+    /// `mergeTransform`; this one is the deliberate exception.
+    ///
+    /// Returns `nil` — "leave `notes`/`details` exactly as they are" — when:
+    ///   - `incoming` is `nil`, or blank after trimming (the most common case: the user never
+    ///     touched the notes field on this draft at all, so `ConfirmDraft.effectiveNotes` is
+    ///     whatever the parser produced or nothing; either way there is nothing new to add).
+    ///   - `incoming` (trimmed) is already contained verbatim inside `existing` (trimmed) — most
+    ///     often because the two are flatly equal (the user re-typed something very close to what
+    ///     was already there), but a substring match is caught too so re-reading back a fragment
+    ///     of a longer existing note doesn't duplicate it either.
+    /// Otherwise returns the combined text: `existing` verbatim if there was none (or it was
+    /// blank), else `existing` + `"\n"` + `incoming`, both trimmed of only their leading/trailing
+    /// whitespace — same "trim ends, keep internal newlines" contract `ConfirmDraft.effectiveNotes`
+    /// already documents, so a multi-line existing note is never mangled by this concatenation.
+    static func mergeNotesAppending(existing: String?, incoming: String?) -> String? {
+        guard let incoming else { return nil }
+        let trimmedIncoming = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedIncoming.isEmpty else { return nil }
+
+        guard let existing else { return trimmedIncoming }
+        let trimmedExisting = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedExisting.isEmpty else { return trimmedIncoming }
+
+        guard !trimmedExisting.contains(trimmedIncoming) else { return nil }
+        return trimmedExisting + "\n" + trimmedIncoming
     }
 
     /// WG-1 (constitution IV): schedules reminders for exactly the ids that actually made it into
@@ -2973,7 +3241,16 @@ final class AppState {
     /// task ends up with.
     private func materialize(_ draft: ConfirmDraft, id: UUID, now: Date) -> TaskItem {
         let task = draft.task
-        let deadline = resolvedValue(task.deadline, kind: .deadline, draft: draft)
+        // T-overdue (self-review "save path" — THE call site a "Move to tomorrow" tap must reach
+        // for the button to do anything at all): `draft.effectiveDeadline`, never `task.deadline`
+        // directly, so an applied overdue suggestion actually gets persisted.
+        let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft)
+        // T-disposition: same `resolvedValue` gate as every other scalar attribute here — dismissed
+        // or unaccepted-uncertain `startTime` is simply absent, never persisted. No "+30 min" math
+        // happens here or anywhere else in this file — that derivation already happened at the
+        // router/parse layer BEFORE this draft existed (`ParsedTask.deadline` already carries it);
+        // this file only ever reads the two values through, never recomputes either.
+        let startTime = resolvedValue(task.startTime, kind: .startTime, draft: draft)
         let estimate = resolvedValue(task.estimateMinutes, kind: .estimate, draft: draft)
         let priorityInt = resolvedValue(task.priority, kind: .priority, draft: draft)
         let reminder = resolvedValue(task.reminderOverride, kind: .reminder, draft: draft)
@@ -2985,17 +3262,20 @@ final class AppState {
             title: draft.effectiveTitle,
             // `details` is the voice read-back copy (`AppState.speakDetails`'s frozen-field
             // meaning, distinct from `notes` — see TaskItem.swift) — prefer explicit notes, else
-            // fall back to the verbatim transcript so read-back is never empty.
-            details: task.notes ?? task.sourceTranscript,
+            // fall back to the verbatim transcript so read-back is never empty. T-edit-notes:
+            // `draft.effectiveNotes`, not `task.notes` directly — same "everywhere notes is read"
+            // reasoning `effectiveDeadline`'s call sites already document (self-review "save path").
+            details: draft.effectiveNotes ?? task.sourceTranscript,
             priority: Self.uiPriority(from: priorityInt),
             status: .todo,
             deadline: deadline,
+            startTime: startTime,
             conditions: resolvedConditions(draft),
             createdAt: now,
             when: .now,
             durationMinutes: estimate,
             frog: false,
-            notes: task.notes,
+            notes: draft.effectiveNotes,
             sourceTranscript: task.sourceTranscript,
             kind: kind,
             recurrence: recurrence,
@@ -3568,7 +3848,12 @@ final class AppState {
     /// as a stable placeholder. `busyIntervals: []` until the P3 calendar integration lands
     /// (contract C); `frogId` comes from today's frog if one is set, else `nil`.
     private func computeConflicts(for draft: ConfirmDraft, now: Date) -> [VolarCore.TaskConflict] {
-        let deadline = resolvedValue(draft.task.deadline, kind: .deadline, draft: draft)
+        // T-overdue: `effectiveDeadline` rather than `task.deadline` directly, for the same
+        // "everywhere the deadline is read" reasoning as `materialize`/`mergeTransform` — a no-op
+        // change in practice today (this only ever runs from `buildConfirmDrafts`, before any edit
+        // exists, so `effectiveDeadline == task.deadline` at every actual call site right now), but
+        // keeps the invariant true regardless of call order, rather than depending on it.
+        let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft)
         let estimate = resolvedValue(draft.task.estimateMinutes, kind: .estimate, draft: draft)
         let priorityInt = resolvedValue(draft.task.priority, kind: .priority, draft: draft)
         let candidate = VolarCore.Task(
@@ -3802,6 +4087,16 @@ final class AppState {
         if let data = try? JSONEncoder().encode(policy) {
             UserDefaults.standard.set(data, forKey: Self.globalReminderPolicyKey)
         }
+    }
+
+    /// Persists the default task duration at `defaultTaskDurationMinutesKey` (2026-07-29). Out of
+    /// range (including the `0` `UserDefaults.integer(forKey:)` would report for an unset key —
+    /// see this same guard in `init` above) falls back to 30 rather than persisting/using a bogus
+    /// value; never clamped to the nearest bound, since a caller passing e.g. `2` or `9000` almost
+    /// certainly has a bug, and silently clamping would hide it behind a plausible-looking number.
+    func setDefaultTaskDurationMinutes(_ minutes: Int) {
+        defaultTaskDurationMinutes = (5...480).contains(minutes) ? minutes : 30
+        UserDefaults.standard.set(defaultTaskDurationMinutes, forKey: Self.defaultTaskDurationMinutesKey)
     }
 
     // MARK: - Service activation (Phase 3: call once from the main window's `.task`)

@@ -58,7 +58,9 @@ struct SettingsView: View {
     @State private var tab: Tab = .general
 
     // Cosmetic-only local settings state (not part of the frozen AppState API).
-    @State private var defaultDuration = 30
+    // `defaultDuration` used to live here too — 2026-07-29: promoted to a real `AppState` setting
+    // (`appState.defaultTaskDurationMinutes`/`setDefaultTaskDurationMinutes`), see the "Default task
+    // duration" row below, so it no longer needs a local `@State` mirror.
     @State private var hyperfocusInterrupt = 90
     @State private var showMorningFrog = true
     @State private var captureAppContext = true
@@ -289,10 +291,26 @@ struct SettingsView: View {
                 .frame(width: 200)
             }
             launchAtLoginRow
-            SettingsRow(label: "Default task duration", hint: "Block this much time when a task has no explicit length.") {
-                Segmented(value: $defaultDuration, options: [
-                    .init(id: 15, label: "15"), .init(id: 30, label: "30"), .init(id: 60, label: "60 min"),
-                ])
+            // Wired for real to `AppState` (2026-07-29) — same "custom `Binding` around a
+            // `private(set)` property + setter" convention as `globalReminderPolicy`/
+            // `voiceDeliveryMode` below in `notificationsTab`, not cosmetic local `@State` like most
+            // rows in this tab. Doubles as the `estimateMinutes` a no-estimate task gets, so the
+            // hint spells out the "urgent, no deadline" scenario that setting actually drives
+            // (`IntentRouter.applyStartTimeDerivation`), not just "duration".
+            SettingsRow(
+                label: "Default task duration",
+                hint: "Used when you say something is urgent without giving a deadline — Volar blocks this much time and sets the same number as the task's estimate."
+            ) {
+                Segmented(
+                    value: Binding(
+                        get: { appState.defaultTaskDurationMinutes },
+                        set: { appState.setDefaultTaskDurationMinutes($0) }
+                    ),
+                    options: [
+                        .init(id: 15, label: "15"), .init(id: 30, label: "30"),
+                        .init(id: 45, label: "45"), .init(id: 60, label: "60 min"),
+                    ]
+                )
             }
             SettingsRow(label: "Hyperfocus interrupt after", hint: "Volar checks in if you've been deep on one task this long.") {
                 Segmented(value: $hyperfocusInterrupt, options: [
@@ -602,7 +620,11 @@ struct SettingsView: View {
 
         var label: String {
             switch self {
-            case .dayHourAt: return "1 day, 1 hour, at deadline"
+            // Label kept in sync with `.defaultPolicy` (`Recurrence.swift`) after anh Khôi's
+            // 2026-07-28 change from fixed -1 day/-1 hour marks to proportional reminders — this
+            // preset IS `.defaultPolicy`, so the string here must describe whatever that constant
+            // actually does, not the old fixed offsets.
+            case .dayHourAt: return "Halfway, 1/3 remaining, at deadline"
             case .hourAt: return "1 hour, at deadline"
             case .atOnly: return "At deadline"
             case .none: return "None"

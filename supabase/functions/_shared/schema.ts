@@ -47,6 +47,11 @@ export interface ParseRequest {
   localeHint?: "vi" | "en" | "mixed";
   now: string; // ISO8601, caller-supplied "current time" (contract field `now`)
   openTaskTitles: string[]; // capped, titles only
+  // IANA timezone id of the user (e.g. "Asia/Ho_Chi_Minh"), optional so older clients that don't
+  // send it still work. `now` already carries the correct local UTC offset by itself — this field
+  // is extra CONTEXT for the model (DST edge cases, resolving dates further in the future than the
+  // single offset in `now` implies), not the primary source of the offset.
+  timezone?: string;
 }
 
 export interface BreakdownRequest {
@@ -147,6 +152,28 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
     localeHint = localeHintRaw;
   }
 
+  // `timezone` is interpolated verbatim into the Gemini prompt (see gemini.ts's
+  // `buildVietnameseDateInstructions`), so it is a PROMPT-INJECTION VECTOR just like `transcript`
+  // and `open_task_titles` — the difference is this field has no legitimate reason to contain
+  // anything but an IANA zone id, so it can be locked down far tighter than free-text fields. The
+  // regex below allows only letters/digits/underscore/plus/minus and 0-2 `/`-separated segments —
+  // no whitespace, no newlines, no punctuation that could start a new "instruction" in the prompt.
+  // DO NOT loosen this regex to be more permissive (e.g. to allow spaces or extra punctuation)
+  // without understanding this is the only thing standing between raw user-influenced text and the
+  // model's system context here; a real IANA id never needs anything outside this character set.
+  let timezone: string | undefined;
+  if (body.timezone !== undefined) {
+    if (
+      typeof body.timezone !== "string" ||
+      body.timezone.length < 1 ||
+      body.timezone.length > 64 ||
+      !/^[A-Za-z0-9_+\-]+(?:\/[A-Za-z0-9_+\-]+){0,2}$/.test(body.timezone)
+    ) {
+      return { ok: false, error: "timezone must be a valid IANA timezone identifier" };
+    }
+    timezone = body.timezone;
+  }
+
   let openTaskTitles: string[] = [];
   const rawTitles = body.open_task_titles;
   if (rawTitles !== undefined) {
@@ -175,6 +202,7 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
       localeHint,
       now: body.now,
       openTaskTitles,
+      timezone,
     },
   };
 }
@@ -272,6 +300,11 @@ export interface ParsedRecurrenceOut {
 export interface ParsedReminderOverrideOut {
   offsetsMinutes: number[]; // relative to deadline, negative = before
   repeatEveryMinutes?: number;
+  // Chu kỳ nhắc TRƯỚC deadline (phút) khi user nói rõ, VD "nhắc tôi mỗi 15 phút" -> 15. Khác
+  // `repeatEveryMinutes` ở trên (lặp SAU deadline, xem ReminderPolicy.repeatEvery trong
+  // Volar/Sources/Model/Recurrence.swift) -- không phải cùng field đổi tên. Client dùng mặc định
+  // riêng (nhắc ở 1/2 và 1/3 thời gian còn lại) khi field này vắng mặt.
+  remindPeriodMinutes?: number;
 }
 
 export interface ParsedSubtaskOut {
@@ -283,6 +316,7 @@ export interface ParsedTaskOut {
   title: ConfidenceValue<string>;
   notes?: ConfidenceValue<string>;
   deadline?: ConfidenceValue<string>;
+  startTime?: ConfidenceValue<string>;
   estimateMinutes?: ConfidenceValue<number>;
   priority?: ConfidenceValue<number>;
   recurrence?: ConfidenceValue<ParsedRecurrenceOut>;
@@ -349,6 +383,16 @@ function validateReminderOverride(v: unknown): ParsedReminderOverrideOut | undef
     if (!isFiniteNumber(v.repeatEveryMinutes) || v.repeatEveryMinutes <= 0) return undefined;
     out.repeatEveryMinutes = v.repeatEveryMinutes;
   }
+  // `remindPeriodMinutes` is a secondary/optional signal (the client already has its own default
+  // reminder cadence) — a malformed value here only omits `remindPeriodMinutes` from `out`, leaving
+  // `offsetsMinutes`/`repeatEveryMinutes` and every other already-validated field on this task
+  // intact. Same fail-open rule every optional field follows — see `validateParsedTask`'s doc
+  // comment below.
+  if (v.remindPeriodMinutes !== undefined) {
+    if (isFiniteNumber(v.remindPeriodMinutes) && v.remindPeriodMinutes > 0) {
+      out.remindPeriodMinutes = v.remindPeriodMinutes;
+    }
+  }
   return out;
 }
 
@@ -364,9 +408,29 @@ function validateSubtask(v: unknown): ParsedSubtaskOut | undefined {
   return { title, estimateMinutes };
 }
 
-/** Validates a single model-produced task object. Returns undefined (never throws) on ANY
- *  structural mismatch — the caller drops/rejects rather than guessing a "best effort" shape,
- *  per constitution II: raw model output is never trusted into a partially-validated pass-through. */
+/** Validates a single model-produced task object. FAIL-OPEN per field, FAIL-CLOSED on `title`
+ *  only (decision: anh Khôi, 2026-07-28).
+ *
+ *  Every field on `ParsedTaskOut` besides `title` is OPTIONAL: if a given field's value doesn't
+ *  validate, that ONE field is simply omitted from `out` — the function does not abort, and every
+ *  other already-validated field on this task (and every other task in the array) is unaffected.
+ *  `title` is the sole exception: with no title the task carries no user-facing meaning, so a
+ *  missing/invalid title still fails the whole task (`return undefined`) one level up in
+ *  `validateParsedTaskArray`, which drops just this task, not the rest of the array.
+ *
+ *  Why fail-open instead of the previous fail-closed-per-field behavior (any invalid field ->
+ *  whole task dropped, which — before `validateParsedTaskArray` also moved to per-task fail-open —
+ *  used to take the ENTIRE response down with it): the Swift client already does per-attribute
+ *  fallback for exactly this reason (constitution: "A parsing error on one attribute MUST NOT
+ *  discard the others") — a server that discards a whole task because one optional field (e.g.
+ *  `priority: 7`) didn't validate was undermining that same principle one layer down, and every
+ *  new optional field added to this schema over time only increased the odds of some model output
+ *  tripping the fail-closed path and costing the user a quota slot for nothing. Dropping one bad
+ *  field and keeping the rest of the task is strictly better for the user than discarding it.
+ *
+ *  This does NOT relax type/shape checking — a field that fails validation is omitted, never
+ *  passed through with an unvalidated/partially-validated value; nothing unchecked ever reaches
+ *  `out`. */
 function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
   if (!isPlainObject(v)) return undefined;
 
@@ -381,51 +445,56 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
     const notes = validateConfidenceValue(v.notes, (s) =>
       typeof s === "string" && s.length <= MAX_NOTES_CHARS ? s : undefined
     );
-    if (!notes) return undefined;
-    out.notes = notes;
+    if (notes) out.notes = notes;
   }
 
   if (v.deadline !== undefined) {
     const deadline = validateConfidenceValue(v.deadline, (s) => (isIso8601(s) ? (s as string) : undefined));
-    if (!deadline) return undefined;
-    out.deadline = deadline;
+    if (deadline) out.deadline = deadline;
+  }
+
+  // `startTime` uses the exact same TYPE validation as `deadline` (same confidence-wrapper shape,
+  // same `isIso8601` strictness — NOT `isIso8601WithZone`, since this is model-produced output, not
+  // the client-supplied `now`). Fail-open like every other optional field on this task — see the
+  // doc comment above `validateParsedTask`.
+  if (v.startTime !== undefined) {
+    const startTime = validateConfidenceValue(v.startTime, (s) => (isIso8601(s) ? (s as string) : undefined));
+    if (startTime) out.startTime = startTime;
   }
 
   if (v.estimateMinutes !== undefined) {
     const est = validateConfidenceValue(v.estimateMinutes, (n) =>
       isFiniteNumber(n) && n > 0 ? n : undefined
     );
-    if (!est) return undefined;
-    out.estimateMinutes = est;
+    if (est) out.estimateMinutes = est;
   }
 
   if (v.priority !== undefined) {
     const priority = validateConfidenceValue(v.priority, (n) =>
       isFiniteNumber(n) && Number.isInteger(n) && n >= 1 && n <= 4 ? n : undefined
     );
-    if (!priority) return undefined;
-    out.priority = priority;
+    if (priority) out.priority = priority;
   }
 
   if (v.recurrence !== undefined) {
     const recurrence = validateConfidenceValue(v.recurrence, validateRecurrence);
-    if (!recurrence) return undefined;
-    out.recurrence = recurrence;
+    if (recurrence) out.recurrence = recurrence;
   }
 
   if (v.reminderOverride !== undefined) {
     const reminderOverride = validateConfidenceValue(v.reminderOverride, validateReminderOverride);
-    if (!reminderOverride) return undefined;
-    out.reminderOverride = reminderOverride;
+    if (reminderOverride) out.reminderOverride = reminderOverride;
   }
 
-  if (v.conditions !== undefined) {
-    if (!Array.isArray(v.conditions)) return undefined;
+  // `conditions` is an ARRAY field: an individual malformed element is dropped on its own, keeping
+  // the rest of the array — this is a finer-grained fail-open than the scalar fields above, but the
+  // same underlying rule (one bad piece must not discard the good pieces around it). If `v.conditions`
+  // itself isn't an array, the whole field is omitted (nothing valid to salvage).
+  if (v.conditions !== undefined && Array.isArray(v.conditions)) {
     const conditions: ConfidenceValue<ParsedConditionOut>[] = [];
     for (const c of v.conditions) {
       const cond = validateConfidenceValue(c, validateCondition);
-      if (!cond) return undefined;
-      conditions.push(cond);
+      if (cond) conditions.push(cond);
     }
     out.conditions = conditions;
   }
@@ -434,17 +503,15 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
     const kind = validateConfidenceValue(v.kind, (s) =>
       s === "task" || s === "review" ? s : undefined
     );
-    if (!kind) return undefined;
-    out.kind = kind;
+    if (kind) out.kind = kind;
   }
 
-  if (v.subtasks !== undefined) {
-    if (!Array.isArray(v.subtasks)) return undefined;
+  // `subtasks` is an ARRAY field: same per-element fail-open as `conditions` above.
+  if (v.subtasks !== undefined && Array.isArray(v.subtasks)) {
     const subtasks: ParsedSubtaskOut[] = [];
     for (const s of v.subtasks) {
       const sub = validateSubtask(s);
-      if (!sub) return undefined;
-      subtasks.push(sub);
+      if (sub) subtasks.push(sub);
     }
     out.subtasks = subtasks;
   }
@@ -453,8 +520,7 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
     const followUpReview = validateConfidenceValue(v.followUpReview, (b) =>
       typeof b === "boolean" ? b : undefined
     );
-    if (!followUpReview) return undefined;
-    out.followUpReview = followUpReview;
+    if (followUpReview) out.followUpReview = followUpReview;
   }
 
   return out;
@@ -463,20 +529,40 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
 /** Validates the model's full parse-mode response. Enforces the 10-task cap by TRUNCATING
  *  (contract obligation 4: "enforce ... the 10-task cap server-side" — truncation is the safe
  *  enforcement here, since a prompt-injection attempt to make the model emit >10 tasks must not
- *  be able to smuggle task #11+ through under any circumstance; anything structurally invalid is
- *  rejected outright, not best-effort-repaired). Returns undefined on any structural failure.
+ *  be able to smuggle task #11+ through under any circumstance).
+ *
+ *  Per-TASK fail-open (decision: anh Khôi, 2026-07-28): a task that fails `validateParsedTask`
+ *  (i.e. has no valid `title`) is dropped individually, not the whole array — one bad task must
+ *  not cost the user the other N-1 good ones. `droppedCount` counts BOTH kinds of loss the client
+ *  never sees: tasks truncated past `MAX_TASKS` and tasks dropped for failing validation; it is
+ *  logged in `parse/index.ts` purely as a model-quality signal ("model produced output that didn't
+ *  reach the user"), and both causes belong under that same signal.
+ *
+ *  Returns `undefined` (-> `parse/index.ts` returns 502) only when:
+ *  - `v` is not an array at all, or
+ *  - `v` is a NON-EMPTY array but EVERY task in it fails validation — i.e. the model produced
+ *    nothing usable at all. That is a real upstream failure, distinct from "one task in three was
+ *    malformed."
  *  An empty array IS a valid, well-formed response (the model legitimately found no actionable
  *  tasks in the transcript, e.g. small talk) — it must return `200 []`, not a 502; rejecting it
  *  as malformed would burn a full quota slot on a request that produced a perfectly good answer. */
 export function validateParsedTaskArray(v: unknown): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
   if (!Array.isArray(v)) return undefined;
   const tasks: ParsedTaskOut[] = [];
+  let invalidCount = 0;
   for (const item of v) {
     const task = validateParsedTask(item);
-    if (!task) return undefined; // any malformed task -> whole response is untrustworthy
-    tasks.push(task);
+    if (task) {
+      tasks.push(task);
+    } else {
+      invalidCount++;
+    }
   }
-  const droppedCount = Math.max(0, tasks.length - MAX_TASKS);
+  // Non-empty input that yielded zero usable tasks: every single task was malformed, which is a
+  // genuine upstream failure, not "one bad task among good ones" — surface it as 502 rather than
+  // a hollow `200 []`.
+  if (v.length > 0 && tasks.length === 0) return undefined;
+  const droppedCount = invalidCount + Math.max(0, tasks.length - MAX_TASKS);
   return { tasks: tasks.slice(0, MAX_TASKS), droppedCount };
 }
 

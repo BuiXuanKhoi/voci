@@ -97,10 +97,70 @@ struct CloudParser: Sendable {
     /// a mutable reference type Foundation has not audited/marked `Sendable`, and this struct's
     /// methods run off the main actor — sharing one instance across concurrent calls would be a
     /// Swift 6 strict-concurrency risk (and a real, if unlikely, data race) for a cost that's
-    /// negligible next to the network round trip itself. Default `formatOptions` include
-    /// `.withInternetDateTime`, which always emits a trailing `Z` — satisfies the server's
-    /// `isIso8601WithZone` check (`_shared/schema.ts`) that requires a zone designator on `now`.
-    private static func makeRequestFormatter() -> ISO8601DateFormatter { ISO8601DateFormatter() }
+    /// negligible next to the network round trip itself.
+    ///
+    /// Emits the caller's OWN local wall-clock time with its REAL UTC offset (e.g.
+    /// `2026-07-28T15:00:00+07:00` for a user in Vietnam) — deliberately NOT `Z`/UTC. This is
+    /// intentional, not an oversight: the server prompt asks the model to resolve relative phrases
+    /// like "sáng nay"/"chiều nay" ("this morning"/"this afternoon") against the caller's actual
+    /// wall clock, so `now` must actually BE that wall clock, offset and all — sending UTC would
+    /// make every such phrase resolve against the wrong clock. `timeZone` defaults to `.current`,
+    /// re-read fresh on EVERY call (never cached in a stored property) — a user who changes
+    /// timezone (e.g. mid-flight) gets the correct offset on their very next request. The
+    /// parameter exists so tests can inject a fixed zone instead of depending on whatever timezone
+    /// happens to be set on the machine running the test suite.
+    ///
+    /// BUG THIS FIXES: `ISO8601DateFormatter()`'s own default `timeZone` is GMT, so the previous
+    /// code here silently RE-STAMPED local time as if it were UTC — a user at 15:00 local
+    /// (UTC+7) sent `...T08:00:00Z` (their own clock digits, wrongly labeled `Z`), the server then
+    /// resolved "this afternoon" against that mislabeled instant, and the client decoded the
+    /// resulting deadline exactly 7 hours off from what the user meant. Explicitly setting
+    /// `timeZone = .current` (or the injected zone) is the fix.
+    ///
+    /// `formatOptions = [.withInternetDateTime]` is required, not just conventional: the server
+    /// rejects any `now` that fails `isIso8601WithZone` (`_shared/schema.ts`) —
+    /// `/(Z|[+-]\d{2}:\d{2})$/` — which requires the UTC offset to include the colon (`+07:00`,
+    /// NOT `+0700`). `.withInternetDateTime` includes `.withColonSeparatorInTimeZone`, so this is
+    /// already satisfied, but `formatOptions` is set explicitly (rather than left at
+    /// `ISO8601DateFormatter`'s own default, which happens to match today) so a future edit can
+    /// never silently drop the colon by "simplifying" this line — that would 400 every
+    /// parse/resolve_completion request server-side.
+    ///
+    /// Not `private`: exposed at `internal` (package-default) visibility so `CloudParserTests` can
+    /// call it directly via `@testable import Volar` — mirrors the precedent
+    /// `CloudCompletionResolutionTests.swift` already documents for pulling `AppState
+    /// .resolveCloudMatch` out to a testable `static` function rather than leaving pure logic
+    /// trapped behind a live network/UI call.
+    static func makeRequestFormatter(timeZone: TimeZone = .current) -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = timeZone
+        return formatter
+    }
+
+    /// Defensive gate on the new `timezone` wire field (parse mode only — see `parseDetailed`
+    /// below). The server interpolates this value directly into the model prompt (a parallel,
+    /// not-yet-landed piece of server work as of this writing) — an unvalidated string here would
+    /// be a real prompt-injection surface, not defense-in-depth theater, so this mirrors the
+    /// server's OWN locked validation rule for this field rather than trusting
+    /// `TimeZone.current.identifier` to always be well-formed: 1...64 characters, matching
+    /// `^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+){0,2}$` (letters/digits/`_`/`+`/`-`, 1-3 `/`-separated
+    /// segments — covers real IANA ids like `Asia/Ho_Chi_Minh`, `UTC`,
+    /// `America/Argentina/Buenos_Aires`). Returns `nil` (never a best-effort sanitized/truncated
+    /// string) on any mismatch — the caller then OMITS the `timezone` field entirely rather than
+    /// risk sending something the server would 400 on, which would otherwise kill the ENTIRE parse
+    /// request over a field that's only ever a hint.
+    ///
+    /// Not `private`, same testability rationale as `makeRequestFormatter` above.
+    static func validatedTimezoneField(_ identifier: String) -> String? {
+        guard (1...64).contains(identifier.utf16.count) else { return nil }
+        guard identifier.range(
+            of: "^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+){0,2}$", options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return identifier
+    }
 
     /// Truncates by UTF-16 code units — matching the server's validation (`_shared/schema.ts`
     /// checks JS string `.length`, which counts UTF-16 units, not Unicode scalars or grapheme
@@ -148,6 +208,13 @@ struct CloudParser: Sendable {
         ]
         if !openTaskTitles.isEmpty {
             payload["open_task_titles"] = Array(openTaskTitles.prefix(100)).map { Self.utf16Prefix($0, 200) }
+        }
+        // `timezone`: parse mode ONLY (locked contract — `resolveCompletion` below deliberately
+        // does NOT send this; the server only reads it in parse mode). IANA identifier, gated
+        // through `validatedTimezoneField` — omit the field entirely rather than send a malformed
+        // value and risk a 400 on the whole request over what is only ever a hint.
+        if let timezone = Self.validatedTimezoneField(TimeZone.current.identifier) {
+            payload["timezone"] = timezone
         }
 
         guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {

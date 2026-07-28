@@ -208,7 +208,8 @@ curl -sS https://<project-ref>.supabase.co/functions/v1/parse \
         "transcript": "gọi cho khách hàng lúc 3 giờ chiều mai",
         "locale_hint": "vi",
         "now": "2026-07-16T09:00:00+07:00",
-        "open_task_titles": []
+        "open_task_titles": [],
+        "timezone": "Asia/Ho_Chi_Minh"
       }'
 ```
 

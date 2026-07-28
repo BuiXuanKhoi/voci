@@ -5,7 +5,10 @@
 // surfaces of the product.
 //
 // Request shapes (validated in ../_shared/schema.ts):
-//   parse mode (default):    { transcript, locale_hint?, now, open_task_titles? }
+//   parse mode (default):    { transcript, locale_hint?, now, open_task_titles?, timezone? }
+//     — `now` must already be the user's LOCAL wall-clock time with its real UTC offset (never
+//     `Z`/UTC); `timezone` is an optional IANA id (e.g. "Asia/Ho_Chi_Minh") given as extra context
+//     for the model on top of that offset. Older clients that don't send `timezone` still work.
 //   breakdown mode:          { mode: "breakdown", task_title, notes? }
 //   resolve_completion mode: { mode: "resolve_completion", transcript, now, kind, candidates }
 //     — server-side semantic match for "which open task is the user saying they finished",
@@ -226,6 +229,7 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
         localeHint: body.localeHint,
         now: body.now,
         openTaskTitles: body.openTaskTitles,
+        timezone: body.timezone,
       });
       const raw = await callGemini({
         apiKey: geminiCfg.values.GEMINI_API_KEY,
@@ -249,6 +253,7 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
         mode: "parse",
         transcriptChars: body.transcript.length,
         openTaskTitleCount: body.openTaskTitles.length,
+        hasTimezone: body.timezone !== undefined, // boolean only — never the raw value, see module doc comment
         taskCount: result.tasks.length,
         droppedCount: result.droppedCount,
         quotaUsed,

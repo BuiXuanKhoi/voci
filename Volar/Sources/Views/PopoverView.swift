@@ -374,9 +374,11 @@ struct PopoverView: View {
                     .onSubmit { appState.confirmSave() }
                 Spacer(minLength: 4)
             }
+            NotesEditorControl(draft: draft, appState: appState)
             attributeChips(draft)
             conditionRows(draft)
             duplicateHintRow(draft)
+            overdueAdvisoryRow(draft)
             conflictAdvisoryRow(draft)
         }
         .opacity(draft.isIncluded ? 1 : 0.45)
@@ -408,12 +410,69 @@ struct PopoverView: View {
         .padding(.top, 2) // optically aligns with the title's first line, not its full 1-3 line height
     }
 
+    /// T-overdue (2026-07-28): the confirm card's one-tap fix for a deadline the parser resolved
+    /// to an instant already in the past at capture time (`ConfirmDraft.overdueSuggestion`,
+    /// computed client-side/deterministically — see that field's doc comment). Same calm register
+    /// as `conflictAdvisoryRow` right below (no red, no exclamation mark, never blocking — `Enter`
+    /// still saves regardless), but unlike that row, THIS one gets a real quick-action: "was this
+    /// overdue" and "what's a sane +1-day fix" are both plain `Date`/`Calendar` math with one
+    /// obviously-right answer, which is exactly the property `conflictAdvisoryRow`'s conflicts
+    /// DON'T have (see its own updated comment below). Two SEPARATE tap targets, deliberately not
+    /// one shared `onTapGesture` the way `conflictAdvisoryRow`/`duplicateHintRow`'s header text
+    /// use: the text is dismiss-only (`.contentShape`/`.onTapGesture`, same convention as
+    /// `conflictAdvisoryRow`), the action is a real `Button` — nesting a tap gesture and a button
+    /// in the same hit-testing region risks the wrong one firing, so this keeps them structurally
+    /// apart (`Spacer` between) rather than layered.
+    @ViewBuilder
+    private func overdueAdvisoryRow(_ draft: ConfirmDraft) -> some View {
+        if let suggestion = draft.overdueSuggestion, !draft.overdueDismissed, !draft.dismissed.contains(.deadline) {
+            HStack(alignment: .top, spacing: 6) {
+                Text(overdueAdvisoryText(suggestion))
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.reschedule)
+                    .lineLimit(2)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        appState.dismissOverdueSuggestion(forDraft: draft.id)
+                    }
+                Spacer(minLength: 4)
+                Button {
+                    appState.applyOverdueSuggestion(forDraft: draft.id)
+                } label: {
+                    Text("Move to \(suggestion.suggestedDeadline.formatted(date: .omitted, time: .shortened)) tomorrow")
+                        .font(.system(size: 11.5, weight: .medium))
+                        .foregroundStyle(VolarColor.reschedule)
+                        .lineLimit(1)
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(.top, 2)
+        }
+    }
+
+    /// "Was due 3 hours ago" — `RelativeDateTimeFormatter` (stable Foundation API, well below this
+    /// app's macOS 14 floor) rather than hand-rolled duration math, so pluralization/locale come
+    /// free. `.short` unit style keeps the calm, low-key tone this whole row already has (no
+    /// "3 hours, 12 minutes" precision that would read as alarmed). Compares against a fresh
+    /// `Date()` at render time, not the frozen capture-time `now` the suggestion itself was
+    /// computed against — "how long ago" should keep ticking forward while the card sits on
+    /// screen, unlike the suggestion's own past/future classification, which must NOT change
+    /// mid-session (see `ConfirmDraft.overdueSuggestion`'s doc comment).
+    private func overdueAdvisoryText(_ suggestion: OverdueSuggestion) -> String {
+        let formatter = RelativeDateTimeFormatter()
+        formatter.unitsStyle = .short
+        let relative = formatter.localizedString(for: suggestion.originalDeadline, relativeTo: Date())
+        return "Was due \(relative)"
+    }
+
     /// T074: AT MOST ONE calm advisory line — never a dialog, never a red/shame color (FR-036),
     /// never blocking (`Enter` still saves regardless — this row has no bearing on `actionsRow`'s
     /// Save button at all). Tapping it only dismisses the row itself; it never auto-modifies the
-    /// draft (constitution II) — a fuller "bump the deadline" quick-action is a reasonable future
-    /// enhancement but is NOT implemented here (self-review note, flagged in the final report as a
-    /// deliberate scope decision, not an oversight).
+    /// draft (constitution II). A real quick-action for THIS row's conflicts remains deliberately
+    /// out of scope, same self-review call as before — a capacity/collision/dependency conflict has
+    /// no single obviously-right alternative time to suggest the way an overdue deadline does
+    /// (`overdueAdvisoryRow` above, "Move to tomorrow" — client-side `Date` math with one sane
+    /// answer), so this row stays dismiss-only.
     @ViewBuilder
     private func conflictAdvisoryRow(_ draft: ConfirmDraft) -> some View {
         if let conflict = draft.conflicts.first, !draft.conflictDismissed {
@@ -525,17 +584,12 @@ struct PopoverView: View {
     @ViewBuilder
     private func attributeChips(_ draft: ConfirmDraft) -> some View {
         FlowLayout(spacing: 6) {
-            if let deadline = draft.task.deadline, !draft.dismissed.contains(.deadline) {
-                // Deadline is a timer readout — mono instrument face, per foundations.html §05.
-                Chip(
-                    label: deadline.value.formatted(.dateTime.month().day().hour().minute()),
-                    uncertain: deadline.isUncertain,
-                    accepted: draft.accepted.contains(.deadline),
-                    mono: true,
-                    onAccept: { appState.acceptUncertainAttribute(.deadline, forDraft: draft.id) },
-                    onDismiss: { appState.dismissAttribute(.deadline, forDraft: draft.id) }
-                )
-            }
+            // T-edit-deadline (2026-07-28): `DeadlineControl` owns ALL THREE deadline states —
+            // present+editable chip, dismissed (renders nothing, unchanged from before), and
+            // absent (a quiet "Add time" affordance) — see its own doc comment for why this is a
+            // separate `View` struct rather than another branch inlined here (it needs its own
+            // `@State` to own the popover-editor's presentation).
+            DeadlineControl(draft: draft, appState: appState)
             if let estimate = draft.task.estimateMinutes, !draft.dismissed.contains(.estimate) {
                 // Estimate is a duration readout — mono instrument face.
                 Chip(
@@ -596,6 +650,24 @@ struct PopoverView: View {
                     accepted: true,
                     onAccept: nil,
                     onDismiss: { appState.dismissAttribute(.followUpReview, forDraft: draft.id) }
+                )
+            }
+            // T-disposition (2026-07-28, "làm ngay lập tức" disposition): distinct from `.deadline`
+            // above — this is WHEN the user said they'd start, not when it's due. Dismissible/
+            // uncertain-gated like every other scalar chip on this card; deliberately NOT editable
+            // via a `.popover`+`DatePicker` control the way `DeadlineControl` is (self-review "UI
+            // regression"/scope note: `startTime` is inert display-only data per `TaskItem.
+            // startTime`'s own doc comment, so a full edit affordance isn't earned here the way it
+            // was for the deadline that actually drives ordering/reminders — considered, not built,
+            // see this task's final report).
+            if let startTime = draft.task.startTime, !draft.dismissed.contains(.startTime) {
+                Chip(
+                    label: startTimeLabel(startTime.value),
+                    uncertain: startTime.isUncertain,
+                    accepted: draft.accepted.contains(.startTime),
+                    mono: true,
+                    onAccept: { appState.acceptUncertainAttribute(.startTime, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.startTime, forDraft: draft.id) }
                 )
             }
         }
@@ -970,6 +1042,19 @@ struct PopoverView: View {
         kind == .review ? "Review" : kind.rawValue.capitalized
     }
 
+    /// T-disposition: "Starts now" when the parsed instant is within ~2 minutes of the current
+    /// wall clock (the "làm ngay lập tức"/"right now" utterance this whole disposition case exists
+    /// for — the confirm card is reviewed within seconds of speaking, so this window is generous,
+    /// not tight), else a plain "Starts HH:mm" readout for anything further out. Reads `Date()`
+    /// directly rather than threading a captured "now" through `ConfirmDraft` — this is a label
+    /// formatter, not state, and re-evaluating it on each render is exactly as correct as any
+    /// snapshot would be for a card that's on-screen for at most a few seconds.
+    private func startTimeLabel(_ date: Date) -> String {
+        abs(date.timeIntervalSinceNow) <= 120
+            ? "Starts now"
+            : "Starts \(date.formatted(.dateTime.hour().minute()))"
+    }
+
     /// Mirrors `TaskItem.durationLabel`'s formatting ("45 min" / "1 hr" / "1h 30m"); duplicated
     /// here (rather than reaching into `TaskItem`) because `ParsedTask` is a distinct, smaller
     /// pre-save value type and this file must not modify frozen Model files.
@@ -1250,6 +1335,17 @@ private struct Chip: View {
     var mono: Bool = false
     var onAccept: (() -> Void)?
     var onDismiss: () -> Void
+    /// T-edit-deadline (2026-07-28): fires on a tap ANYWHERE on the capsule body, but ONLY once
+    /// the chip is no longer dashed (i.e. NOT `showsDashed` — either always-confident, or an
+    /// uncertain value the user already accepted). Deliberately does not fire instead of/before
+    /// `onAccept`: an uncertain value's first tap must keep meaning "accept this," exactly as
+    /// today, so this is additive — every existing `Chip(...)` call site that leaves `onTap` at
+    /// its `nil` default keeps its EXACT prior tap behavior (accept-if-dashed, otherwise nothing).
+    /// The dismiss "x" below stays its own separate `Button`, untouched — nesting a `Button`
+    /// inside a parent `.onTapGesture` is the pre-existing shape of this view (the "x" already had
+    /// to coexist with `onAccept`'s capsule-wide gesture before this change), so adding a second
+    /// capsule-wide behavior alongside it introduces no new conflict.
+    var onTap: (() -> Void)?
 
     private var showsDashed: Bool { uncertain && !accepted }
 
@@ -1281,7 +1377,204 @@ private struct Chip: View {
         .clipShape(Capsule())
         .contentShape(Capsule())
         .onTapGesture {
-            if showsDashed { onAccept?() }
+            if showsDashed {
+                onAccept?()
+            } else {
+                onTap?()
+            }
+        }
+    }
+}
+
+/// T-edit-deadline (2026-07-28, anh Khôi: "khi user ra task, có thể update time... của task" —
+/// manual in-place fix on the confirm card, NOT a separate voice-edit feature): the confirm
+/// card's tappable deadline control. Its OWN `View` struct (not another branch inside
+/// `attributeChips`'s `@ViewBuilder` method) specifically so it can own the `@State` a
+/// `.popover` presentation needs — `attributeChips` is called once per DRAFT from a plain
+/// `FlowLayout` call, not a `ForEach` that would hand each call an identity-backed state slot of
+/// its own, so a `@State` declared directly there would be shared/reset across every draft's
+/// control instead of staying independent per draft.
+///
+/// `.popover` was chosen over a `Menu`-hosted `DatePicker` (the other option this task called out
+/// to weigh, `dependencyPicker` above being this file's existing `Menu` convention): a `Menu`'s
+/// content is backed by `NSMenu` on macOS, which is known to render interactive controls like
+/// `DatePicker` unreliably (it expects a flat list of selectable rows, not another live control) —
+/// `.popover` is the standard, reliable way to present an inline editor anchored to a specific
+/// control on macOS, and every other "edit in place" surface on this card (the title `TextField`)
+/// already edits inline rather than through a menu.
+///
+/// Renders exactly one of three things, covering every state `ConfirmDraft.effectiveDeadline`/
+/// `dismissed` can be in:
+///   - a deadline present and NOT dismissed -> the existing mono `Chip` (accept/dismiss UNCHANGED,
+///     see `Chip.onTap`'s own doc comment), now also tappable to reopen this same editor;
+///   - a deadline present but dismissed -> nothing, EXACTLY the prior behavior (dismiss still
+///     wins; this control does not resurrect a dismissed chip via a side door);
+///   - no deadline at all (`effectiveDeadline == nil`) -> a quiet, dashed-border "Add time"
+///     affordance (never a full-size button — most cards have no deadline, and this must not add
+///     visual weight to the common case).
+private struct DeadlineControl: View {
+    let draft: ConfirmDraft
+    let appState: AppState
+    @State private var showingPicker = false
+
+    var body: some View {
+        Group {
+            if let deadline = draft.effectiveDeadline, !draft.dismissed.contains(.deadline) {
+                // Deadline is a timer readout — mono instrument face, per foundations.html §05.
+                Chip(
+                    label: Self.deadlineLabel(for: deadline, draft: draft),
+                    uncertain: deadline.isUncertain,
+                    accepted: draft.accepted.contains(.deadline),
+                    mono: true,
+                    onAccept: { appState.acceptUncertainAttribute(.deadline, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.deadline, forDraft: draft.id) },
+                    onTap: { showingPicker = true }
+                )
+            } else if draft.effectiveDeadline == nil {
+                Button {
+                    showingPicker = true
+                } label: {
+                    HStack(spacing: 4) {
+                        VolarIcon(.clock, size: 9, color: VolarColor.textMut)
+                        Text("Add time")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                    .foregroundStyle(VolarColor.textMut)
+                    .padding(.horizontal, 8)
+                    .frame(height: 22)
+                    .overlay(
+                        Capsule().strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+                    )
+                }
+                .buttonStyle(.plain)
+            }
+            // The remaining case (present but dismissed) intentionally renders nothing — see this
+            // struct's own doc comment.
+        }
+        .popover(isPresented: $showingPicker) {
+            deadlinePopoverContent
+        }
+    }
+
+    /// T-emergency-label (2026-07-29, anh Khôi chốt): a deadline `IntentRouter.
+    /// applyStartTimeDerivation` derived from `startTime` now auto-commits on Save (0.75 confidence
+    /// — see `ParsedTask.deadlineIsEstimated`'s own doc comment for the full story), so this chip
+    /// can no longer rely on dashed/uncertain styling to tell the user "this time is a guess" — that
+    /// styling means something else in this app entirely ("not committed yet, tap to accept"), and
+    /// this value already commits. Instead: append a plain "· est" suffix, same mono/instrument
+    /// chip, no border change. Suppressed the instant the user picks their own time through this
+    /// same control's `DatePicker` (`editedDeadline != nil`) — at that point it's no longer a
+    /// machine guess, it's exactly what the user chose, so the label reverts to plain.
+    private static func deadlineLabel(for deadline: ParsedValue<Date>, draft: ConfirmDraft) -> String {
+        let base = deadline.value.formatted(.dateTime.month().day().hour().minute())
+        guard draft.task.deadlineIsEstimated, draft.editedDeadline == nil else { return base }
+        return "\(base) · est"
+    }
+
+    /// The picker's binding reads/writes straight through `AppState`, same "no intermediate local
+    /// `@State` to fall out of sync" shape as the title `TextField`'s own
+    /// `Binding(get: { draft.effectiveTitle }, set: { appState.updateDraftTitle(...) })` above.
+    /// `get`'s fallback (`Self.suggestedDefault`) is DISPLAY ONLY — `set` is only ever invoked by
+    /// an actual user interaction with the control (SwiftUI never calls a `DatePicker` binding's
+    /// `set` on appear), so opening this popover and dismissing it untouched leaves `editedDeadline`
+    /// `nil` and the task exactly as un-deadlined as before (constitution II: nothing commits
+    /// without an explicit user action).
+    private var deadlinePopoverContent: some View {
+        // No explicit `.datePickerStyle(...)` override (self-review "Swift-blind risk" — macOS's
+        // exact non-graphical `DatePickerStyle` case name could not be verified from this
+        // environment): `.automatic` is the default and resolves to a reasonably compact
+        // date+time control on macOS without risking an unverified style-case name.
+        DatePicker(
+            "",
+            selection: Binding(
+                get: { draft.effectiveDeadline?.value ?? Self.suggestedDefault() },
+                set: { appState.setDraftDeadline($0, forDraft: draft.id) }
+            ),
+            displayedComponents: [.date, .hourAndMinute]
+        )
+        .labelsHidden()
+        .padding(12)
+        .fixedSize()
+    }
+
+    /// The picker's default when a draft has NO deadline yet — deliberately NOT a bare `Date()`
+    /// ("right now" is almost never the deadline someone means to set): today at 18:00 if that's
+    /// still ahead of `now`, else tomorrow at 09:00. `bySettingHour(_:minute:second:of:)` returning
+    /// `nil` (should not happen for valid hour/minute values, but never force-unwrapped) falls back
+    /// to `now`/`tomorrow` unchanged rather than crashing.
+    private static func suggestedDefault(now: Date = Date(), calendar: Calendar = .current) -> Date {
+        if let sixPM = calendar.date(bySettingHour: 18, minute: 0, second: 0, of: now), sixPM > now {
+            return sixPM
+        }
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
+    }
+}
+
+/// T-edit-notes (2026-07-28, same anh Khôi request as `DeadlineControl` above): the confirm
+/// card's editable notes/description field. Its own `View` struct for the same reason
+/// `DeadlineControl` is: it needs `@State` (here, whether the user has explicitly asked to add a
+/// note to a draft that came back with none) that a plain `@ViewBuilder` method called once per
+/// draft from `taskDraftCard` cannot own independently per draft.
+///
+/// Renders one of two things:
+///   - a note already exists (parsed OR previously typed this session) -> an inline, multi-line
+///     `TextField` — SAME `axis: .vertical` + `.textFieldStyle(.plain)` shape as the title field
+///     above (proven to render/resize correctly in this exact card), just smaller/secondary
+///     styling and NO `.onKeyPress(.return)` interception. That omission is deliberate, not an
+///     oversight: the title field above has to go out of its way (`.onKeyPress`) to turn Return
+///     INTO a save, specifically overriding the vertical-axis `TextField`'s own default of
+///     "Return inserts a newline" (see that field's own comment). Notes wants exactly that
+///     DEFAULT, unmodified — Return should insert a newline, never save — so the correct
+///     implementation here is to add NOTHING and let the field's native behavior stand. A
+///     focused `TextField` also already swallows the Save button's own `.keyboardShortcut
+///     (.defaultAction)` (again, see the title field's comment), so Return cannot leak through to
+///     `actionsRow`'s Save button while this field has focus either.
+///   - no note at all -> a quiet "Add note" affordance, same dashed/muted visual language as
+///     `DeadlineControl`'s "Add time".
+private struct NotesEditorControl: View {
+    let draft: ConfirmDraft
+    let appState: AppState
+    @State private var isExpanded = false
+
+    private var hasNotes: Bool {
+        draft.effectiveNotes?.isEmpty == false
+    }
+
+    var body: some View {
+        if hasNotes || isExpanded {
+            // `get` reads `effectiveNotes` (trimmed + falls back to `task.notes` when blank) —
+            // SAME shape as the title field's `get: { draft.effectiveTitle }` above, and it
+            // inherits that field's one known quirk on purpose, for consistency: clearing this
+            // field all the way to blank makes `effectiveNotes` fall back to the ORIGINAL parsed
+            // note on the very next render, so a note that came from the parser can be REPLACED
+            // by typing over it, but not fully blanked out via this field alone. Pre-existing
+            // limitation, not new here — `effectiveTitle` already has it, and this task's brief
+            // didn't ask for a way to delete an existing note entirely.
+            TextField(
+                "Notes",
+                text: Binding(
+                    get: { draft.effectiveNotes ?? "" },
+                    set: { appState.updateDraftNotes($0, forDraft: draft.id) }
+                ),
+                axis: .vertical
+            )
+            .textFieldStyle(.plain)
+            .lineLimit(1...4)
+            .font(.system(size: 11.5))
+            .foregroundStyle(VolarColor.textSec)
+        } else {
+            Button {
+                isExpanded = true
+            } label: {
+                HStack(spacing: 4) {
+                    VolarIcon(.plus, size: 8, color: VolarColor.textMut)
+                    Text("Add note")
+                        .font(.system(size: 10.5, weight: .medium))
+                }
+                .foregroundStyle(VolarColor.textMut)
+            }
+            .buttonStyle(.plain)
         }
     }
 }

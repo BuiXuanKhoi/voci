@@ -1,0 +1,478 @@
+// Tests/CloudParserTests.swift — regression coverage for the `now`-timezone bug fix in
+// `Sources/Parsing/CloudParser.swift`: `CloudParser.makeRequestFormatter()` used to rely on
+// `ISO8601DateFormatter()`'s own default `timeZone` (GMT), silently re-stamping the user's LOCAL
+// wall clock as if it were UTC — a user at 15:00 local (UTC+7) sent `...T08:00:00Z` (their own
+// clock digits, wrongly labeled `Z`), the server then resolved relative phrases like "chiều nay"
+// against that mislabeled instant, and the client decoded the resulting deadline exactly 7 hours
+// off from what the user meant. This file pins down the two properties that fix depends on:
+//   1. The formatted `now` string always satisfies the server's own zone-designator regex
+//      (`_shared/schema.ts`'s `isIso8601WithZone`, `/(Z|[+-]\d{2}:\d{2})$/`) — this is the ONE
+//      thing standing between this bug and its recurrence, so it is the most important test here.
+//   2. Given a FIXED non-GMT timezone, the formatted string reflects THAT zone's wall-clock time
+//      and offset, not UTC's — a formatter that always emits `Z` would also pass test (1) while
+//      still having the exact bug, so (1) alone is not sufficient.
+// Also covers `CloudParser.validatedTimezoneField`, the defensive gate on the new `timezone` wire
+// field (parse mode only) — must accept well-formed IANA identifiers and reject anything that
+// would fail the server's own validation rule, since the server interpolates this value directly
+// into a model prompt (a real injection surface, not just cosmetic validation).
+//
+// Deliberately NO networking in this file: there is no existing `URLProtocol`-stub test
+// infrastructure anywhere in `Volar/Tests/` to reuse (checked: no other test file sets one up),
+// and building one from scratch was judged out of scope for this fix. Instead,
+// `makeRequestFormatter` and `validatedTimezoneField` were both promoted from `private` to
+// `internal` specifically so this file can exercise them directly via `@testable import Volar` —
+// the same "pull the pure logic out so it's testable without a live network/AppState" precedent
+// `CloudCompletionResolutionTests.swift` already established for `AppState.resolveCloudMatch`.
+//
+// UNVERIFIED (written entirely on Windows — no Xcode/swift toolchain available in this
+// environment): not run against a real `VolarTests` bundle. Compile-by-inspection only.
+import XCTest
+@testable import Volar
+
+final class CloudParserTests: XCTestCase {
+
+    // MARK: - (1) `now` always satisfies the server's zone-designator regex — the test that
+    // actually blocks this bug from recurring.
+
+    func testNowStringMatchesServerZoneRegexOnHostTimezone() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000) // arbitrary fixed instant
+        let formatter = CloudParser.makeRequestFormatter() // default: TimeZone.current
+        let string = formatter.string(from: now)
+
+        XCTAssertNotNil(
+            string.range(
+                of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$"#, options: .regularExpression
+            ),
+            "must match `_shared/schema.ts`'s `isIso8601WithZone` regex exactly, on ANY host " +
+            "timezone (including GMT itself, where the offset is legitimately `Z`) — got \(string)"
+        )
+    }
+
+    func testNowStringMatchesServerZoneRegexOnAFixedNonGMTZone() {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        guard let saigon = TimeZone(identifier: "Asia/Ho_Chi_Minh") else {
+            return XCTFail("Asia/Ho_Chi_Minh must be a valid TimeZone identifier on any Foundation-backed platform")
+        }
+        let formatter = CloudParser.makeRequestFormatter(timeZone: saigon)
+        let string = formatter.string(from: now)
+
+        XCTAssertNotNil(
+            string.range(
+                of: #"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(Z|[+-]\d{2}:\d{2})$"#, options: .regularExpression
+            ),
+            "got \(string)"
+        )
+        XCTAssertTrue(
+            string.hasSuffix("+07:00"),
+            "Asia/Ho_Chi_Minh has no DST and a fixed +07:00 offset year-round — must never come back as Z/UTC, got \(string)"
+        )
+    }
+
+    // MARK: - (2) A fixed non-GMT timezone reflects wall-clock time, not UTC — the bug's actual
+    // symptom (a 7-hour shift for a +07:00 user).
+
+    func testNowStringReflectsLocalWallClockNotUTC() {
+        // 1_800_000_000 unix seconds == 2027-01-15T08:00:00Z in UTC (verified independently, not
+        // just asserted). In Asia/Ho_Chi_Minh (UTC+7, no DST), the same instant's wall clock is
+        // 2027-01-15T15:00:00 — 7 hours later, matching this bug's real-world symptom exactly.
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        guard let saigon = TimeZone(identifier: "Asia/Ho_Chi_Minh") else {
+            return XCTFail("Asia/Ho_Chi_Minh must be a valid TimeZone identifier on any Foundation-backed platform")
+        }
+        let formatter = CloudParser.makeRequestFormatter(timeZone: saigon)
+        let string = formatter.string(from: now)
+
+        XCTAssertTrue(
+            string.hasPrefix("2027-01-15T15:00:00"),
+            "must emit the LOCAL wall clock (15:00 in UTC+7 for this instant), not the UTC clock " +
+            "(08:00) — the exact bug this fix closes; got \(string)"
+        )
+    }
+
+    // MARK: - (3) `validatedTimezoneField` — the defensive gate before `timezone` ever reaches
+    // the wire (the server interpolates it directly into a model prompt).
+
+    func testValidatedTimezoneFieldAcceptsWellFormedIANAIdentifiers() {
+        XCTAssertEqual(CloudParser.validatedTimezoneField("Asia/Ho_Chi_Minh"), "Asia/Ho_Chi_Minh")
+        XCTAssertEqual(CloudParser.validatedTimezoneField("UTC"), "UTC")
+        XCTAssertEqual(
+            CloudParser.validatedTimezoneField("America/Argentina/Buenos_Aires"),
+            "America/Argentina/Buenos_Aires",
+            "up to 3 slash-separated segments must be accepted"
+        )
+    }
+
+    func testValidatedTimezoneFieldRejectsEmptyString() {
+        XCTAssertNil(CloudParser.validatedTimezoneField(""))
+    }
+
+    func testValidatedTimezoneFieldRejectsOverLengthIdentifier() {
+        let tooLong = String(repeating: "A", count: 65)
+        XCTAssertNil(CloudParser.validatedTimezoneField(tooLong))
+    }
+
+    func testValidatedTimezoneFieldAcceptsExactlyMaxLength() {
+        let exactlyMax = String(repeating: "A", count: 64)
+        XCTAssertEqual(CloudParser.validatedTimezoneField(exactlyMax), exactlyMax)
+    }
+
+    func testValidatedTimezoneFieldRejectsDisallowedCharacters() {
+        // A malformed/hostile string here would be interpolated directly into the server's model
+        // prompt — this is what stands between that and the wire.
+        XCTAssertNil(CloudParser.validatedTimezoneField("Asia/Ho Chi Minh"), "space is not allowed")
+        XCTAssertNil(CloudParser.validatedTimezoneField("Asia/Ho_Chi_Minh\""), "quote is not allowed")
+        XCTAssertNil(CloudParser.validatedTimezoneField("../../etc/passwd"), "dots are not allowed")
+    }
+
+    func testValidatedTimezoneFieldRejectsTooManySegments() {
+        // The regex allows at most 3 slash-separated segments (1 + `{0,2}` repetitions) — a
+        // 4-segment string must be rejected even though every individual character is legal.
+        XCTAssertNil(CloudParser.validatedTimezoneField("A/B/C/D"))
+    }
+
+    // MARK: - `resolveCompletion` keeps using the same (now-fixed) formatter — a regression check
+    // that the fix wasn't applied to `parseDetailed` alone. `resolveCompletion` itself performs
+    // real networking so its full round trip isn't exercised here (see file header), but the
+    // formatter it calls is the exact same `makeRequestFormatter()` covered by tests (1)/(2) above
+    // — there is no second, un-fixed formatter anywhere in this file to regress to.
+    func testOnlyOneRequestFormatterExistsInThisFile() {
+        // This is intentionally a documentation-style assertion rather than a behavioral one: it
+        // records that `resolveCompletion`'s `now` field is fixed FOR FREE by fixing
+        // `makeRequestFormatter` once, since both call sites share the one function.
+        XCTAssertEqual(
+            CloudParser.makeRequestFormatter(timeZone: TimeZone(identifier: "UTC")!).string(from: Date(timeIntervalSince1970: 0)),
+            "1970-01-01T00:00:00Z"
+        )
+    }
+
+    // MARK: - `startTime` (2026-07-28: "làm task disposition code ngay lập tức" — no new task
+    // "kind"/flag, just a new `startTime` field the server/on-device model reports for urgent
+    // utterances, plus `IntentRouter.applyStartTimeDerivation` which derives a provisional
+    // `deadline` from it). These tests live here per this task's own file-ownership instructions
+    // (append to the pre-existing `CloudParserTests.swift` rather than adding a new test file),
+    // even though `applyStartTimeDerivation` and the `RawParsedTask`/`ParsedTaskValidation` decode
+    // path it covers are declared in `Sources/Parsing/IntentParsing.swift`, not `CloudParser.swift`
+    // itself — both are still part of this same Parsing-tier ownership slice.
+    //
+    // Deliberately routes every fixture through `ParsedTaskValidation.validate(_:sourceTranscript:)`
+    // (building a `RawParsedTask` — declared and fully owned in `IntentParsing.swift`) rather than
+    // constructing a `ParsedTask` directly: `ParsedTask` itself is owned by a different, parallel
+    // agent's file (`Sources/Model/NLParser.swift`, not touched here), so its exact stored-property
+    // order (and therefore its memberwise-init argument order) is NOT something this file controls
+    // or should guess at — going through `validate` sidesteps that entirely and only ever reads
+    // `ParsedTask.startTime`/`.deadline`/`.title`/`.priority` by name.
+
+    private func makeRawTask(
+        title: String = "Test task",
+        deadline: String? = nil,
+        deadlineConfidence: Double = 0.9,
+        startTime: String? = nil,
+        startTimeConfidence: Double = 0.9,
+        estimateMinutes: Double? = nil,
+        priority: Int? = nil
+    ) -> RawParsedTask {
+        RawParsedTask(
+            title: RawConfidence(value: title, confidence: 0.9),
+            deadline: deadline.map { RawConfidence(value: $0, confidence: deadlineConfidence) },
+            startTime: startTime.map { RawConfidence(value: $0, confidence: startTimeConfidence) },
+            estimateMinutes: estimateMinutes.map { RawConfidence(value: $0, confidence: 0.9) },
+            priority: priority.map { RawConfidence(value: $0, confidence: 0.9) }
+        )
+    }
+
+    // MARK: `IntentRouter.applyStartTimeDerivation`
+
+    /// 1. `startTime` present, no `deadline` -> derived `deadline` = `startTime` + the 30-minute
+    /// default (no `estimateMinutes` given).
+    func testApplyStartTimeDerivationAddsDefaultThirtyMinuteDeadline() throws {
+        let raw = makeRawTask(startTime: "2026-07-28T09:00:00+07:00")
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+        let startTime = try XCTUnwrap(task.startTime)
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+
+        let expected = try XCTUnwrap(
+            Calendar.current.date(byAdding: .minute, value: 30, to: startTime.value)
+        )
+        XCTAssertEqual(derived.deadline?.value, expected)
+    }
+
+    /// 2. `startTime` + `estimateMinutes: 45` -> derived `deadline` = `startTime` + 45 minutes, NOT
+    /// the 30-minute default (estimate wins over the default).
+    func testApplyStartTimeDerivationPrefersEstimateMinutesOverDefault() throws {
+        let raw = makeRawTask(startTime: "2026-07-28T09:00:00+07:00", estimateMinutes: 45)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+        let startTime = try XCTUnwrap(task.startTime)
+        XCTAssertEqual(task.estimateMinutes?.value, 45, "sanity: estimate must have survived validate()")
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+
+        let expected = try XCTUnwrap(
+            Calendar.current.date(byAdding: .minute, value: 45, to: startTime.value)
+        )
+        XCTAssertEqual(derived.deadline?.value, expected)
+    }
+
+    /// 3. `startTime` + an ALREADY-PRESENT `deadline` -> completely untouched (e.g. "làm ngay, 5
+    /// giờ chiều phải xong" — the explicit user-stated deadline must never be overwritten).
+    func testApplyStartTimeDerivationLeavesExistingDeadlineUntouched() throws {
+        let raw = makeRawTask(
+            deadline: "2026-07-28T17:00:00+07:00",
+            startTime: "2026-07-28T09:00:00+07:00"
+        )
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+        let originalDeadline = try XCTUnwrap(task.deadline)
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+
+        XCTAssertEqual(derived.deadline?.value, originalDeadline.value)
+        XCTAssertEqual(derived.deadline?.confidence, originalDeadline.confidence)
+    }
+
+    /// 4. No `startTime` at all -> the task returned by `applyStartTimeDerivation` is identical
+    /// (not just deadline-equal) to the input — the ordinary, overwhelming-majority case must be a
+    /// complete no-op.
+    func testApplyStartTimeDerivationIsNoOpWithoutStartTime() throws {
+        let raw = makeRawTask(deadline: "2026-07-28T17:00:00+07:00")
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+
+        XCTAssertEqual(derived, task)
+    }
+
+    /// 5. 2026-07-29 REVERSED (anh Khôi chốt — see `applyStartTimeDerivation`'s own comment in
+    /// `IntentParsing.swift` for the full story): the derived deadline's confidence used to be
+    /// deliberately UNDER `ParsedValue.isUncertain`'s `< 0.7` threshold so the confirm card required
+    /// an explicit accept tap before it would commit. That broke the feature itself — a user who
+    /// said "làm ngay lập tức" and just hit Save got a task with NO deadline persisted at all, since
+    /// `AppState.resolvedValue` drops any uncertain, unaccepted value. Now the derived deadline must
+    /// be confident ENOUGH to auto-commit on a plain Save (>= 0.7), and `deadlineIsEstimated` is the
+    /// separate signal (`ParsedTask.deadlineIsEstimated`'s own doc comment) that lets the UI still
+    /// mark it as a guess without gating it behind an accept.
+    func testApplyStartTimeDerivationDeadlineConfidenceCommitsByDefaultAndIsFlaggedEstimated() throws {
+        let raw = makeRawTask(startTime: "2026-07-28T09:00:00+07:00")
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+        let deadline = try XCTUnwrap(derived.deadline)
+
+        XCTAssertGreaterThanOrEqual(
+            deadline.confidence, 0.7,
+            "must clear `ParsedValue.isUncertain`'s 0.7 bar so `AppState.resolvedValue` commits it " +
+            "on a plain Save with no extra confirm-card tap — the whole point of this feature"
+        )
+        XCTAssertFalse(deadline.isUncertain)
+        XCTAssertTrue(
+            derived.deadlineIsEstimated,
+            "a machine-derived deadline must be flagged so the confirm card can still label it as " +
+            "a guess (e.g. \"· est\") even though it now auto-commits"
+        )
+    }
+
+    /// A deadline the model/user ALREADY stated (not derived from `startTime`) must never be
+    /// flagged `deadlineIsEstimated` — that flag means "this app guessed this," never "the user said
+    /// this." Covers both `ParsedTaskValidation.validate` (which never sets the flag) and
+    /// `applyStartTimeDerivation`'s own early-return guard (existing deadline -> completely
+    /// untouched, flag included).
+    func testExistingDeadlineIsNeverFlaggedAsEstimated() throws {
+        let raw = makeRawTask(
+            deadline: "2026-07-28T17:00:00+07:00",
+            startTime: "2026-07-28T09:00:00+07:00"
+        )
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+        XCTAssertFalse(task.deadlineIsEstimated, "sanity: validate() itself never sets this flag")
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+        XCTAssertFalse(
+            derived.deadlineIsEstimated,
+            "a deadline the user/model already stated must stay unflagged even after " +
+            "applyStartTimeDerivation's no-op pass"
+        )
+    }
+
+    /// An ordinary task with no `startTime` at all (the overwhelming common case) never touches
+    /// `deadlineIsEstimated` — it stays at its `false` default.
+    func testOrdinaryTaskWithoutStartTimeKeepsDeadlineIsEstimatedFalse() throws {
+        let raw = makeRawTask(deadline: "2026-07-28T17:00:00+07:00")
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+
+        XCTAssertFalse(derived.deadlineIsEstimated)
+    }
+
+    // MARK: - `applyStartTimeDerivation` also fills in `estimateMinutes` (2026-07-29, anh Khôi
+    // chốt — "cái 30ph là estimate trong setting của user ... task cứ default lấy từ setting ra cho
+    // duration task"). ONE setting (`AppState.defaultTaskDurationMinutes`) now drives BOTH the
+    // derived deadline AND the task's `estimateMinutes` when neither was supplied — these three
+    // tests pin that down. `defaultMinutes` is passed explicitly (not read from `UserDefaults`) in
+    // every case here, same as every test above: `applyStartTimeDerivation` stays a pure function of
+    // its parameter, never reaching into global state itself (see that function's own doc comment) —
+    // `IntentRouter.currentDefaultDurationMinutes()`, the piece that DOES read `UserDefaults`, is
+    // exercised separately from `AppState`/Settings-owning code, not here.
+
+    /// 1. No `estimateMinutes` given, `defaultMinutes: 45` -> derived deadline = `startTime` + 45',
+    /// AND `estimateMinutes` itself becomes 45 (not left `nil`) — the deadline chip and the estimate
+    /// chip must always show the same number.
+    func testApplyStartTimeDerivationWithCustomDefaultAlsoFillsInEstimateMinutes() throws {
+        let raw = makeRawTask(startTime: "2026-07-28T09:00:00+07:00")
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+        XCTAssertNil(task.estimateMinutes, "sanity: this fixture supplies no estimate")
+        let startTime = try XCTUnwrap(task.startTime)
+
+        let derived = try XCTUnwrap(
+            IntentRouter.applyStartTimeDerivation([task], defaultMinutes: 45).first
+        )
+
+        let expectedDeadline = try XCTUnwrap(
+            Calendar.current.date(byAdding: .minute, value: 45, to: startTime.value)
+        )
+        XCTAssertEqual(derived.deadline?.value, expectedDeadline)
+        XCTAssertEqual(
+            derived.estimateMinutes?.value, 45,
+            "estimateMinutes must be filled in with the SAME number used for the derived deadline"
+        )
+    }
+
+    /// 2. A task that ALREADY has `estimateMinutes` = 20 keeps it untouched even when
+    /// `defaultMinutes` is a different number (45) — the user/model-stated estimate always wins over
+    /// the setting default, and the derived deadline is computed from THAT estimate, not the default.
+    func testApplyStartTimeDerivationPreservesExistingEstimateOverDefault() throws {
+        let raw = makeRawTask(startTime: "2026-07-28T09:00:00+07:00", estimateMinutes: 20)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+        let startTime = try XCTUnwrap(task.startTime)
+
+        let derived = try XCTUnwrap(
+            IntentRouter.applyStartTimeDerivation([task], defaultMinutes: 45).first
+        )
+
+        let expectedDeadline = try XCTUnwrap(
+            Calendar.current.date(byAdding: .minute, value: 20, to: startTime.value)
+        )
+        XCTAssertEqual(derived.deadline?.value, expectedDeadline, "deadline must use the EXISTING estimate (20'), not the 45' default")
+        XCTAssertEqual(derived.estimateMinutes?.value, 20, "an already-present estimate must never be overwritten by the default")
+    }
+
+    /// 3. The derived `estimateMinutes` must clear `ParsedValue.isUncertain`'s 0.7 bar, exactly like
+    /// the derived `deadline` — otherwise `AppState.resolvedValue` silently drops it on a plain Save
+    /// and `TaskItem.durationMinutes` ends up nil despite `deadline` having committed.
+    func testApplyStartTimeDerivationEstimateMinutesConfidenceCommitsByDefault() throws {
+        let raw = makeRawTask(startTime: "2026-07-28T09:00:00+07:00")
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let derived = try XCTUnwrap(IntentRouter.applyStartTimeDerivation([task]).first)
+        let estimate = try XCTUnwrap(derived.estimateMinutes)
+
+        XCTAssertGreaterThanOrEqual(
+            estimate.confidence, 0.7,
+            "must clear the 0.7 bar so a plain Save (no accept tap) still persists TaskItem.durationMinutes"
+        )
+        XCTAssertFalse(estimate.isUncertain)
+    }
+
+    // MARK: `ParsedTask` Codable — `deadlineIsEstimated` backward-compat (2026-07-29)
+    //
+    // `ParsedTask`'s `Codable` conformance is hand-rolled in `NLParser.swift` (not synthesized)
+    // specifically because `deadlineIsEstimated` is a non-`Optional` `Bool` with a default value —
+    // synthesized `Decodable` does NOT fall back to a property's default for a missing key (it only
+    // gets that treatment for free on `Optional` properties). This test is the one thing standing
+    // between that fact and a real regression: a payload encoded before this field existed (or any
+    // hand-built JSON that simply omits it) must still decode successfully, defaulting to `false`.
+    func testDecodeParsedTaskWithoutDeadlineIsEstimatedKeyDefaultsToFalse() throws {
+        let json = """
+        {
+          "title": "Test task",
+          "sourceTranscript": "test task"
+        }
+        """.data(using: .utf8)!
+
+        let task = try JSONDecoder().decode(ParsedTask.self, from: json)
+
+        XCTAssertEqual(task.title, "Test task")
+        XCTAssertEqual(task.sourceTranscript, "test task")
+        XCTAssertFalse(task.deadlineIsEstimated, "missing key must decode as false, never throw")
+        // Sanity: every other defaulted field survives the same missing-key payload too (this
+        // hand-rolled `init(from:)` covers all of them, not just `deadlineIsEstimated`).
+        XCTAssertEqual(task.kind, .task)
+        XCTAssertEqual(task.conditions, [])
+        XCTAssertEqual(task.subtasks, [])
+        XCTAssertFalse(task.followUpReview)
+        XCTAssertNil(task.deadline)
+        XCTAssertNil(task.startTime)
+    }
+
+    // MARK: `RawParsedTask` decode (`startTime` wire field)
+
+    /// 6a. A response that DOES include `startTime` decodes it correctly.
+    func testDecodeRawParsedTaskWithStartTimePresent() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "startTime": {"value": "2026-07-28T09:00:00+07:00", "confidence": 0.85}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+
+        XCTAssertEqual(raw.startTime?.value, "2026-07-28T09:00:00+07:00")
+        XCTAssertEqual(raw.startTime?.confidence, 0.85)
+    }
+
+    /// 6b. A response that does NOT include `startTime` (the old server shape, before this field
+    /// existed, or simply a task where the model didn't emit one) must decode `startTime` as `nil`
+    /// — never throw, never crash — while every other field decodes exactly as before. This is the
+    /// concrete backward-compatibility check: an as-yet-undeployed server must not break the client.
+    func testDecodeRawParsedTaskWithoutStartTimeDefaultsToNilOtherFieldsIntact() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "deadline": {"value": "2026-07-28T17:00:00+07:00", "confidence": 0.8},
+          "priority": {"value": 2, "confidence": 0.7}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+
+        XCTAssertNil(raw.startTime, "server not yet returning startTime must decode as nil, not fail")
+        XCTAssertEqual(raw.title.value, "Test task")
+        XCTAssertEqual(raw.deadline?.value, "2026-07-28T17:00:00+07:00")
+        XCTAssertEqual(raw.priority?.value, 2)
+    }
+
+    // MARK: `ParsedTaskValidation.validate` per-attribute fallback for `startTime`
+
+    /// 7a. A `startTime` that isn't valid ISO8601 must drop ONLY `startTime` — `title`/`deadline`/
+    /// `priority` on the same task must all survive untouched (constitution II: "a parsing error on
+    /// one attribute must not discard the others").
+    func testValidateDropsOnlyMalformedStartTimeStringKeepingOtherFields() {
+        let raw = makeRawTask(
+            deadline: "2026-07-28T17:00:00+07:00",
+            startTime: "not-a-valid-iso8601-string",
+            priority: 1
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertNil(task.startTime)
+        XCTAssertEqual(task.title, "Test task")
+        XCTAssertEqual(task.deadline?.value, ParsedTaskValidation.parseISO8601("2026-07-28T17:00:00+07:00"))
+        XCTAssertEqual(task.priority?.value, 1)
+    }
+
+    /// 7b. A `startTime` with an out-of-range confidence (outside 0...1) must likewise drop ONLY
+    /// `startTime`, keeping every other field.
+    func testValidateDropsStartTimeWithOutOfRangeConfidenceKeepingOtherFields() {
+        let raw = makeRawTask(
+            startTime: "2026-07-28T09:00:00+07:00",
+            startTimeConfidence: 1.5,
+            priority: 2
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertNil(task.startTime)
+        XCTAssertEqual(task.title, "Test task")
+        XCTAssertEqual(task.priority?.value, 2)
+    }
+}

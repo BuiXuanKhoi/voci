@@ -76,6 +76,13 @@ final class VolarTask {
     var priorityRaw: Int
     var statusRaw: String
     var deadline: Date?
+    /// Mirrors `TaskItem.startTime` (see that file for full semantics: when the user said they'd
+    /// start an urgent task — does NOT drive ordering/eligibility/reminders). No explicit `= nil`
+    /// default, matching this file's existing convention for every other `Optional`-typed stored
+    /// attribute (`deadline`/`durationMinutes`/`notes`/`parentId`/... above and below) — SwiftData
+    /// lightweight migration only requires an explicit default for NON-optional attributes;
+    /// `Optional` already defaults to `nil` for a row written before this column existed.
+    var startTime: Date?
     /// DEPRECATED — superseded by `conditions`. Kept only so pre-v2 rows still decode; folded and
     /// cleared by `foldLegacyDependsOn()` on first load (see migration note at the top of this
     /// file). Never written to by any v2 code path.
@@ -128,6 +135,7 @@ final class VolarTask {
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
+        startTime: Date? = nil,
         createdAt: Date = Date(),
         when: When,
         durationMinutes: Int? = nil,
@@ -139,6 +147,7 @@ final class VolarTask {
         self.priorityRaw = priority.rawValue
         self.statusRaw = Self.rawValue(for: status)
         self.deadline = deadline
+        self.startTime = startTime
         self.createdAt = createdAt
         self.whenRaw = Self.rawValue(for: when)
         self.durationMinutes = durationMinutes
@@ -234,6 +243,7 @@ final class VolarTask {
             priority: Priority(rawValue: priorityRaw) ?? .medium,
             status: status,
             deadline: deadline,
+            startTime: startTime,
             conditions: conditions,
             createdAt: createdAt,
             when: Self.when(from: whenRaw),
@@ -262,6 +272,7 @@ final class VolarTask {
         priorityRaw = item.priority.rawValue
         status = item.status
         deadline = item.deadline
+        startTime = item.startTime
         conditions = item.conditions
         createdAt = item.createdAt
         whenRaw = Self.rawValue(for: item.when)

@@ -69,18 +69,29 @@ final class ReminderScheduler: NSObject {
 
     /// Rebuilds ALL scheduler state from durable storage: re-derives reminders for every open,
     /// dated task that doesn't have any `ReminderRecord` yet (covers a task created/edited before
-    /// this scheduler existed, or a derivation that never landed), fires any `.scheduled` record
-    /// already past due ("due-but-missed" recovery — constitution IV), then refills the system's
-    /// pending-request queue with the nearest-N. Call once at launch; also called automatically on
-    /// `NSWorkspace.didWakeNotification` (see `init`). O(n) in the number of persisted tasks/
-    /// records: one `TaskStore.fetchAll()`, one records fetch, one dictionary build — no nested
-    /// re-fetching per record.
+    /// this scheduler existed, or a derivation that never landed) — and, for a no-deadline task
+    /// specifically, ALSO re-derives once its current nudge batch has fully fired, so "lặp mãi mỗi
+    /// 3 ngày" actually keeps going instead of going quiet after the first batch (see
+    /// `ensureDerived`'s doc comment for the full reasoning and why that doesn't apply to a
+    /// deadline task) — fires any `.scheduled` record already past due ("due-but-missed" recovery
+    /// — constitution IV), then refills the system's pending-request queue with the nearest-N.
+    /// Call once at launch; also called automatically on `NSWorkspace.didWakeNotification` (see
+    /// `init`). O(n) in the number of persisted tasks/records: one `TaskStore.fetchAll()`, one
+    /// records fetch, one dictionary build — no nested re-fetching per record.
     func rebuildFromStorage() {
         let now = Date()
         let tasks = store.fetchAll()
-        let openDatedTasks = tasks.filter { ($0.status == .todo || $0.status == .inProgress) && $0.deadline != nil }
-        for task in openDatedTasks {
-            ensureDerived(taskId: task.id, deadline: task.deadline, reminderOverride: task.reminderOverride)
+        // WG-nudge: this used to require `$0.deadline != nil` too, so an open task with no
+        // deadline never got any reminder derived for it at all. anh Khôi's approved design gives
+        // every open task SOME reminder now — a deadline-anchored one if it has a deadline, else a
+        // gentle createdAt-anchored backoff nudge (`ReminderRecord.derive`'s no-deadline branch) —
+        // so this only gates on lifecycle status, not on whether a deadline is set.
+        let openTasks = tasks.filter { $0.status == .todo || $0.status == .inProgress }
+        for task in openTasks {
+            ensureDerived(
+                taskId: task.id, deadline: task.deadline, createdAt: task.createdAt,
+                priority: task.priority.rawValue, reminderOverride: task.reminderOverride, now: now
+            )
         }
 
         let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
@@ -131,7 +142,8 @@ final class ReminderScheduler: NSObject {
     /// reminders at all.
     func scheduleReminders(for task: VolarTask) {
         deriveAndSchedule(
-            taskId: task.id, status: task.status, deadline: task.deadline, reminderOverride: task.reminderOverride
+            taskId: task.id, status: task.status, deadline: task.deadline, createdAt: task.createdAt,
+            priority: task.priorityRaw, reminderOverride: task.reminderOverride
         )
     }
 
@@ -146,18 +158,22 @@ final class ReminderScheduler: NSObject {
     func scheduleReminders(taskId: UUID) {
         guard let task = store.fetchAll().first(where: { $0.id == taskId }) else { return }
         deriveAndSchedule(
-            taskId: taskId, status: task.status, deadline: task.deadline, reminderOverride: task.reminderOverride
+            taskId: taskId, status: task.status, deadline: task.deadline, createdAt: task.createdAt,
+            priority: task.priority.rawValue, reminderOverride: task.reminderOverride
         )
     }
 
     /// Shared body for both `scheduleReminders` overloads above, so the derive logic can't drift
     /// apart between them.
-    private func deriveAndSchedule(taskId: UUID, status: TaskStatus, deadline: Date?, reminderOverride: ReminderPolicy?) {
+    private func deriveAndSchedule(
+        taskId: UUID, status: TaskStatus, deadline: Date?, createdAt: Date, priority: Int?,
+        reminderOverride: ReminderPolicy?
+    ) {
         clearScheduled(taskId: taskId)
         guard status == .todo || status == .inProgress else { return }
         let records = ReminderRecord.derive(
-            taskId: taskId, deadline: deadline, reminderOverride: reminderOverride,
-            globalPolicy: Self.currentGlobalReminderPolicy()
+            taskId: taskId, deadline: deadline, createdAt: createdAt, priority: priority,
+            reminderOverride: reminderOverride, globalPolicy: Self.currentGlobalReminderPolicy(), now: Date()
         )
         for record in records { context.insert(record) }
         save()
@@ -490,15 +506,24 @@ final class ReminderScheduler: NSObject {
     /// system, capped at `capacity`. No I/O — directly unit-testable
     /// (`ReminderSchedulerTests.testNearestNRefillUnderCap`) without touching
     /// `UNUserNotificationCenter` at all.
+    ///
+    /// WG-nudge (ship-blocker, flagged by anh Khôi): every open task now gets SOME reminder, even
+    /// one with no deadline (`offsetKind == "nudge"`, `ReminderRecord.derive`'s no-deadline
+    /// branch). A plain "earliest fire time wins" sort would let a pile of near-term nudges (e.g.
+    /// dozens of stale tasks all due to nudge within the next hour) crowd a REAL deadline
+    /// reminder — one that actually matters and is due tomorrow — out of the `capacity` slots
+    /// entirely, since it fires later than all of them. Deadline-anchored reminders (every
+    /// `offsetKind` except `"nudge"`: `-1d`/`-1h`/`at`/`override`/`resurface`/`unblocked`) are
+    /// therefore given priority as a GROUP — all of them are placed ahead of every `"nudge"`
+    /// record regardless of which fires sooner — with nudges only filling whatever capacity is
+    /// left over. Within each group, earliest-first ordering is unchanged.
     static func nearestCandidates(_ records: [ReminderRecord], excluding registeredIds: [UUID], capacity: Int) -> [ReminderRecord] {
         guard capacity > 0 else { return [] }
         let excluded = Set(registeredIds)
-        return Array(
-            records
-                .filter { $0.state == "scheduled" && !excluded.contains($0.id) }
-                .sorted { $0.fireAt < $1.fireAt }
-                .prefix(capacity)
-        )
+        let eligible = records.filter { $0.state == "scheduled" && !excluded.contains($0.id) }
+        let prioritized = eligible.filter { $0.offsetKind != "nudge" }.sorted { $0.fireAt < $1.fireAt }
+        let nudges = eligible.filter { $0.offsetKind == "nudge" }.sorted { $0.fireAt < $1.fireAt }
+        return Array((prioritized + nudges).prefix(capacity))
     }
 
     private func postScheduledRequest(record: ReminderRecord, task: TaskItem) async {
@@ -586,14 +611,44 @@ final class ReminderScheduler: NSObject {
         for record in scheduled { context.delete(record) }
     }
 
-    /// Only derives when NO record exists yet for `taskId` (any state) — makes repeated
+    /// Derives when NO record exists yet for `taskId` (any state) — makes repeated
     /// `rebuildFromStorage()` calls idempotent instead of re-deriving (and re-firing) the same
-    /// offsets on every wake.
-    private func ensureDerived(taskId: UUID, deadline: Date?, reminderOverride: ReminderPolicy?) {
-        guard recordsForTask(taskId).isEmpty else { return }
+    /// offsets on every wake. For a no-deadline task ONLY, ALSO re-derives once its current batch
+    /// has fully fired — see the asymmetry note below.
+    ///
+    /// FIX (anh Khôi's "lặp mãi" nudge repeat, ship-blocker — was a KNOWN GAP left unfixed by the
+    /// task that introduced the no-deadline "nudge" backoff): `ReminderRecord.derive`'s no-deadline
+    /// branch caps out at `maxBeforeDeadlineMarks` (8) marks per call BY DESIGN — "repeat forever"
+    /// literally cannot be a finite list, so the architecture leans on being CALLED AGAIN later to
+    /// top up (see that function's own doc comment). The plain "any record at all" guard used to
+    /// defeat that: once all 8 nudges in a batch had fired (state `"delivered"`/`"satisfied"`),
+    /// `recordsForTask(taskId)` was never empty again, so this method stopped deriving anything
+    /// further for that task FOREVER — the opposite of "lặp mãi mỗi 3 ngày". Fixed by also
+    /// re-deriving whenever the no-deadline task has no `"scheduled"` record left with `fireAt` in
+    /// the future (i.e. the whole current batch is spent and needs topping up).
+    ///
+    /// ⚠️ ASYMMETRIC ON PURPOSE — do NOT "simplify" this to the same condition for a task WITH a
+    /// deadline. A deadline task's fixed `policy.offsets` marks (e.g. offset `0` = "at deadline")
+    /// sit in the PAST once the task is overdue, and `ReminderRecord.derive`'s overdue branch
+    /// returns those past offsets VERBATIM with no future-only filtering (unlike `noDeadlineMarks`,
+    /// which only ever keeps marks `> now`). Loosening this guard the same way for a deadline task
+    /// would re-derive and re-insert those already-fired past-due marks as brand-new `.scheduled`
+    /// rows on every later `rebuildFromStorage`/wake, re-firing a notification the user already
+    /// received. A no-deadline task has no such risk (`noDeadlineMarks` never emits a mark that
+    /// isn't strictly after `now`), so only it gets the loosened re-derive condition below.
+    private func ensureDerived(
+        taskId: UUID, deadline: Date?, createdAt: Date, priority: Int?, reminderOverride: ReminderPolicy?, now: Date
+    ) {
+        let existing = recordsForTask(taskId)
+        if deadline == nil {
+            let hasFutureScheduled = existing.contains { $0.state == "scheduled" && $0.fireAt > now }
+            guard existing.isEmpty || !hasFutureScheduled else { return }
+        } else {
+            guard existing.isEmpty else { return }
+        }
         let records = ReminderRecord.derive(
-            taskId: taskId, deadline: deadline, reminderOverride: reminderOverride,
-            globalPolicy: Self.currentGlobalReminderPolicy()
+            taskId: taskId, deadline: deadline, createdAt: createdAt, priority: priority,
+            reminderOverride: reminderOverride, globalPolicy: Self.currentGlobalReminderPolicy(), now: now
         )
         for record in records { context.insert(record) }
         save()

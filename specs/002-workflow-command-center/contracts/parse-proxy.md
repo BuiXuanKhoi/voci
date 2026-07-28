@@ -14,12 +14,22 @@ X-Device-Token: <DeviceCheck token>             (free — metered)
 Content-Type: application/json
 
 { "transcript": "<text, ≤2000 chars>", "locale_hint": "vi|en|mixed",
-  "now": "<ISO8601 with zone>", "open_task_titles": ["..."] }   // titles only, for taskDone linking
+  "now": "<ISO8601, user's LOCAL time with its real UTC offset>", "open_task_titles": ["..."],
+  "timezone": "<IANA id, optional>" }   // open_task_titles: titles only, for taskDone linking
 ```
 
 - **Text only. Audio is never accepted by this route** (constitution I).
 - `open_task_titles` is optional and capped (≤100 titles) — sent only when the utterance
   contains dependency phrasing; contains no ids, notes, or dates.
+- `now` MUST be the user's **local** wall-clock time carrying its real UTC offset (e.g.
+  `2026-07-28T15:00:00+07:00`) — never UTC/`Z`. A zone-less or UTC-normalized `now` makes the
+  server's relative-date resolution ("mai", "chiều nay", …) resolve against the wrong clock.
+- `timezone` is optional (older clients may omit it) — the user's IANA timezone id (e.g.
+  `Asia/Ho_Chi_Minh`), 1–64 chars, matching `^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+){0,2}$`. It is
+  extra context for the model on top of `now`'s offset (DST, dates further out than a bare offset
+  implies) — `now` remains the primary source of the current instant. Values that don't match the
+  pattern are rejected with `400` rather than passed through, since this field is interpolated into
+  the model prompt and the strict charset is what keeps it from being a prompt-injection vector.
 
 ## Response
 

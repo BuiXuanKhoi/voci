@@ -29,7 +29,19 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     var details: String
     var priority: Priority
     var status: TaskStatus
+    /// The moment this task must be DONE by — drives ordering tier 2 of `VolarCore.nextTask` (see
+    /// `NextTask.swift`) and the reminder subsystem. Contrast with `startTime` immediately below,
+    /// which is a different instant entirely.
     var deadline: Date?
+    /// The moment the user said they'd START working — set from an urgent utterance ("làm ngay
+    /// lập tức" / "right now"), where `startTime` = the instant the utterance was spoken.
+    /// Deliberately inert: it does NOT drive ordering, eligibility, or reminders (those all stay
+    /// on `deadline`/`conditions` exactly as before). An urgent task "jumps the queue" because its
+    /// PARSER-DERIVED `deadline` (typically `startTime + 30min`) lands in today's near-term tier,
+    /// not because of this field — this is carried purely as data for anything downstream that
+    /// wants to show/reason about "when did they mean to start". `nil` for every task that wasn't
+    /// created from an urgent utterance.
+    var startTime: Date?
     /// Gates eligibility (replaces v1's `dependsOn: [UUID]` — data-model.md "Persisted layer").
     /// AND semantics, mirrors `VolarCore.Task.conditions` 1:1 (see `snapshot()`). `.taskDone`
     /// edges must be validated via `TaskStore` before being attached (validation rule 1); this
@@ -76,6 +88,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
+        startTime: Date? = nil,
         conditions: [VolarCore.Condition] = [],
         createdAt: Date = Date(),
         when: When,
@@ -98,6 +111,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         self.priority = priority
         self.status = status
         self.deadline = deadline
+        self.startTime = startTime
         self.conditions = conditions
         self.createdAt = createdAt
         self.when = when

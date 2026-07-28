@@ -477,6 +477,7 @@ final class TaskStore {
             priority: item.priority,
             status: item.status,
             deadline: item.deadline,
+            startTime: item.startTime,
             createdAt: item.createdAt,
             when: item.when,
             durationMinutes: item.durationMinutes,

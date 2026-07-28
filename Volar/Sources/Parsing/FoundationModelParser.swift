@@ -156,8 +156,51 @@ extension FoundationModelParser {
         return response.content
     }
 
+    /// Fresh instance per call (no shared `static let`) — mirrors `CloudParser
+    /// .makeRequestFormatter`'s concurrency rationale: `ISO8601DateFormatter` is a Foundation
+    /// reference type Apple has not audited/marked `Sendable`, and this file's methods run
+    /// off the main actor. Emits the device's LOCAL wall-clock time with its real UTC offset
+    /// (e.g. `+07:00`), never `Z`/UTC — this file has no server-side validator forcing the issue
+    /// the way `CloudParser`'s `now` has (`_shared/schema.ts`'s `isIso8601WithZone`), since nothing
+    /// here ever leaves the device, but `.withInternetDateTime` + `timeZone = .current` is kept
+    /// for consistency with `CloudParser` and because `dateTimeRules` below assumes the offset in
+    /// "Current time" is present and reflects the user's actual wall clock (the same class of bug
+    /// `CloudParser.makeRequestFormatter`'s doc comment describes: silently mislabeling local time
+    /// as UTC would make every relative-time phrase resolve against the wrong clock).
+    private static func makePromptFormatter() -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = .current
+        return formatter
+    }
+
+    /// Short date/time resolution rules injected into every parse prompt. Deliberately terser than
+    /// the cloud tier's `buildVietnameseDateInstructions` (`supabase/functions/_shared/gemini.ts`)
+    /// — this is a small on-device model, so the prompt needs to stay concise; kept in sync
+    /// LOOSELY, not byte-for-byte, with that file, same convention `systemInstructions` above
+    /// already documents for this file. The end-of-period clock defaults below (sáng=12:00,
+    /// trưa=13:00, chiều=18:00, tối=22:00, đêm=23:59) are meant to match `gemini.ts`'s own table
+    /// value-for-value — cross-check both sides before changing either.
+    private static let dateTimeRules = """
+        Date/time rules: resolve every relative time expression to an absolute date/time computed \
+        from "Current time" above, and keep the SAME UTC offset in your output deadline — never \
+        convert it to Z/UTC. Days: mai/ngày mai = +1 day; mốt/ngày kia = +2 days; hôm nay = today. \
+        Vietnamese states the number BEFORE the period word (opposite of English): "3 giờ chiều" = \
+        15:00, "9 giờ sáng" = 09:00 — when a number is given, use it exactly. When a period word \
+        has NO number, use its end-of-period default: sáng/morning = 12:00, trưa/noon = 13:00, \
+        chiều/afternoon = 18:00, tối/evening = 22:00, đêm/night = 23:59. If a resolved time is \
+        already in the past relative to "Current time", output that past time as-is — do not push \
+        it to tomorrow. startTime vs deadline: deadline is when a task must be DONE; startTime is \
+        when the speaker BEGINS it — a bare clock time defaults to deadline, never startTime. Only \
+        set startTime when the utterance states an explicit start ("bắt đầu", "làm từ", "start \
+        at") or urgency ("ngay lập tức", "làm ngay", "gấp", "khẩn", "asap", "right now", \
+        "immediately", "drop everything"); for urgency, set startTime = Current time exactly and \
+        priority = 1, and omit deadline entirely unless the utterance ALSO states its own explicit \
+        deadline (then output both) — never invent a deadline just because a task is urgent.
+        """
+
     private static func buildParsePrompt(transcript: String, now: Date, openTaskTitles: [String]) -> String {
-        var prompt = "Current time: \(ISO8601DateFormatter().string(from: now))\nUtterance: \(transcript)"
+        var prompt = "Current time: \(makePromptFormatter().string(from: now))\n\(dateTimeRules)\nUtterance: \(transcript)"
         if !openTaskTitles.isEmpty {
             prompt += "\nOpen tasks (for dependency matching only, titles are approximate): "
                 + openTaskTitles.joined(separator: "; ")
@@ -174,6 +217,9 @@ extension FoundationModelParser {
             notes: generated.notes.map { RawConfidence(value: $0, confidence: generated.notesConfidence ?? 0.5) },
             deadline: generated.deadlineISO8601.map {
                 RawConfidence(value: $0, confidence: generated.deadlineConfidence ?? 0.5)
+            },
+            startTime: generated.startTimeISO8601.map {
+                RawConfidence(value: $0, confidence: generated.startTimeConfidence ?? 0.5)
             },
             estimateMinutes: generated.estimateMinutes.map {
                 RawConfidence(value: Double($0), confidence: generated.estimateConfidence ?? 0.5)
@@ -242,6 +288,16 @@ struct GeneratedParsedTask {
     @Guide(description: "ISO8601 absolute deadline instant if stated or clearly implied, else omit.")
     var deadlineISO8601: String?
     var deadlineConfidence: Double?
+
+    @Guide(description: """
+        ISO8601 instant the speaker BEGINS working (distinct from deadlineISO8601, when it must be \
+        DONE). Omit unless the utterance states an explicit start ("bắt đầu lúc...", "làm từ...", \
+        "start at...") OR signals urgency ("ngay lập tức", "làm ngay", "gấp", "asap", "right now", \
+        "immediately") — for urgency, set this to Current time exactly and omit deadlineISO8601 \
+        unless the utterance ALSO states its own explicit deadline.
+        """)
+    var startTimeISO8601: String?
+    var startTimeConfidence: Double?
 
     @Guide(description: "Estimated duration in minutes, if stated or clearly implied.")
     var estimateMinutes: Int?
