@@ -1,5 +1,9 @@
 # Backlog - voci
 
+> **★ TRẠNG THÁI DEPLOY 2026-07-29:** edge function `parse` ĐÃ DEPLOY lên project `nuzrpipwacravfgsiacv` (commit `5019d7f`, nhánh `macos`). Chỉ deploy `parse` — `groq`/`subscription` không đụng tới vì `schema.ts`/`gemini.ts` chỉ `parse` import. Smoke test sau deploy: GET→405, POST không auth→401 `auth_missing`, POST sai content-type→415 ⇒ isolate boot sạch, import mới load được.
+> **VẪN CHƯA VERIFY:** đường gọi Gemini thật (cần access token của user thật, không test được từ máy này). Nghĩa là **toàn bộ luật giờ giấc/mốc buổi/khẩn cấp/remindPeriod đang chạy trên production mà chưa từng được kiểm với model thật.** Cách kiểm: chạy `supabase/scripts/probe-time-parsing.ts` với `GEMINI_API_KEY` (17 case có đáp án biết trước), hoặc nói thử vài câu trong app trên Mac. Nếu probe fail, sửa prompt trong `gemini.ts` rồi deploy lại — không cần đụng client.
+> Xác nhận thêm: lệnh deploy chỉ upload 8 file (`parse/index.ts` + 7 file `_shared/` được import) — `supabase/tests/` và `supabase/scripts/` KHÔNG bị ship lên production.
+
 - [ ] **★ MERGE NOTES vào task đã có — anh Khôi chốt 2026-07-29, CHƯA BUILD MAC.** Trước đó gõ ghi chú rồi chọn "use existing" → ghi chú **biến mất không báo gì**, vì `mergeTransform` cố ý không đụng `title`/`kind`/`notes`. Chốt cũ đó có từ lúc notes chưa sửa được trên card nên tình huống này chưa tồn tại.
   - Giờ `notes` merge, **`title`/`kind` VẪN không merge** (merge title = đổi tên task đã có, việc khác hẳn, anh Khôi chưa yêu cầu).
   - **NỐI THÊM chứ không đè** — cố ý LỆCH khỏi quy ước "scalar thì đè" của mọi field khác trong `mergeTransform`. Đè là mất chữ user đã có mà không báo; nối thì không mất gì. Có comment giải thích tại chỗ để người sau không "sửa" cho đồng bộ. 4 nhánh: cũ rỗng → gán thẳng; cũ có → `cũ + "\n" + mới`; cũ đã CHỨA mới → không nối (chống đọc lại gần y hệt câu cũ); draft không có notes → không đụng gì.
