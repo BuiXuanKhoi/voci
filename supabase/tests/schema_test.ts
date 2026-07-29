@@ -17,9 +17,16 @@
 
 import { assertEquals, assertExists } from "jsr:@std/assert@1";
 import {
+  MAX_CONTEXT_TRANSCRIPT_CHARS,
+  MAX_DREAD_MESSAGE_CHARS,
+  MAX_EXISTING_SUBTASKS,
+  MAX_NEXT_ACTION_CHARS,
   MAX_NOTES_CHARS,
   MAX_TASKS,
+  MAX_TASK_TITLE_CHARS,
   type ParsedTaskOut,
+  validateDreadMessage,
+  validateNextActionMessage,
   validateParsedTaskArray,
   validateRequestBody,
 } from "../functions/_shared/schema.ts";
@@ -281,4 +288,361 @@ Deno.test("regression: broken remindPeriodMinutes only drops remindPeriodMinutes
   assertExists(result.tasks[0].reminderOverride);
   assertEquals(result.tasks[0].reminderOverride!.value.remindPeriodMinutes, undefined);
   assertEquals(result.tasks[0].reminderOverride!.value.offsetsMinutes, [-10, -5]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 12. "stuck" mode request validation (Change: anh Khôi's "Stuck?" feature, 2026-07-29).
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("validateRequestBody: stuck/too_big with valid task_title passes", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "too_big",
+    task_title: "Nộp báo cáo Q3",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "stuck") {
+    assertEquals(result.value.reason, "too_big");
+    assertEquals(result.value.taskTitle, "Nộp báo cáo Q3");
+    assertEquals(result.value.notes, undefined);
+  }
+});
+
+Deno.test("validateRequestBody: stuck/dread with task_title + notes passes", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "dread",
+    task_title: "Call the landlord",
+    notes: "haven't picked up the phone in weeks",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "stuck") {
+    assertEquals(result.value.reason, "dread");
+    assertEquals(result.value.notes, "haven't picked up the phone in weeks");
+  }
+});
+
+Deno.test("validateRequestBody: stuck with an invalid reason is rejected", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "cant_start", // never valid on the wire — client handles this reason locally, no model call
+    task_title: "Anything",
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("validateRequestBody: stuck with a bogus/unrecognized reason is rejected", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "bored",
+    task_title: "Anything",
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("validateRequestBody: stuck missing task_title is rejected", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "dread",
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("validateRequestBody: stuck notes over MAX_NOTES_CHARS is rejected", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "dread",
+    task_title: "Anything",
+    notes: "x".repeat(MAX_NOTES_CHARS + 1),
+  });
+  assertEquals(result.ok, false);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 13. validateDreadMessage — the "stuck"/"dread" model-output validator.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("validateDreadMessage: a well-formed message passes through trimmed", () => {
+  const result = validateDreadMessage({ message: "  Open the invoice PDF and read the first line.  " });
+  assertEquals(result, "Open the invoice PDF and read the first line.");
+});
+
+Deno.test("validateDreadMessage: over MAX_DREAD_MESSAGE_CHARS is rejected outright (never truncated)", () => {
+  const result = validateDreadMessage({ message: "x".repeat(MAX_DREAD_MESSAGE_CHARS + 1) });
+  assertEquals(result, undefined);
+});
+
+Deno.test("validateDreadMessage: exactly MAX_DREAD_MESSAGE_CHARS passes", () => {
+  const result = validateDreadMessage({ message: "x".repeat(MAX_DREAD_MESSAGE_CHARS) });
+  assertEquals(result, "x".repeat(MAX_DREAD_MESSAGE_CHARS));
+});
+
+Deno.test("validateDreadMessage: empty/whitespace-only message is rejected", () => {
+  assertEquals(validateDreadMessage({ message: "" }), undefined);
+  assertEquals(validateDreadMessage({ message: "   " }), undefined);
+});
+
+Deno.test("validateDreadMessage: model returns garbage shapes -> undefined, never passed through", () => {
+  assertEquals(validateDreadMessage(null), undefined);
+  assertEquals(validateDreadMessage(undefined), undefined);
+  assertEquals(validateDreadMessage("just a bare string"), undefined);
+  assertEquals(validateDreadMessage([]), undefined);
+  assertEquals(validateDreadMessage({}), undefined);
+  assertEquals(validateDreadMessage({ message: 123 }), undefined);
+  assertEquals(validateDreadMessage({ message: null }), undefined);
+  assertEquals(validateDreadMessage({ notMessage: "wrong field name" }), undefined);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 14. validateNextActionMessage — the REDESIGNED "stuck"/"too_big" model-output validator
+//     (anh Khôi, 2026-07-29: replaces the old 3-9 step plan with exactly one next physical action).
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("validateNextActionMessage: a well-formed single action passes through trimmed", () => {
+  const result = validateNextActionMessage({ message: "  Mở file Minh gửi ra.  " });
+  assertEquals(result, "Mở file Minh gửi ra.");
+});
+
+Deno.test("validateNextActionMessage: over MAX_NEXT_ACTION_CHARS is rejected outright (never truncated)", () => {
+  const result = validateNextActionMessage({ message: "x".repeat(MAX_NEXT_ACTION_CHARS + 1) });
+  assertEquals(result, undefined);
+});
+
+Deno.test("validateNextActionMessage: exactly MAX_NEXT_ACTION_CHARS passes", () => {
+  const result = validateNextActionMessage({ message: "x".repeat(MAX_NEXT_ACTION_CHARS) });
+  assertEquals(result, "x".repeat(MAX_NEXT_ACTION_CHARS));
+});
+
+Deno.test("validateNextActionMessage: a full breakdown-shaped plan (much longer than one action) is rejected", () => {
+  // Regression guard for the exact failure mode this redesign exists to prevent: a model that
+  // ignores "exactly ONE action" and reverts to listing several steps must be caught by the cap,
+  // not silently accepted because SOME string was present. Built by repeating a step-shaped clause
+  // rather than a hand-picked sentence, so the fixture is guaranteed to exceed the cap regardless
+  // of exact wording (asserted below rather than assumed).
+  const wouldBeAPlan =
+    "Bước 1: mở file. Bước 2: đọc số liệu. Bước 3: viết phần phân tích. Bước 4: rà soát lại. " +
+    "Bước 5: gửi cho sếp Hùng trước thứ 5. Bước 6: lưu bản sao. Bước 7: thông báo cho cả nhóm. " +
+    "Bước 8: xin xác nhận lần cuối trước khi gửi đi chính thức.";
+  assertEquals(wouldBeAPlan.length > MAX_NEXT_ACTION_CHARS, true, "sanity: this fixture must actually exceed the cap");
+  assertEquals(validateNextActionMessage({ message: wouldBeAPlan }), undefined);
+});
+
+Deno.test("validateNextActionMessage: MAX_NEXT_ACTION_CHARS is deliberately shorter than MAX_DREAD_MESSAGE_CHARS", () => {
+  // A next-action message is ONE clause (the action alone); a dread message is TWO clauses (name
+  // the dreaded detail, then the action) — this is the one place that relationship is pinned down
+  // so a future edit can't silently make them equal or invert them.
+  assertEquals(MAX_NEXT_ACTION_CHARS < MAX_DREAD_MESSAGE_CHARS, true);
+});
+
+Deno.test("validateNextActionMessage: model returns garbage shapes -> undefined, never passed through", () => {
+  assertEquals(validateNextActionMessage(null), undefined);
+  assertEquals(validateNextActionMessage(undefined), undefined);
+  assertEquals(validateNextActionMessage("just a bare string"), undefined);
+  assertEquals(validateNextActionMessage([]), undefined);
+  assertEquals(validateNextActionMessage({}), undefined);
+  assertEquals(validateNextActionMessage({ message: 123 }), undefined);
+  assertEquals(validateNextActionMessage({ steps: ["not the right field"] }), undefined);
+});
+
+// ---------------------------------------------------------------------------------------------
+// 15. Context addendum (anh Khôi, 2026-07-29): `source_transcript`/`deadline`/`existing_subtasks`
+//     on `breakdown` and `stuck` requests — ALL THREE optional and fail-open. Backward-compat with
+//     older clients that never send them is the load-bearing property here.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("backward-compat: breakdown request with NO context fields still passes exactly as before", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Launch landing page",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.sourceTranscript, undefined);
+    assertEquals(result.value.deadline, undefined);
+    assertEquals(result.value.existingSubtasks, undefined);
+  }
+});
+
+Deno.test("backward-compat: stuck request with NO context fields still passes exactly as before", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "too_big",
+    task_title: "Launch landing page",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "stuck") {
+    assertEquals(result.value.sourceTranscript, undefined);
+    assertEquals(result.value.deadline, undefined);
+    assertEquals(result.value.existingSubtasks, undefined);
+  }
+});
+
+Deno.test("context: source_transcript within cap is forwarded verbatim", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "làm báo cáo Q3",
+    source_transcript: "làm báo cáo Q3 cho sếp Hùng trước thứ 5, số liệu lấy từ file Minh gửi",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(
+      result.value.sourceTranscript,
+      "làm báo cáo Q3 cho sếp Hùng trước thứ 5, số liệu lấy từ file Minh gửi",
+    );
+  }
+});
+
+Deno.test("context: over-cap source_transcript is TRUNCATED, never rejects the request", () => {
+  const overCap = "x".repeat(MAX_CONTEXT_TRANSCRIPT_CHARS + 500);
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    source_transcript: overCap,
+  });
+  assertEquals(result.ok, true, "an oversized supplementary context field must never take down the whole request");
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.sourceTranscript?.length, MAX_CONTEXT_TRANSCRIPT_CHARS);
+    assertEquals(result.value.sourceTranscript, "x".repeat(MAX_CONTEXT_TRANSCRIPT_CHARS));
+  }
+});
+
+Deno.test("context: blank/whitespace-only source_transcript is dropped, not forwarded as empty content", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    source_transcript: "   ",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.sourceTranscript, undefined);
+  }
+});
+
+Deno.test("context: wrong-type source_transcript is dropped, never rejects the request", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "dread",
+    task_title: "Anything",
+    source_transcript: 12345, // not a string
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "stuck") {
+    assertEquals(result.value.sourceTranscript, undefined);
+  }
+});
+
+Deno.test("context: deadline with a real UTC offset is kept", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    deadline: "2026-08-06T18:00:00+07:00",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.deadline, "2026-08-06T18:00:00+07:00");
+  }
+});
+
+Deno.test("context: deadline WITHOUT a zone is dropped, never rejects the request", () => {
+  // Same zone requirement as `now` in parse mode (isIso8601WithZone) — but unlike `now`, a
+  // malformed OPTIONAL deadline here degrades to "no deadline context", not a 400.
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "too_big",
+    task_title: "Anything",
+    deadline: "2026-08-06T18:00:00", // no offset/Z
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "stuck") {
+    assertEquals(result.value.deadline, undefined);
+  }
+});
+
+Deno.test("context: garbage deadline is dropped, never rejects the request", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    deadline: "not-a-date",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.deadline, undefined);
+  }
+});
+
+Deno.test("context: existing_subtasks — good entries kept, one bad entry among them dropped alone", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Launch landing page",
+    existing_subtasks: [
+      { title: "Open Framer", done: true },
+      { title: "" /* empty title */, done: false },
+      { title: "Draft the headline", done: false },
+      { done: true /* missing title entirely */ },
+      { title: "Ship it", done: "yes" /* wrong type for done */ },
+    ],
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.existingSubtasks, [
+      { title: "Open Framer", done: true },
+      { title: "Draft the headline", done: false },
+    ]);
+  }
+});
+
+Deno.test("context: existing_subtasks not an array is dropped entirely, never rejects the request", () => {
+  const result = validateRequestBody({
+    mode: "stuck",
+    reason: "too_big",
+    task_title: "Anything",
+    existing_subtasks: "not an array",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "stuck") {
+    assertEquals(result.value.existingSubtasks, undefined);
+  }
+});
+
+Deno.test("context: existing_subtasks where EVERY entry is malformed collapses to undefined, not []", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    existing_subtasks: [{ title: "" }, { notTitle: "x", done: true }],
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.existingSubtasks, undefined);
+  }
+});
+
+Deno.test("context: existing_subtasks over MAX_EXISTING_SUBTASKS is capped, never rejects the request", () => {
+  const many = Array.from({ length: MAX_EXISTING_SUBTASKS + 5 }, (_, i) => ({
+    title: `Step ${i + 1}`,
+    done: i % 2 === 0,
+  }));
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    existing_subtasks: many,
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.existingSubtasks?.length, MAX_EXISTING_SUBTASKS);
+  }
+});
+
+Deno.test("context: existing_subtasks title over MAX_TASK_TITLE_CHARS is dropped as an entry", () => {
+  const result = validateRequestBody({
+    mode: "breakdown",
+    task_title: "Anything",
+    existing_subtasks: [
+      { title: "x".repeat(MAX_TASK_TITLE_CHARS + 1), done: false },
+      { title: "A fine title", done: true },
+    ],
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "breakdown") {
+    assertEquals(result.value.existingSubtasks, [{ title: "A fine title", done: true }]);
+  }
 });

@@ -36,6 +36,45 @@ export const MAX_BREAKDOWN_STEPS = 9;
 export const MIN_STEP_MINUTES = 5;
 export const MAX_STEP_MINUTES = 15;
 export const MAX_BODY_BYTES = 32 * 1024;
+/** "stuck" mode, `reason: "dread"` only (anh Khôi, 2026-07-29): hard character cap on the model's
+ *  one-message response, enforced HERE (not just asked-for in the prompt) for the same
+ *  defense-in-depth reason every other model-output cap in this file exists — a schema-constrained
+ *  *request* is a strong hint, never a guarantee, so the actual boundary is this server-side
+ *  re-check. 400 chosen because this is meant to be ONE short sentence-or-two naming a specific
+ *  dreaded detail plus a <=2-minute action, read at a glance in a small inline banner (see
+ *  `Volar/Sources/Views/FocusOverlay.swift`'s `StuckDreadBanner`) — long enough for that, short
+ *  enough that a model going off the rails (a paragraph, a bulleted plan) fails validation instead
+ *  of dumping a wall of text into a UI built for one line. */
+export const MAX_DREAD_MESSAGE_CHARS = 400;
+
+/** "stuck" mode, `reason: "too_big"` ONLY (anh Khôi, 2026-07-29 REDESIGN — this reason used to
+ *  reuse the breakdown machinery verbatim; it now returns exactly ONE next physical action, not a
+ *  3-9 step plan — see `NEXT_ACTION_SYSTEM_PREAMBLE`'s doc comment in `gemini.ts` for the full
+ *  reasoning). Deliberately SHORTER than `MAX_DREAD_MESSAGE_CHARS`: `dread`'s message does two
+ *  things (name a dreaded detail, THEN propose an action), so it earns two sentences' worth of
+ *  room; this reason's message is ONLY the action itself, a single imperative sentence — 160
+ *  characters is generous for that in either Vietnamese or English while still catching a model
+ *  that ignores the "one action, not a plan" instruction and starts listing several. */
+export const MAX_NEXT_ACTION_CHARS = 160;
+
+/** `stuck`/`breakdown` context addendum (anh Khôi, 2026-07-29): `sourceTranscript` is the user's
+ *  own ORIGINAL spoken words at task-creation time — usually richer than `taskTitle`, which is
+ *  frequently a compressed paraphrase of it (e.g. "làm báo cáo Q3 cho sếp Hùng trước thứ 5, số
+ *  liệu lấy từ file Minh gửi" collapses to a title of just "làm báo cáo Q3"). This is a
+ *  SUPPLEMENTARY, OPTIONAL field — unlike `transcript` in `parse` mode (which IS the thing being
+ *  parsed, and is rejected outright over-cap so the client's own truncation stays the source of
+ *  truth), an over-cap `sourceTranscript` here is truncated rather than rejected: losing the tail
+ *  of some extra context must never cost the user the entire next-action/breakdown request. 1000
+ *  chars (matching `MAX_NOTES_CHARS`) is ample for "richer than a title" without letting this
+ *  field balloon the prompt or approach `MAX_BODY_BYTES` alongside `existingSubtasks` below. */
+export const MAX_CONTEXT_TRANSCRIPT_CHARS = 1000;
+
+/** `stuck`/`breakdown` context addendum: cap on how many `existingSubtasks` entries (title + done
+ *  only, never a task id) are accepted — mirrors `ParsedTaskValidation`'s own `.prefix(20)` cap on
+ *  `subtasks` in the Swift client (`Sources/Parsing/IntentParsing.swift`), so client and server
+ *  agree on the same ceiling for "how many subtasks are worth telling the model about" rather than
+ *  inventing a second number. */
+export const MAX_EXISTING_SUBTASKS = 20;
 
 // ---------------------------------------------------------------------------------------------
 // Request (client -> us)
@@ -54,8 +93,55 @@ export interface ParseRequest {
   timezone?: string;
 }
 
-export interface BreakdownRequest {
+/** Optional "richer context" fields (anh Khôi, 2026-07-29 addendum), shared by `BreakdownRequest`
+ *  and `StuckRequest` below via `validateTaskContextFields`. ALL THREE are OPTIONAL and
+ *  FAIL-OPEN — a request from an older client that never sends them must run exactly as before
+ *  (see that function's own doc comment for the field-by-field fail-open rule; this is a REQUEST
+ *  field failing open, a different call from the RESPONSE per-field fail-open
+ *  `validateParsedTask` already documents, but the same underlying principle: one bad/oversized/
+ *  absent supplementary field must never cost the user the whole request). */
+export interface TaskContextFields {
+  sourceTranscript?: string;
+  deadline?: string; // ISO8601 WITH ZONE — see isIso8601WithZone; dropped (not rejected) if malformed
+  existingSubtasks?: { title: string; done: boolean }[]; // title + done ONLY, never a task id
+}
+
+export interface BreakdownRequest extends TaskContextFields {
   mode: "breakdown";
+  taskTitle: string;
+  notes?: string;
+}
+
+/** Fourth request mode (anh Khôi, 2026-07-29 "Stuck?" feature): "the user tapped Stuck on this
+ *  task and told us WHY" — three reasons need three different fixes (see `spec`/task brief), but
+ *  only two of them ever reach this server at all:
+ *   - `"too_big"` (REDESIGNED 2026-07-29, same day, after anh Khôi challenged the first version):
+ *     originally reused the breakdown machinery verbatim to produce a 3-9 step PLAN. Rejected
+ *     because Volar has no real context beyond a short spoken title — for "làm báo cáo Q3" the
+ *     model doesn't know which report, for whom, or where the numbers live, so steps 3+ of a full
+ *     plan are fabrication dressed as advice ("viết phần phân tích", "rà soát lại" — grammatical,
+ *     useless). "Stuck?" doesn't need a plan; it needs exactly one true answer to "what does my
+ *     hand do right now" — a question answerable with near-zero context. Now returns exactly ONE
+ *     next physical action (`buildNextActionContents`/`NEXT_ACTION_SYSTEM_PREAMBLE`/
+ *     `buildNextActionResponseSchema`/`validateNextActionMessage`, all in `gemini.ts`/this file) —
+ *     its own prompt, its own (shorter) cap, NOT a reuse of breakdown's schema/validator. The full
+ *     multi-step plan is still reachable — via `mode: "breakdown"` / `TaskBreakdownView` on the
+ *     client — this reason just no longer produces one itself; the client's "too_big" banner keeps
+ *     a secondary button to open that full flow for anyone who wants it.
+ *   - `"dread"`: the user is naming that they feel dread, not that the task is big. Needs an
+ *     actual model call (see `buildDreadContents`/`DREAD_SYSTEM_PREAMBLE` in `gemini.ts`) — this is
+ *     the one reason that's genuinely new work on this route. UNCHANGED by the 2026-07-29
+ *     redesign above other than gaining the same optional `TaskContextFields` every other mode now
+ *     accepts (see that interface's doc comment) — its prompt/schema/validator/cap are untouched.
+ *   - `"cant_start"` ("không nhấc người lên nổi"): deliberately NOT a valid value here at all — the
+ *     client's fix for this reason is a plain client-side 2-minute timer with no task content
+ *     involved, so sending it to the model would just burn a quota slot for nothing. Rejecting it
+ *     in `validateStuckRequest` below (rather than silently accepting-and-ignoring it) means a
+ *     client bug that mistakenly sends it fails loudly (400) instead of quietly wasting a call.
+ */
+export interface StuckRequest extends TaskContextFields {
+  mode: "stuck";
+  reason: "too_big" | "dread";
   taskTitle: string;
   notes?: string;
 }
@@ -78,7 +164,7 @@ export interface ResolveCompletionRequest {
   candidates: string[]; // the numbered list, in order; index 0 here == candidate "1." in the prompt
 }
 
-export type ParsedRequestBody = ParseRequest | BreakdownRequest | ResolveCompletionRequest;
+export type ParsedRequestBody = ParseRequest | BreakdownRequest | ResolveCompletionRequest | StuckRequest;
 
 type ValidationResult<T> = { ok: true; value: T } | { ok: false; error: string };
 
@@ -121,13 +207,94 @@ export function validateRequestBody(body: unknown): ValidationResult<ParsedReque
 
   const modeRaw = body.mode;
   const mode = modeRaw === undefined ? "parse" : modeRaw;
-  if (mode !== "parse" && mode !== "breakdown" && mode !== "resolve_completion") {
-    return { ok: false, error: "mode must be 'parse', 'breakdown', or 'resolve_completion' when present" };
+  if (mode !== "parse" && mode !== "breakdown" && mode !== "resolve_completion" && mode !== "stuck") {
+    return {
+      ok: false,
+      error: "mode must be 'parse', 'breakdown', 'resolve_completion', or 'stuck' when present",
+    };
   }
 
   if (mode === "breakdown") return validateBreakdownRequest(body);
   if (mode === "resolve_completion") return validateResolveCompletionRequest(body);
+  if (mode === "stuck") return validateStuckRequest(body);
   return validateParseRequest(body);
+}
+
+/** Shared by `validateBreakdownRequest` and `validateStuckRequest` below — both wire shapes carry
+ *  the identical `task_title`/`notes`/`source_transcript`/`deadline`/`existing_subtasks` fields
+ *  with the identical caps, and this task's own instruction is "reuse the breakdown path, don't
+ *  build a second one": this is the request-validation half of that reuse, so the two modes can
+ *  never drift onto two different caps/error messages for the same fields.
+ *
+ *  `task_title`/`notes` are FAIL-CLOSED exactly as before (a malformed value rejects the whole
+ *  request — unchanged behavior, existing tests for this still pass). The three NEW context
+ *  fields (anh Khôi, 2026-07-29 addendum) are FAIL-OPEN instead, and deliberately so — they are
+ *  supplementary context, not the primary content of the request, and a client bug/oversized value
+ *  here must never take down an otherwise-good request the way a bad `task_title` legitimately
+ *  does:
+ *   - `source_transcript`: any non-empty string is accepted and TRUNCATED to
+ *     `MAX_CONTEXT_TRANSCRIPT_CHARS` (never rejected for being too long) — mirrors how `transcript`
+ *     is truncated CLIENT-side in `parse` mode rather than rejected, just enforced again here since
+ *     this is a different (optional, supplementary) field with no client-side truncation guarantee
+ *     of its own yet. A wrong TYPE (not a string) is simply omitted.
+ *   - `deadline`: kept only if it parses as `isIso8601WithZone` (same zone requirement as `now`,
+ *     for the same "an offset-less instant is ambiguous" reason) — anything else (wrong type,
+ *     missing zone, unparseable) is silently omitted, never rejects the request.
+ *   - `existing_subtasks`: kept only if it is an array; each ELEMENT is independently validated
+ *     (non-empty `title` <= `MAX_TASK_TITLE_CHARS`, boolean `done`) and a malformed element is
+ *     dropped on its own — same per-element fail-open convention `validateParsedTask`'s
+ *     `conditions`/`subtasks` fields already use for MODEL output, applied here to a REQUEST field
+ *     for the identical reason. Capped at `MAX_EXISTING_SUBTASKS` entries. An empty result (every
+ *     element was malformed, or the field wasn't an array at all) is `undefined`, not `[]` — an
+ *     absent field and a wholly-unusable field mean the same thing to every caller of this
+ *     function, so they collapse to the same representation. */
+function validateTaskContextFields(
+  body: Record<string, unknown>,
+): ValidationResult<{ taskTitle: string; notes?: string } & TaskContextFields> {
+  const taskTitle = body.task_title;
+  if (!isNonEmptyString(taskTitle) || taskTitle.length > MAX_TASK_TITLE_CHARS) {
+    return {
+      ok: false,
+      error: `task_title is required, non-empty, <= ${MAX_TASK_TITLE_CHARS} chars`,
+    };
+  }
+  let notes: string | undefined;
+  if (body.notes !== undefined) {
+    if (typeof body.notes !== "string" || body.notes.length > MAX_NOTES_CHARS) {
+      return { ok: false, error: `notes must be a string <= ${MAX_NOTES_CHARS} chars` };
+    }
+    notes = body.notes;
+  }
+
+  // --- Context addendum below: all three FAIL-OPEN (drop the field, never reject the request) ---
+
+  let sourceTranscript: string | undefined;
+  if (typeof body.source_transcript === "string" && body.source_transcript.trim().length > 0) {
+    sourceTranscript = body.source_transcript.slice(0, MAX_CONTEXT_TRANSCRIPT_CHARS);
+  }
+
+  let deadline: string | undefined;
+  if (typeof body.deadline === "string" && isIso8601WithZone(body.deadline)) {
+    deadline = body.deadline;
+  }
+
+  let existingSubtasks: { title: string; done: boolean }[] | undefined;
+  if (Array.isArray(body.existing_subtasks)) {
+    const cleaned: { title: string; done: boolean }[] = [];
+    for (const item of body.existing_subtasks) {
+      if (
+        isPlainObject(item) &&
+        isNonEmptyString(item.title) &&
+        item.title.length <= MAX_TASK_TITLE_CHARS &&
+        typeof item.done === "boolean"
+      ) {
+        cleaned.push({ title: item.title, done: item.done });
+      }
+    }
+    if (cleaned.length > 0) existingSubtasks = cleaned.slice(0, MAX_EXISTING_SUBTASKS);
+  }
+
+  return { ok: true, value: { taskTitle, notes, sourceTranscript, deadline, existingSubtasks } };
 }
 
 function validateParseRequest(body: Record<string, unknown>): ValidationResult<ParseRequest> {
@@ -208,21 +375,26 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
 }
 
 function validateBreakdownRequest(body: Record<string, unknown>): ValidationResult<BreakdownRequest> {
-  const taskTitle = body.task_title;
-  if (!isNonEmptyString(taskTitle) || taskTitle.length > MAX_TASK_TITLE_CHARS) {
-    return {
-      ok: false,
-      error: `task_title is required, non-empty, <= ${MAX_TASK_TITLE_CHARS} chars`,
-    };
+  const shared = validateTaskContextFields(body);
+  if (!shared.ok) return shared;
+  return { ok: true, value: { mode: "breakdown", ...shared.value } };
+}
+
+/** `mode: "stuck"` request validation — see `StuckRequest`'s doc comment above for the reason
+ *  semantics. `reason` is checked BEFORE the shared title/notes/context validation purely so a
+ *  malformed reason gets its own specific error message rather than being masked by whichever
+ *  check happens to run first; order has no other significance here (both checks are independent,
+ *  non-mutating). */
+function validateStuckRequest(body: Record<string, unknown>): ValidationResult<StuckRequest> {
+  if (body.reason !== "too_big" && body.reason !== "dread") {
+    return { ok: false, error: "reason must be 'too_big' or 'dread'" };
   }
-  let notes: string | undefined;
-  if (body.notes !== undefined) {
-    if (typeof body.notes !== "string" || body.notes.length > MAX_NOTES_CHARS) {
-      return { ok: false, error: `notes must be a string <= ${MAX_NOTES_CHARS} chars` };
-    }
-    notes = body.notes;
-  }
-  return { ok: true, value: { mode: "breakdown", taskTitle, notes } };
+  const shared = validateTaskContextFields(body);
+  if (!shared.ok) return shared;
+  return {
+    ok: true,
+    value: { mode: "stuck", reason: body.reason, ...shared.value },
+  };
 }
 
 function validateResolveCompletionRequest(
@@ -584,6 +756,48 @@ export function validateBreakdownSteps(v: unknown): BreakdownStepOut[] | undefin
     steps.push({ title: s.title, estimateMinutes: clamped });
   }
   return steps;
+}
+
+/** Shared by `validateDreadMessage` and `validateNextActionMessage` below — both are a `stuck`
+ *  sub-mode's `{ message: string }` response, differing ONLY in their character cap (dread names a
+ *  detail AND proposes an action, two clauses' worth of room; a next-action is the action alone,
+ *  a single sentence — see `MAX_NEXT_ACTION_CHARS`'s doc comment for why these are deliberately
+ *  DIFFERENT numbers, not a shared constant). FAIL-CLOSED (returns `undefined`, never a
+ *  best-effort repaired string) on ANY violation — an empty message, a non-string, or anything
+ *  over `maxChars` — mirroring `validateBreakdownSteps`'s "malformed output is a genuine upstream
+ *  failure, not something to silently truncate/patch" posture, NOT `validateParsedTask`'s
+ *  per-FIELD fail-open posture: there is exactly one field here, so "drop the bad field" and "drop
+ *  the whole response" are the same operation, and `parse/index.ts` maps `undefined` to its
+ *  existing opaque 502 (the client already treats that identically to "no suggestion available"
+ *  per its own fallback contract — see `Volar/Sources/Parsing/CloudParser.swift`'s
+ *  `dreadDetailed`/`nextActionDetailed`). Never truncates an over-long message to fit the cap: a
+ *  model that ignored the length instruction is exactly the kind of "went off the rails" output
+ *  this cap exists to catch, so it is rejected outright rather than silently reshaped into
+ *  something the model never actually said. Trims whitespace only (never alters content
+ *  otherwise). */
+function validateShortMessage(v: unknown, maxChars: number): string | undefined {
+  if (!isPlainObject(v)) return undefined;
+  if (!isNonEmptyString(v.message)) return undefined;
+  const trimmed = v.message.trim();
+  if (trimmed.length === 0 || trimmed.length > maxChars) return undefined;
+  return trimmed;
+}
+
+/** Validates the model's `stuck`/`reason: "dread"` response `{ message: string }` against
+ *  `MAX_DREAD_MESSAGE_CHARS`. See `validateShortMessage`'s doc comment for the full fail-closed
+ *  rationale, shared verbatim with `validateNextActionMessage` below. */
+export function validateDreadMessage(v: unknown): string | undefined {
+  return validateShortMessage(v, MAX_DREAD_MESSAGE_CHARS);
+}
+
+/** Validates the model's `stuck`/`reason: "too_big"` response `{ message: string }` (anh Khôi,
+ *  2026-07-29 REDESIGN — this reason used to produce a 3-9 step plan via `validateBreakdownSteps`;
+ *  it now produces exactly ONE next physical action, this validator's job) against
+ *  `MAX_NEXT_ACTION_CHARS` — its OWN, shorter cap than `validateDreadMessage`'s, see that
+ *  constant's doc comment. See `validateShortMessage`'s doc comment for the full fail-closed
+ *  rationale. */
+export function validateNextActionMessage(v: unknown): string | undefined {
+  return validateShortMessage(v, MAX_NEXT_ACTION_CHARS);
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -9,12 +9,36 @@
 //     — `now` must already be the user's LOCAL wall-clock time with its real UTC offset (never
 //     `Z`/UTC); `timezone` is an optional IANA id (e.g. "Asia/Ho_Chi_Minh") given as extra context
 //     for the model on top of that offset. Older clients that don't send `timezone` still work.
-//   breakdown mode:          { mode: "breakdown", task_title, notes? }
+//   breakdown mode:          { mode: "breakdown", task_title, notes?, source_transcript?,
+//                              deadline?, existing_subtasks? }
+//     — the four fields after `notes` are the OPTIONAL 2026-07-29 "richer context" addendum (see
+//     `TaskContextFields` in `_shared/schema.ts`): older clients that never send them still work
+//     exactly as before (fail-open request validation, see `validateTaskContextFields`).
 //   resolve_completion mode: { mode: "resolve_completion", transcript, now, kind, candidates }
 //     — server-side semantic match for "which open task is the user saying they finished",
 //     since local Jaccard token-set matching on the client can't handle a paraphrase. Consumes
 //     the SAME 'parse' quota route as the other two modes (see TASK brief / usage_counters'
 //     CHECK constraint — only 'parse' and 'speech' are valid route values, no new one added).
+//   stuck mode:              { mode: "stuck", reason: "too_big"|"dread", task_title, notes?,
+//                              source_transcript?, deadline?, existing_subtasks? }
+//     — "Stuck?" feature (anh Khôi, 2026-07-29): three different reasons a task doesn't get
+//     started need three different responses; the third reason ("cant_start" — just can't get
+//     moving) never reaches this server at all (client-only 2-minute timer, no model call). Same
+//     'parse' quota route, same auth/tier gate as every other mode.
+//       `reason: "too_big"` (REDESIGNED same day, after anh Khôi challenged the first version):
+//       originally reused the breakdown machinery verbatim to produce a 3-9 step PLAN — rejected
+//       because Volar has no real context beyond a short spoken title, so steps 3+ of a full plan
+//       were fabrication dressed as advice. Now returns exactly ONE next physical action —
+//       `buildNextActionContents`/`NEXT_ACTION_SYSTEM_PREAMBLE`/`buildNextActionResponseSchema`/
+//       `validateNextActionMessage` — its OWN prompt/schema/validator/cap, NOT a reuse of
+//       breakdown's. The full multi-step plan is still reachable via `mode: "breakdown"` /
+//       `TaskBreakdownView` on the client; this reason just no longer produces one itself.
+//       `reason: "dread"` is unchanged by that redesign: `buildDreadContents`/
+//       `DREAD_SYSTEM_PREAMBLE`/`buildDreadResponseSchema`/`validateDreadMessage` (all in
+//       `_shared/gemini.ts`+`_shared/schema.ts`) still produce ONE short message naming the
+//       specific dreaded part of the task plus a <=2-minute physical action — see those symbols'
+//       own doc comments for the full tone contract (no encouragement, no coaching, no diagnosis,
+//       no exclamation marks, hard char cap).
 // Auth (../_shared/auth.ts): `Authorization: Bearer <supabase access_token>` — a real user
 // account, verified via `verifyAccount`. Both tiers may call this route; only the daily quota
 // limit differs (`PARSE_LIMIT_FREE` / `PARSE_LIMIT_PRO`).
@@ -58,6 +82,8 @@ import { consumeQuota, parseLimitFor } from "../_shared/quota.ts";
 import {
   MAX_BODY_BYTES,
   validateBreakdownSteps,
+  validateDreadMessage,
+  validateNextActionMessage,
   validateParsedTaskArray,
   validateRequestBody,
   validateResolveCompletion,
@@ -65,10 +91,16 @@ import {
 } from "../_shared/schema.ts";
 import {
   DEFAULT_PARSE_MODEL,
+  DREAD_SYSTEM_PREAMBLE,
+  NEXT_ACTION_SYSTEM_PREAMBLE,
   RESOLVE_COMPLETION_SYSTEM_PREAMBLE,
   SYSTEM_PREAMBLE,
   buildBreakdownContents,
   buildBreakdownResponseSchema,
+  buildDreadContents,
+  buildDreadResponseSchema,
+  buildNextActionContents,
+  buildNextActionResponseSchema,
   buildParseContents,
   buildParseResponseSchema,
   buildResolveCompletionContents,
@@ -263,7 +295,13 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
     }
 
     if (body.mode === "breakdown") {
-      const contents = buildBreakdownContents({ taskTitle: body.taskTitle, notes: body.notes });
+      const contents = buildBreakdownContents({
+        taskTitle: body.taskTitle,
+        notes: body.notes,
+        sourceTranscript: body.sourceTranscript,
+        deadline: body.deadline,
+        existingSubtasks: body.existingSubtasks,
+      });
       const raw = await callGemini({
         apiKey: geminiCfg.values.GEMINI_API_KEY,
         model,
@@ -285,11 +323,115 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
         status: 200,
         mode: "breakdown",
         taskTitleChars: body.taskTitle.length,
+        // Booleans/counts only for the new context fields — never their content, same
+        // "hasTimezone"-style convention `parse` mode already uses right above for the same reason.
+        hasSourceTranscript: body.sourceTranscript !== undefined,
+        hasDeadline: body.deadline !== undefined,
+        existingSubtaskCount: body.existingSubtasks?.length ?? 0,
         stepCount: steps.length,
         quotaUsed,
         latencyMs: Math.round(performance.now() - startedAt),
       });
       return finish(jsonResponse(200, { steps }), { reason: "success" });
+    }
+
+    if (body.mode === "stuck") {
+      if (body.reason === "too_big") {
+        // REDESIGNED (anh Khôi, 2026-07-29, same day as the first version, after he challenged
+        // it): no longer reuses breakdown's 3-9 step machinery — see `NEXT_ACTION_SYSTEM_PREAMBLE`'s
+        // doc comment (`_shared/gemini.ts`) for why a full plan under near-zero context is
+        // fabrication dressed as advice. This branch now asks for and validates exactly ONE next
+        // physical action, its own prompt/schema/validator, symbol-for-symbol distinct from the
+        // `breakdown` branch above.
+        const contents = buildNextActionContents({
+          taskTitle: body.taskTitle,
+          notes: body.notes,
+          sourceTranscript: body.sourceTranscript,
+          deadline: body.deadline,
+          existingSubtasks: body.existingSubtasks,
+        });
+        const raw = await callGemini({
+          apiKey: geminiCfg.values.GEMINI_API_KEY,
+          model,
+          systemInstruction: NEXT_ACTION_SYSTEM_PREAMBLE,
+          contents,
+          responseSchema: buildNextActionResponseSchema(),
+          timeoutMs,
+          reqId,
+        });
+        const message = validateNextActionMessage(raw);
+        if (!message) {
+          logError("parse_output_invalid", { reqId, tier: authResult.tier, mode: "stuck", reason: "too_big" });
+          return finish(errorResponse(502, "upstream_error"), { reason: "model_output_invalid" });
+        }
+        logEvent("parse_request", {
+          reqId,
+          userIdHash,
+          tier: authResult.tier,
+          status: 200,
+          mode: "stuck",
+          reason: "too_big",
+          taskTitleChars: body.taskTitle.length,
+          hasSourceTranscript: body.sourceTranscript !== undefined,
+          hasDeadline: body.deadline !== undefined,
+          existingSubtaskCount: body.existingSubtasks?.length ?? 0,
+          // PRIVACY: never log `message` itself (model-generated text describing the user's own
+          // task) — only its length, same convention `dread` below and every other body-content
+          // field in this file already follows.
+          messageChars: message.length,
+          quotaUsed,
+          latencyMs: Math.round(performance.now() - startedAt),
+        });
+        return finish(jsonResponse(200, { message }), { reason: "success" });
+      }
+
+      // body.reason === "dread" (the only other value `validateStuckRequest` accepts). UNCHANGED
+      // prompt/schema/validator by the 2026-07-29 redesign above — only gains the same optional
+      // context fields `breakdown`/`too_big` now also forward.
+      const contents = buildDreadContents({
+        taskTitle: body.taskTitle,
+        notes: body.notes,
+        sourceTranscript: body.sourceTranscript,
+        deadline: body.deadline,
+        existingSubtasks: body.existingSubtasks,
+      });
+      const raw = await callGemini({
+        apiKey: geminiCfg.values.GEMINI_API_KEY,
+        model,
+        systemInstruction: DREAD_SYSTEM_PREAMBLE,
+        contents,
+        responseSchema: buildDreadResponseSchema(),
+        timeoutMs,
+        reqId,
+      });
+      const message = validateDreadMessage(raw);
+      if (!message) {
+        // Malformed/over-cap/empty output -> the SAME opaque 502 `breakdown`'s own invalid-output
+        // path returns right above — the client's `dreadDetailed` (`CloudParser.swift`) already
+        // treats any non-200 identically to "no suggestion available" (its own static fallback
+        // sentence takes over), so this never reaches the user as raw/garbage content.
+        logError("parse_output_invalid", { reqId, tier: authResult.tier, mode: "stuck", reason: "dread" });
+        return finish(errorResponse(502, "upstream_error"), { reason: "model_output_invalid" });
+      }
+      logEvent("parse_request", {
+        reqId,
+        userIdHash,
+        tier: authResult.tier,
+        status: 200,
+        mode: "stuck",
+        reason: "dread",
+        taskTitleChars: body.taskTitle.length,
+        hasSourceTranscript: body.sourceTranscript !== undefined,
+        hasDeadline: body.deadline !== undefined,
+        existingSubtaskCount: body.existingSubtasks?.length ?? 0,
+        // PRIVACY: never log `message` itself (it's model-generated text describing the user's
+        // own task) — only its length, same convention `transcriptChars`/`taskTitleChars` follow
+        // everywhere else in this file for user-authored/model-generated body content.
+        messageChars: message.length,
+        quotaUsed,
+        latencyMs: Math.round(performance.now() - startedAt),
+      });
+      return finish(jsonResponse(200, { message }), { reason: "success" });
     }
 
     // mode === "resolve_completion" — see module doc comment. Unlike `parse`/`breakdown`, an

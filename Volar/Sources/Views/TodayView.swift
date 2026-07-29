@@ -196,6 +196,38 @@ struct TodayView: View {
             VStack(alignment: .leading, spacing: appState.density.sectionGap) {
                 nowSpotlight
 
+                // FR-030: the one-time "want to split this up?" invite, whenever one's pending —
+                // shared with `FocusOverlay`'s own copy of the same banner (both read the exact
+                // same `AppState.switchBreakdownSuggestion`; see `SwitchBreakdownSuggestionBanner`,
+                // `Sources/Views/FocusOverlay.swift`). Same "renders nothing when there's nothing to
+                // show" convention as `DelegationAmbientSection()` right below.
+                if let suggestion = appState.switchBreakdownSuggestion {
+                    SwitchBreakdownSuggestionBanner(task: suggestion)
+                }
+
+                // "Stuck?" (anh Khôi, 2026-07-29): the "dread" reason's message/fallback banner,
+                // the "too_big" reason's single next-action banner, and the "cant_start" reason's
+                // 2-minute timer — shared with `FocusOverlay`'s own copies (`StuckDreadBanner`/
+                // `StuckNextActionBanner`/`StuckTimerBanner`, `Sources/Views/FocusOverlay.swift`)
+                // so wording/behavior can never drift between the two places "Stuck?" appears.
+                // None of the three renders anything while idle (same "always safe to include
+                // unconditionally" convention `DelegationAmbientSection()` right below documents
+                // for itself). The `...id == appState.dashboardActiveTask?.id` guards keep each
+                // banner scoped to whichever task the hero card is CURRENTLY showing — Stuck may
+                // have been invoked from `FocusOverlay` on a different task while this view sits
+                // underneath it.
+                if let dreadTask = appState.stuckDreadTask, appState.stuckDreadState != .idle,
+                   dreadTask.id == appState.dashboardActiveTask?.id {
+                    StuckDreadBanner(task: dreadTask)
+                }
+                if let nextActionTask = appState.stuckNextActionTask, appState.stuckNextActionState != .idle,
+                   nextActionTask.id == appState.dashboardActiveTask?.id {
+                    StuckNextActionBanner(task: nextActionTask)
+                }
+                if appState.stuckTimerActive {
+                    StuckTimerBanner()
+                }
+
                 // T043 (phase6-contract.md §C): ambient needs-review / WIP soft-limit /
                 // ai-done disambiguation — renders nothing when there's genuinely nothing
                 // to show (glance-and-dismiss, constitution V), so it's always safe to
@@ -308,11 +340,15 @@ struct TodayView: View {
     // MARK: - NOW / NEXT / LATER derivation (retheme, display-order only — no `AppState` change)
 
     /// Every open task except the one currently spotlit as NOW — same membership/order as the old
-    /// flat `nowTasks + laterTasks` list (`appState.openTasks`), just minus whichever task the
-    /// engine picked. If the engine found nothing eligible (`activeTask == nil`, e.g. everything
+    /// flat `nowTasks + laterTasks` list (`appState.openTasks`), just minus whichever task is
+    /// spotlit. Reads `appState.dashboardActiveTask`, NOT the raw engine `activeTask` — after a
+    /// Switch (`nowSpotlight`'s new "Switch" button) the spotlit task is the replacement, not
+    /// whatever the engine would otherwise still rank first, and this list must agree with the
+    /// hero card about which one that is (the switched-away task belongs back in this list, the
+    /// replacement must NOT still show up here too). If nothing is spotlit at all (e.g. everything
     /// open is gated on an unmet condition), nothing is excluded.
     private var remainingOpenTasks: [TaskItem] {
-        guard let active = appState.activeTask else { return appState.openTasks }
+        guard let active = appState.dashboardActiveTask else { return appState.openTasks }
         return appState.openTasks.filter { $0.id != active.id }
     }
 
@@ -328,15 +364,18 @@ struct TodayView: View {
 
     // MARK: - NOW spotlight
 
-    /// The hero treatment for `appState.activeTask` — the one thing on screen allowed to be amber.
-    /// Bespoke (not `TaskRow`) because the design calls for a big centered title + chip row + primary
-    /// action that `TaskRow`'s compact horizontal layout has no room for; every action `TaskRow`
-    /// would have offered (tap-to-open-detail, mark done, breakdown, delete) is still wired here via
-    /// the same `appState` calls. Falls back to a calm placeholder if the engine has nothing eligible
-    /// (never crashes/force-unwraps).
+    /// The hero treatment for `appState.dashboardActiveTask` — the one thing on screen allowed to be
+    /// amber. Bespoke (not `TaskRow`) because the design calls for a big centered title + chip row +
+    /// primary action that `TaskRow`'s compact horizontal layout has no room for; every action
+    /// `TaskRow` would have offered (tap-to-open-detail, mark done, breakdown, delete) is still wired
+    /// here via the same `appState` calls, PLUS the new "Switch" action. Reads `dashboardActiveTask`
+    /// rather than the raw engine `activeTask` so a Switch actually moves what this card shows (see
+    /// that property's own doc comment for why the plain engine pick alone can never change here).
+    /// Falls back to a calm placeholder if there's nothing eligible at all (never crashes/force-
+    /// unwraps).
     @ViewBuilder
     private var nowSpotlight: some View {
-        if let active = appState.activeTask {
+        if let active = appState.dashboardActiveTask {
             VStack(spacing: 16) {
                 Text("◆ NOW")
                     .font(Font.volarMono(size: 11, weight: .semibold))
@@ -398,6 +437,70 @@ struct TodayView: View {
                             .stroke(VolarColor.borderHi, lineWidth: 0.5)
                     )
 
+                    // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain here — this Switch
+                    // button, its context-menu twin below, and the `dashboardActiveTask` rewiring
+                    // above have not been compiled, run, or seen on screen. Needs a Mac visual pass
+                    // (see final report's verify checklist) before shipping.
+                    //
+                    // Switch ("đổi gió") — equal footing with "Done" right above, not a secondary/
+                    // hidden action (also mirrored in the context menu below, same as "Mark done"
+                    // already is, but this button row is the primary, always-visible home for it).
+                    // Deliberately the SAME neutral styling as "Done" (no accent fill, no icon, no
+                    // red) — this is a completely normal thing to tap, not an admission of anything.
+                    // Disabled (not hidden) when there's nowhere else open to switch to.
+                    if !active.done {
+                        Button {
+                            appState.switchDashboardActiveTask()
+                        } label: {
+                            Text("Switch")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(VolarColor.textPri)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .background(VolarColor.surfaceHi)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
+                        )
+                        .opacity(appState.canSwitchDashboardActiveTask ? 1 : 0.4)
+                        .disabled(!appState.canSwitchDashboardActiveTask)
+                        .help("Move on to something else — this task isn't done, it just steps out for now.")
+                    }
+
+                    // "Stuck?" (anh Khôi, 2026-07-29) — equal footing with "Done"/"Switch" right
+                    // above, same neutral capsule styling (no accent, no icon, no warning color):
+                    // an entirely ordinary thing to tap. Opens the same three-reason popover
+                    // (`StuckReasonPicker`) `FocusOverlay`'s own "Stuck?" button uses — one shared
+                    // definition, `Sources/Views/FocusOverlay.swift`.
+                    if !active.done {
+                        Button {
+                            appState.openStuckPicker(for: active)
+                        } label: {
+                            Text("Stuck?")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(VolarColor.textPri)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .background(VolarColor.surfaceHi)
+                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
+                        )
+                        .popover(isPresented: Binding(
+                            get: { appState.stuckPickerTask?.id == active.id },
+                            set: { presented in if !presented { appState.dismissStuckPicker() } }
+                        )) {
+                            StuckReasonPicker(task: active)
+                        }
+                        .help("Name what kind of stuck this is — different kinds need different fixes.")
+                    }
+
                     // T042 (phase6-contract.md §C): delegate affordance on the current (NOW) task
                     // — `AppState.delegateTask` adds the unsatisfied "waiting on AI" condition,
                     // which is what actually moves it out of this slot (constitution II: a
@@ -451,6 +554,12 @@ struct TodayView: View {
                 Button("Break down into steps…") { appState.openBreakdown(for: active) }
                 Button(active.done ? "Mark not done" : "Mark done") { appState.toggleDone(active.id) }
                 if !active.done {
+                    // Mirrors the button row's Switch exactly (same `AppState` call, same
+                    // disabled-when-nowhere-else-to-go rule) — the button row is the primary,
+                    // always-visible home for Switch; this is just the same convenience-duplicate
+                    // treatment "Mark done" already gets here.
+                    Button("Switch") { appState.switchDashboardActiveTask() }
+                        .disabled(!appState.canSwitchDashboardActiveTask)
                     Button("Delegate to Claude…") { appState.delegateTask(active.id) }
                 }
                 Divider()

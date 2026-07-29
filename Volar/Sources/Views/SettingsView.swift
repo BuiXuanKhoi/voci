@@ -607,6 +607,22 @@ struct SettingsView: View {
                     options: VoiceDeliveryMode.allCases.map { SegmentOption(id: $0, label: $0.label) }
                 )
             }
+            // Full-screen deadline escalation (this task): reads/writes
+            // `FullScreenEscalationSetting` directly rather than through `appState` — this
+            // preference isn't `AppState`-owned (see that enum's own doc comment in
+            // `Sources/Reminders/FullScreenEscalationDecision.swift`), so it follows the same
+            // "bind a `VolarToggle` straight to the real external source" convention this file
+            // already uses for "Launch at login" (`LoginItem.swift`) rather than the
+            // `appState.set...`-method convention used for the two rows just above.
+            SettingsRow(
+                label: "Full-screen alert khi tới hạn",
+                hint: "Only for a reminder AT or PAST its deadline that you haven't acknowledged after a few minutes — never for a plain nudge on a task with no deadline. Skipped while you're on a call or Volar itself is recording, and always has a one-tap snooze."
+            ) {
+                VolarToggle(isOn: Binding(
+                    get: { FullScreenEscalationSetting.isEnabled },
+                    set: { FullScreenEscalationSetting.isEnabled = $0 }
+                ))
+            }
         }
     }
 

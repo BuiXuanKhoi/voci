@@ -37,6 +37,42 @@ final class ReminderScheduler: NSObject {
     /// and avoids racing the exact ceiling.
     static let systemRequestCap = 60
 
+    // MARK: - Full-screen escalation (the last rung above system notification + voice — see
+    // `sweepForFullScreenEscalation()` below, and `Sources/Reminders/FullScreenEscalationDecision.swift`/
+    // `FullScreenTakeoverWindow.swift` for the pure decision + the window itself)
+
+    private let takeoverWindow = FullScreenTakeoverWindow()
+    /// Records that have already been offered ONE full-screen takeover this run. Deliberately
+    /// one-shot per record, not a re-nag loop: both "Xong" and "Tôi thấy rồi — 10 phút nữa" already
+    /// change the record's state/urgency so it stops qualifying on its own (see
+    /// `handleAction`/`reschedule`); this set exists specifically to also cover the THIRD outcome —
+    /// the 60s auto-close timeout, where nothing about the record changes at all. Without this
+    /// guard, an ignored takeover would reappear on every later sweep tick
+    /// (`fullScreenSweepInterval`) forever, which is the opposite of anh Khôi's explicit
+    /// no-rage requirement for this feature. In-memory only (not persisted): a relaunch starts
+    /// this set empty again, so a record that timed out before quitting CAN be offered once more
+    /// after a relaunch — an accepted, documented trade-off, not an oversight (flagged in this
+    /// task's report as a candidate follow-up if anh Khôi instead wants persistent one-shot state
+    /// or a repeat cadence).
+    private var escalatedRecordIds: Set<UUID> = []
+    private var fullScreenSweepTimer: Timer?
+    /// How often the sweep re-checks for a delivered, high-urgency, non-nudge record that has sat
+    /// undismissed long enough to escalate. Independent of `FullScreenEscalationDecision.ignoredAfter`
+    /// (the 5-minute "has it been ignored" threshold) — this is just the polling cadence.
+    private static let fullScreenSweepInterval: TimeInterval = 60
+
+    /// Seam for "Volar's own capture panel is mid-recording" (contract §B — a takeover must never
+    /// fight the app's own capture UI). `AppState`/`AppDelegate` (App-wiring, not owned by this
+    /// task) is the only place with a live reference to `CapturePanelController`'s driving state
+    /// (`appState.captureState`), so this defaults to a closure that always answers `false` ("not
+    /// capturing") until that owner assigns a real one — same "unwired extension point reads as no
+    /// signal" convention `ReminderContextGate.isLocalMicCaptureActive` already established (see
+    /// that file's header comment). THE MISSING WIRING LINE (for whoever owns `AppState.swift`):
+    /// after constructing `scheduler`, add `scheduler.isVolarCapturing = { [weak self] in
+    /// self?.captureState == .recording }`. Until that line exists, this check can never block a
+    /// takeover on Volar's own recording — flagged prominently in this task's final report.
+    var isVolarCapturing: () -> Bool = { false }
+
     init(store: TaskStore, voice: VoiceReminderChannel, gate: ReminderContextGate) {
         self.store = store
         self.voice = voice
@@ -63,6 +99,16 @@ final class ReminderScheduler: NSObject {
         // deleted rather than fixed in place, since `VolarApp.swift` (App-wiring, sibling-owned)
         // already has the correct wake path wired via `NSWorkspace.shared.notificationCenter` and
         // calls `scheduler?.rebuildFromStorage()` from there.
+
+        startFullScreenEscalationSweep()
+    }
+
+    deinit {
+        // `Timer.invalidate()` itself is documented as safe to call from any thread/isolation, and
+        // is the one AppKit/Foundation teardown call this class makes outside its `@MainActor`
+        // methods — `deinit` on a `@MainActor` class runs nonisolated in Swift 6, so nothing else
+        // belonging to this class may be touched here.
+        fullScreenSweepTimer?.invalidate()
     }
 
     // MARK: - Contract §A
@@ -524,6 +570,147 @@ final class ReminderScheduler: NSObject {
         let prioritized = eligible.filter { $0.offsetKind != "nudge" }.sorted { $0.fireAt < $1.fireAt }
         let nudges = eligible.filter { $0.offsetKind == "nudge" }.sorted { $0.fireAt < $1.fireAt }
         return Array((prioritized + nudges).prefix(capacity))
+    }
+
+    // MARK: - Full-screen escalation sweep (contract §A/§B)
+    //
+    // This is the ONE new hook point this feature adds to the scheduler: a periodic timer (started
+    // from `init`) that notices when a delivered, high-urgency, non-nudge reminder has sat
+    // undismissed in Notification Center past `FullScreenEscalationDecision.ignoredAfter`, and — if
+    // every other contract §B condition also holds — takes the screen over
+    // (`FullScreenTakeoverWindow`). Nothing about the EXISTING delivery path above (`fire`,
+    // `presentationDecision`, `refillSystemRequests`, `nearestCandidates`) is touched or reordered;
+    // this only ever READS `fetchAllRecords()`/`store.fetchAll()` and, on escalation, calls the
+    // already-existing `handleAction(_:recordId:)` — the exact same entry point a real system
+    // notification's Done/Snooze buttons use — so there is no second, parallel "mark done"/"snooze"
+    // implementation anywhere in this file.
+
+    private func startFullScreenEscalationSweep() {
+        // Mirrors `AppState.startDelegationTimer()`'s exact construction
+        // (`Timer(timeInterval:repeats:block:)` + `RunLoop.main.add(_:forMode:.common)`, read for
+        // convention only — that file isn't edited by this task): the `@Sendable` block hops back
+        // onto `@MainActor` via `_Concurrency.Task` for the same Swift 6 isolation reason documented
+        // there (a MainActor-inferred method called directly from a non-isolated `Timer` callback
+        // traps at runtime under strict concurrency checking).
+        let timer = Timer(timeInterval: Self.fullScreenSweepInterval, repeats: true) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.sweepForFullScreenEscalation()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        fullScreenSweepTimer = timer
+    }
+
+    /// One tick: gather every `.delivered`, `isHighUrgency`, non-`"nudge"` record that hasn't
+    /// already been offered a takeover (`escalatedRecordIds`) and MIGHT be at least `ignoredAfter`
+    /// past its ACTUAL delivery moment, then resolve the impure signals that need a system call
+    /// (`getDeliveredNotifications()`, which also carries each notification's real `date`) before
+    /// handing everything to the pure `FullScreenEscalationDecision.shouldEscalate`. Deliberately
+    /// serialized behind `takeoverWindow.isPresenting`: only ever escalates ONE record per tick, so
+    /// a backlog of several eligible records can't stack multiple full-screen windows — the rest
+    /// simply wait for a later tick (by which point the first will likely have been acted on or
+    /// auto-closed).
+    ///
+    /// FIX (Opus review): `deliveredAt` must be the notification's REAL delivery moment
+    /// (`UNNotification.date`), never `ReminderRecord.fireAt`. Those two differ exactly in the
+    /// most dangerous case: a due-but-missed recovery fire (`rebuildFromStorage`'s due-but-missed
+    /// pass / `fire(_:using:)`) posts the notification "now" for a `fireAt` that can be hours in
+    /// the past (e.g. the Mac slept overnight past the deadline). Using `fireAt` there would make
+    /// `now - fireAt` blow past `ignoredAfter` the INSTANT the notification is first shown —
+    /// full-screen-taking-over the user's just-woken machine before they've had one chance to see
+    /// the banner. `fireAt` is only ever used below as a cheap, deliberately OVER-inclusive
+    /// pre-filter (see `candidates` in `sweepForFullScreenEscalation` below) — it can never cause a
+    /// false NEGATIVE (excluding a record that should truly qualify), because delivery can never
+    /// happen before `fireAt`, so
+    /// `now - fireAt` is always >= the true `now - realDeliveredAt`. The real per-notification
+    /// `date` below is what actually decides the answer.
+    private struct CandidateSnapshot: Sendable {
+        let id: UUID
+        let taskId: UUID
+        let isHighUrgency: Bool
+        let offsetKind: String
+    }
+
+    private func sweepForFullScreenEscalation() {
+        guard FullScreenEscalationSetting.isEnabled else { return }
+        guard !takeoverWindow.isPresenting else { return }
+
+        let now = Date()
+        // Cheap, over-inclusive pre-filter only (see this method's doc comment for why `fireAt`
+        // can never wrongly EXCLUDE a record here) — just avoids waking up the async
+        // `getDeliveredNotifications()` path at all when nothing could possibly qualify yet.
+        let candidates: [CandidateSnapshot] = fetchAllRecords()
+            .filter {
+                $0.state == "delivered"
+                    && $0.isHighUrgency
+                    && $0.offsetKind != "nudge"
+                    && !escalatedRecordIds.contains($0.id)
+                    && now.timeIntervalSince($0.fireAt) >= FullScreenEscalationDecision.ignoredAfter
+            }
+            .map { CandidateSnapshot(id: $0.id, taskId: $0.taskId, isHighUrgency: $0.isHighUrgency, offsetKind: $0.offsetKind) }
+        guard !candidates.isEmpty else { return }
+
+        // `TaskItem` (unlike `ReminderRecord`) IS `Sendable` (a plain struct — see
+        // `Sources/Model/TaskItem.swift`), so this dictionary is safe to carry across the `Task`
+        // boundary below as-is.
+        let tasksById = Dictionary(uniqueKeysWithValues: store.fetchAll().map { ($0.id, $0) })
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let delivered = await self.center.deliveredNotifications()
+            // The REAL delivery moment per identifier (`UNNotification.date`) — not `fireAt`. A
+            // record whose identifier isn't a key here is simply no longer in Notification Center
+            // (already interacted with) OR its date couldn't be resolved; either way it's excluded
+            // below rather than ever falling back to `fireAt`.
+            var deliveredAtById: [UUID: Date] = [:]
+            for notification in delivered {
+                if let id = UUID(uuidString: notification.request.identifier) {
+                    deliveredAtById[id] = notification.date
+                }
+            }
+
+            for candidate in candidates.sorted(by: { (deliveredAtById[$0.id] ?? .distantFuture) < (deliveredAtById[$1.id] ?? .distantFuture) }) {
+                // Freshest possible task read for THIS record specifically (contract §B: "đọc lại
+                // bản tươi từ store, đừng tin snapshot cũ") — `tasksById` above was built once per
+                // tick, immediately before this loop, not carried over from an earlier tick.
+                guard let task = tasksById[candidate.taskId] else { continue }
+                // Fail-safe (Opus review, explicit): no resolvable REAL delivery date -> skip this
+                // record THIS tick rather than ever guessing via `fireAt`. This also naturally
+                // covers "no longer in Notification Center" (`stillInNotificationCenter == false`),
+                // since that identifier simply won't be a key in `deliveredAtById` either.
+                guard let realDeliveredAt = deliveredAtById[candidate.id] else { continue }
+                let signals = EscalationSignals(
+                    isHighUrgency: candidate.isHighUrgency,
+                    offsetKind: candidate.offsetKind,
+                    isTaskOpen: task.status != .done && task.status != .archived,
+                    stillInNotificationCenter: true, // guaranteed by the guard just above
+                    deliveredAt: realDeliveredAt,
+                    isMicrophoneInUse: MicrophoneActivityMonitor.isMicrophoneInUseSystemWide(),
+                    isVolarCapturing: self.isVolarCapturing(),
+                    settingEnabled: FullScreenEscalationSetting.isEnabled
+                )
+                guard FullScreenEscalationDecision.shouldEscalate(signals: signals, now: Date()) else { continue }
+
+                self.escalatedRecordIds.insert(candidate.id)
+                self.presentFullScreenTakeover(task: task, recordId: candidate.id)
+                break // one takeover at a time — see this method's doc comment.
+            }
+        }
+    }
+
+    /// Presents the takeover, wiring its two buttons/Esc straight back to the SAME
+    /// `handleAction(_:recordId:)` a real notification's "Done"/"Snooze 10 min" actions already go
+    /// through — no second mark-done/snooze implementation.
+    private func presentFullScreenTakeover(task: TaskItem, recordId: UUID) {
+        takeoverWindow.present(
+            title: task.title,
+            deadline: task.deadline,
+            onDone: { [weak self] in
+                self?.handleAction(ReminderAction.done, recordId: recordId)
+            },
+            onSnooze: { [weak self] in
+                self?.handleAction(ReminderAction.snooze10, recordId: recordId)
+            }
+        )
     }
 
     private func postScheduledRequest(record: ReminderRecord, task: TaskItem) async {

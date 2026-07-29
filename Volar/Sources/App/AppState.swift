@@ -132,6 +132,26 @@ enum BreakdownFetchState: Equatable, Sendable {
     case failed
 }
 
+/// "Stuck?" feature (anh Khôi, 2026-07-29): the three reasons a task can fail to get started, each
+/// with its own deliberately different fix — see `AppState.chooseStuckReason(_:for:)`. Plain
+/// English UI copy for each (never these raw case names) lives in `Sources/Views/FocusOverlay
+/// .swift`'s `StuckReasonPicker`, shared by both places "Stuck?" appears.
+enum StuckReason: Equatable, Sendable {
+    /// "This feels like more than one task" — the ONLY reason "chia nhỏ"/breakdown actually fixes.
+    /// REDESIGNED 2026-07-29: no longer opens the full breakdown plan directly — fetches exactly
+    /// ONE next physical action first (`AppState.StuckNextActionState`/`fetchStuckNextAction`),
+    /// with the full plan still one tap away via that banner's own secondary button. See
+    /// `AppState.chooseStuckReason`'s doc comment for the full reasoning.
+    case tooBig
+    /// "This one feels heavy to even look at" — breakdown does NOT help here (splitting one scary
+    /// task into several scary pieces doesn't reduce the dread); needs naming the specific dreaded
+    /// part instead (`AppState.stuckDreadState` / `IntentRouter.stuckDread`).
+    case dread
+    /// "I can't get myself moving at all" — the problem isn't the task's size or content at all,
+    /// so no model call is ever made for this reason; see `AppState.startStuckCantStartTimer`.
+    case cantStart
+}
+
 /// One attribute a confirm-card chip governs (T024). Deliberately narrower than `ParsedTask`'s
 /// full field list — `title`/`notes`/`subtasks` have no chip (title is the always-shown headline,
 /// notes/subtasks aren't part of the v2 chip set per the contract's "Confirm + materialize"
@@ -625,6 +645,14 @@ final class AppState {
     /// see `staleTasks`'s doc comment for the full seam note). Lightly persisted so a relaunch
     /// mid-week doesn't lose "just kept" state.
     private var triageKeptAt: [UUID: Date]
+    /// FR-030: task ids that have ALREADY been shown the one-time "want to split this up?"
+    /// invite (`switchBreakdownSuggestion`) — checked before ever arming it again, so a task that
+    /// crosses the switch-away threshold a second, third, ... time is never re-asked. Persisted
+    /// (same `UserDefaults`-array-of-`uuidString` shape as `triageKeptAt`'s own dictionary
+    /// persistence right above) so a relaunch can't re-ask a question the user already answered —
+    /// this is the "bền qua restart" half of the FR-030 "one-time" rule. Never surfaced to the
+    /// user in any form (no badge, no visible count) — purely an internal gate.
+    private var switchBreakdownOffered: Set<UUID>
 
     // Focus session
     var focusActive: Bool
@@ -686,6 +714,85 @@ final class AppState {
     /// The task currently shown in the detail sheet, by id — `nil` means the sheet is closed.
     /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
     var detailTaskID: UUID?
+
+    // MARK: - Switch ("đổi gió") state — read/written by both `Sources/Views/FocusOverlay.swift`'s
+    // "Switch" button and `Sources/Views/TodayView.swift`'s hero-card "Switch" button (see the
+    // "Switch" MARK further down for the actual behavior). Same "additive, not part of the frozen
+    // §4 surface" category as the modal/banner state directly above.
+
+    /// FR-030: task pending the one-time "want to split this up?" invite, or `nil`. Armed by
+    /// `maybeOfferBreakdown(taskID:newCount:)` the moment a task's `switchAwayCount` first crosses
+    /// `switchBreakdownThreshold`; cleared by `dismissSwitchBreakdownSuggestion()`/
+    /// `acceptSwitchBreakdownSuggestion()`. Either way `switchBreakdownOffered` has already
+    /// recorded that this task got its one chance, so it can never re-arm for the same id.
+    var switchBreakdownSuggestion: TaskItem?
+
+    /// Dashboard-only Switch override (`TodayView`'s hero card): while set to a still-open task's
+    /// id, `dashboardActiveTask` shows THAT task instead of the engine's raw `activeTask` pick.
+    /// Deliberately ephemeral — never persisted — a relaunch always starts back at the engine's
+    /// own pick, same as `activeTask` always has. `FocusOverlay`'s own separate Switch mechanism
+    /// (`focusIndex`-based) is completely independent of this and is unaffected.
+    private var dashboardSwitchOverrideID: UUID?
+
+    // MARK: - "Stuck?" state (anh Khôi, 2026-07-29) — read/written by both `FocusOverlay`'s and
+    // `TodayView`'s hero-card "Stuck?" button, same "one definition, two call sites, never allowed
+    // to drift" convention as the Switch/breakdown-invite state directly above. Three DIFFERENT
+    // reasons a task doesn't get started, three DIFFERENT responses — "chia nhỏ" (breakdown) only
+    // ever fixed the "this is too big" reason; this state machine adds the other two.
+    //
+    // Deliberately no counting/scoring anywhere in this section: how many times "Stuck?" (or any
+    // one reason under it) gets tapped is never recorded, never shown, never persisted — this
+    // whole feature is a way to get UNSTUCK, not a metric about the user.
+
+    /// Which task the "Stuck?" reason picker is open for right now — `nil` means the picker is
+    /// closed. Mirrors `breakdownTask`'s "one point of entry" shape: both Stuck buttons call
+    /// `openStuckPicker(for:)` and nothing else, neither view owns any Stuck-specific state itself.
+    var stuckPickerTask: TaskItem?
+
+    /// State machine for the "dread" reason's async message fetch ONLY. The "too_big" reason never
+    /// touches this at all — it routes straight into the existing `openBreakdown(for:)` flow (see
+    /// `chooseStuckReason` below) — and "cant_start" never touches this either (no model call, see
+    /// `startStuckCantStartTimer`).
+    enum StuckDreadState: Equatable, Sendable {
+        case idle
+        case loading
+        /// A real, model-produced message (on-device FM or Cloud — see `IntentRouter.stuckDread`).
+        case loaded(String)
+        /// No model reachable right now (no FM, not opted into Cloud, offline, quota exhausted, or
+        /// a response that failed decode/cap validation) — `Self.stuckDreadFallbackMessage` is
+        /// shown instead: a STATIC, pre-written sentence (the app's own honest words about itself
+        /// having nothing to say right now) rather than silence or an invented claim about the
+        /// task's content. Mirrors `BreakdownFetchState.failed`'s "tell the truth, never fabricate"
+        /// rule for the exact same reason.
+        case fallback
+    }
+    var stuckDreadState: StuckDreadState = .idle
+    /// Whichever task `stuckDreadState` currently describes — `nil` while idle. Kept distinct from
+    /// `stuckPickerTask`: the picker is already dismissed (`chooseStuckReason` clears it
+    /// synchronously) by the time a dread fetch is even in flight.
+    var stuckDreadTask: TaskItem?
+    /// Monotonic guard token, exact same shape as `breakdownSession`/`captureSession` — a fetch
+    /// still in flight when the user dismisses the banner (or reopens Stuck on a different task)
+    /// can never land on/populate a state that's moved on.
+    private var stuckDreadSession = 0
+
+    /// Static fallback copy for the "dread" reason when no model is reachable. This is the APP's
+    /// own pre-written sentence — never a guess about the specific task's content — so showing it
+    /// never violates the "never fabricate details about the task" rule the real (model-produced)
+    /// path follows; it only ever describes the app's own present inability to say something more
+    /// specific. Tone: no exclamation mark, no coaching, no diagnosis — matches `SweepView.swift`'s
+    /// established no-shame copy. Still points at a concrete, bounded, physical action (not "just
+    /// try harder") so tapping "Stuck?" with no network is never a dead end.
+    static let stuckDreadFallbackMessage =
+        "Nothing specific to suggest right now. Two minutes on any small physical piece of it still counts."
+
+    // "cant_start" reason: a plain 2-minute countdown, permission to do absolutely anything — NOT
+    // bound to any specific task. See `startStuckCantStartTimer`'s doc comment (further down, next
+    // to `startFocus()`) for why this is a small dedicated timer rather than reusing
+    // `startFocus()`/`focusSecondsLeft`/`focusTick()`.
+    var stuckTimerActive = false
+    var stuckTimerSecondsLeft = 0
+    private var stuckTimer: Timer?
 
     // MARK: - Guided tour (coach-mark walkthrough shown right after onboarding; `TourOverlay`,
     // `TourModel`, `TourAnchor` — `Sources/Views/Tour/*`). Same "additive, not part of the frozen
@@ -917,6 +1024,9 @@ final class AppState {
     /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
     /// file; no sibling reads this one.
     private static let triageKeptAtKey = "volar.triageKeptAt"
+    /// FR-030 "already offered the breakdown invite" bookkeeping — see `switchBreakdownOffered`'s
+    /// doc comment. Local to this file; no sibling reads this one.
+    private static let switchBreakdownOfferedKey = "volar.switchBreakdownOffered"
     /// FIX 4: `accent`/`density` used to only ever be assigned from this `init`'s parameters —
     /// there was no read-back from `UserDefaults` here (unlike every other Settings → Appearance
     /// control: `ambientKey`/`customImageKey` right above both get one) and no write anywhere
@@ -1021,6 +1131,15 @@ final class AppState {
         } else {
             self.triageKeptAt = [:]
         }
+        // FR-030 "already offered the breakdown invite" set — same string-array `UserDefaults`
+        // shape `hasSeenTourKey`-adjacent persisted flags use elsewhere in this file, just a
+        // collection instead of a single `Bool`. Absent/corrupt storage degrades to "never offered
+        // anyone" (empty set), never to a crash.
+        if let raw = UserDefaults.standard.array(forKey: Self.switchBreakdownOfferedKey) as? [String] {
+            self.switchBreakdownOffered = Set(raw.compactMap { UUID(uuidString: $0) })
+        } else {
+            self.switchBreakdownOffered = []
+        }
         // Guided tour: read-only override, same shape as every other persisted-choice read above —
         // absent means "never run before" (the honest default for a fresh install), so `Bool` here
         // needs no fallback expression the way `speechEngineChoice`/`voiceDeliveryMode` do.
@@ -1101,6 +1220,18 @@ final class AppState {
         // general (no public system-wide "is any app playing audio" API without an entitlement)
         // — calendar-busy (P3) + call/mic remain the real guards for that case.
         self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
+        // `ReminderContextGate.swift`'s own header comment names this same "nil means not wired
+        // yet" extension point ("mic capture belongs to Sources/Speech/SpeechCapture.swift, owned
+        // elsewhere") — `captureState == .recording` IS that local-mic-capture signal (it's driven
+        // by this same speech-capture flow), so it's wired here alongside `isOtherAudioPlaying`
+        // rather than left open.
+        self.reminderGate.isLocalMicCaptureActive = { [weak self] in self?.captureState == .recording }
+        // ReminderScheduler.swift's own doc comment on `isVolarCapturing` names this exact missing
+        // line: a full-screen takeover must never fight Volar's own capture UI. Same "assign here,
+        // after every stored property above is initialized" placement and `[weak self]` shape as
+        // `reminderGate.isOtherAudioPlaying` immediately above — `scheduler` is optional (`nil`
+        // without a store, per its own doc comment further up), so this is a no-op in that case.
+        self.scheduler?.isVolarCapturing = { [weak self] in self?.captureState == .recording }
         speech.setLocale(Self.appleRecognitionLocale(for: self.recognitionLocaleID))
         groq.languageCode = Self.groqLanguageCode(for: self.recognitionLocaleID)
         // CAPTURE SEAM (AppLinkHandler.swift's own file header): wire `volar://capture?text=...`
@@ -1314,6 +1445,25 @@ final class AppState {
         let engineTasks = tasks.map { $0.snapshot() }
         guard let winner = VolarCore.nextTask(from: engineTasks, now: clock(), calendar: .current) else { return nil }
         return tasks.first { $0.id == winner.id }
+    }
+
+    /// `TodayView`'s hero card reads THIS, not `activeTask` directly — everywhere else in the app
+    /// (menu bar title, delegation-confirm targeting, guided tour gating, voice read-day) keeps
+    /// reading the engine's raw, un-overridable `activeTask` exactly as before; this property is
+    /// additive, scoped to the one screen that needs a Switch override.
+    ///
+    /// While `dashboardSwitchOverrideID` names a task that's still genuinely open, THAT task wins
+    /// over whatever the engine would otherwise pick — this is what makes "Switch" actually move
+    /// the hero card's spotlight, since nothing about the switched-away task's own data (status/
+    /// priority/deadline) ever changes, so the engine would otherwise keep re-selecting it forever.
+    /// Self-healing: once the override task is done/deleted it silently drops out of `openTasks`
+    /// and this falls straight back to `activeTask`, with no explicit teardown needed.
+    var dashboardActiveTask: TaskItem? {
+        if let overrideID = dashboardSwitchOverrideID,
+           let overridden = openTasks.first(where: { $0.id == overrideID }) {
+            return overridden
+        }
+        return activeTask
     }
 
     // MARK: - Sidebar sections (Upcoming/Inbox) — 2026-07-27, port of Windows
@@ -3887,6 +4037,65 @@ final class AppState {
         focusPaused.toggle()
     }
 
+    // MARK: - "Stuck?" — "cant_start" reason's 2-minute timer (anh Khôi, 2026-07-29)
+    //
+    // Deliberately its OWN small timer, NOT a reuse of `startFocus()`/`focusSecondsLeft`/
+    // `focusTick()` right above, even though the `Timer` construction below is copied from it
+    // verbatim for consistency. Reasons this reuse was rejected (self-review requirement: explain
+    // why, not just do something different):
+    //   1. Different semantics entirely. `startFocus()` is "spend a session ON THIS SPECIFIC TASK";
+    //      "cant_start" is explicitly the OPPOSITE — "the problem isn't which task, it's that I
+    //      can't get moving at all, so do absolutely anything for two minutes." Forcing the second
+    //      concept through the first would either misrepresent a task-agnostic permission slip as
+    //      "focusing on the stuck task" (defeating the whole point) or require a task parameter
+    //      `startFocus()` doesn't take and whose callers (`FocusOverlay`, `TodayView`, existing
+    //      tests) all assume is absent.
+    //   2. `startFocus()` hardcodes `25 * 60` and picks a task out of `openTasks` (frog-first) for
+    //      `FocusOverlay` to display in its title/priority/duration chip row — none of that applies
+    //      here; there is no task to show, no chip row, just a plain countdown + "stop."
+    //   3. `focusActive`/`focusIndex` additionally drive `FocusOverlay`'s full prev/next task-
+    //      navigation chrome. Reusing them would either force this timer to also render/behave
+    //      like the full task-focus overlay (wrong UI for "do anything") or require carving new
+    //      conditionals into `FocusOverlay`'s existing, already-shipped Focus-session rendering —
+    //      out of scope here and a real regression risk to a feature this task must not touch.
+    // So: a second, independent `Timer`, same construction shape as `startFocus()`'s for
+    // consistency, entirely separate state (`stuckTimerActive`/`stuckTimerSecondsLeft`/`stuckTimer`
+    // — never touches `focusActive`/`focusSecondsLeft`/`focusTimer` and vice versa).
+    func startStuckCantStartTimer() {
+        stuckTimerSecondsLeft = 120
+        stuckTimerActive = true
+        stuckTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.stuckTimerTick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        stuckTimer = timer
+    }
+
+    private func stuckTimerTick() {
+        guard stuckTimerActive else { return }
+        guard stuckTimerSecondsLeft > 0 else {
+            endStuckCantStartTimer()
+            return
+        }
+        stuckTimerSecondsLeft -= 1
+        if stuckTimerSecondsLeft <= 0 {
+            endStuckCantStartTimer()
+        }
+    }
+
+    /// Ends the "cant_start" timer early ("Stop") or on its own natural expiry — either way, no
+    /// record of it is kept anywhere (no completion count, no "did you actually do something"
+    /// follow-up question): the permission was the entire point, not a task to grade.
+    func endStuckCantStartTimer() {
+        stuckTimer?.invalidate()
+        stuckTimer = nil
+        stuckTimerActive = false
+        stuckTimerSecondsLeft = 0
+    }
+
     /// Completes the given task and advances the focus index, clamping into range — mirrors the
     /// prototype's `completeFocusTask`. If that was the last open task, ends the session.
     func completeFocusTask(_ id: UUID) {
@@ -3914,6 +4123,386 @@ final class AppState {
         // Mirrors `readDay` in volar-mac.jsx: announces open task count + up to 3 titles, or
         // "All clear" when empty. `VoicePlayback.readDay` reads `openTasks` off this instance.
         voice.readDay(self)
+    }
+
+    // MARK: - Switch ("đổi gió") — first-class, non-judgmental alternative to `completeFocusTask`
+    // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain available here — none of this
+    // section (through `switchDashboardActiveTask()` below) has been compiled or run. Needs a Mac
+    // build + `FocusSwitchTests` pass before shipping (see this session's final report for the
+    // exact verify checklist).
+
+    /// Anh Khôi's explicit framing (backlog 2026-07-15 (l)): an ADHD brain runs on novelty —
+    /// changing what you're working on isn't giving up, it's how the brain actually works. Focus
+    /// Lock was already a SOFT lock (`goToPrevious`/`goToNext` in `FocusOverlay` already let you
+    /// move off the current task); this makes leaving-on-purpose a first-class action with its own
+    /// name, equal in standing to `completeFocusTask`/`toggleDone`, instead of an unlabeled side-
+    /// effect of the arrow keys or something that only lives in `FocusOverlay`.
+    ///
+    /// Pure: the ONE replacement task Switch should hand the focus slot to, given the full
+    /// still-open snapshot and the id of whatever currently occupies it. Filters `currentID` OUT
+    /// of the snapshot and re-runs `VolarCore.nextTask` on what's left — this app layer never
+    /// reimplements the engine's own eligibility/ordering rules, it only excludes one task before
+    /// asking again. Returns `nil` when nothing else is eligible (the excluded task was the only
+    /// one open, or every remaining task is blocked/ineligible), so the caller can leave the slot
+    /// alone instead of "switching" into nothing.
+    ///
+    /// `now`/`calendar` are parameters, never read internally (repo convention — see
+    /// `VolarCore.nextTask`'s own doc comment and `TaskSections.swift`'s file header), so this
+    /// stays a pure, deterministic, directly-testable function.
+    static func nextSwitchTarget(
+        excluding currentID: UUID,
+        from openTasks: [TaskItem],
+        now: Date,
+        calendar: Calendar
+    ) -> TaskItem? {
+        let remaining = openTasks.filter { $0.id != currentID }
+        guard !remaining.isEmpty else { return nil }
+        let engineTasks = remaining.map { $0.snapshot() }
+        guard let winner = VolarCore.nextTask(from: engineTasks, now: now, calendar: calendar) else { return nil }
+        return remaining.first { $0.id == winner.id }
+    }
+
+    /// FR-030: once a task's `switchAwayCount` first reaches this many, it earns the one-time
+    /// breakdown invite (`switchBreakdownSuggestion`).
+    private static let switchBreakdownThreshold = 3
+
+    /// Shared tail of EVERY Switch action, wherever it was triggered from (`FocusOverlay`'s
+    /// fullscreen Switch or `TodayView`'s hero-card Switch) — the one and only place
+    /// `switchAwayCount` is written, so the two call sites can never drift on how counting works.
+    /// Bumps `left`'s `switchAwayCount` by exactly 1 (store-backed when a real `TaskStore` exists,
+    /// via the EXISTING `mergeIntoExisting` — no new `TaskStore` method needed; in-memory fallback
+    /// otherwise, same convention `toggleDone`'s own `guard let store else { … }` branch uses), then
+    /// checks the FR-030 threshold. Deliberately the ONLY field this touches: no `status` change,
+    /// no other mutation, on `left` or anyone else.
+    private func recordSwitchAway(from left: TaskItem) {
+        guard let store else {
+            var newCount = left.switchAwayCount + 1
+            if let index = tasks.firstIndex(where: { $0.id == left.id }) {
+                tasks[index].switchAwayCount = newCount
+            } else {
+                // Unknown id (shouldn't happen — `left` always comes from a live `tasks` read just
+                // above the call site) — still evaluate the threshold off the value we WOULD have
+                // written, rather than silently skipping the FR-030 check.
+                newCount = left.switchAwayCount + 1
+            }
+            maybeOfferBreakdown(taskID: left.id, newCount: newCount)
+            return
+        }
+        let updated = store.mergeIntoExisting(left.id) { task in
+            var updated = task
+            updated.switchAwayCount += 1
+            return updated
+        }
+        tasks = store.fetchAll()
+        maybeOfferBreakdown(taskID: left.id, newCount: updated?.switchAwayCount ?? (left.switchAwayCount + 1))
+    }
+
+    /// FR-030: arms the one-time breakdown invite for `taskID` the FIRST time `newCount` crosses
+    /// `switchBreakdownThreshold` — `switchBreakdownOffered` (persisted, see its own doc comment)
+    /// is checked and updated in the SAME call, so a task that keeps getting switched away from
+    /// (4th, 5th, ... time) is never asked twice. `switchAwayCount`/this check never appear in any
+    /// UI copy — see `dismissSwitchBreakdownSuggestion`/`acceptSwitchBreakdownSuggestion` and
+    /// `SwitchBreakdownSuggestionBanner` (`FocusOverlay.swift`) for the one place the RESULT of
+    /// crossing the threshold is shown, which is a plain invite, never the count itself.
+    private func maybeOfferBreakdown(taskID: UUID, newCount: Int) {
+        guard newCount >= Self.switchBreakdownThreshold, !switchBreakdownOffered.contains(taskID) else { return }
+        switchBreakdownOffered.insert(taskID)
+        UserDefaults.standard.set(switchBreakdownOffered.map(\.uuidString), forKey: Self.switchBreakdownOfferedKey)
+        switchBreakdownSuggestion = tasks.first { $0.id == taskID }
+    }
+
+    /// Declining the FR-030 invite: closes it, permanently (`switchBreakdownOffered` was already
+    /// updated the moment it was armed, in `maybeOfferBreakdown` above — there is nothing left to
+    /// persist here, this is purely dismissing the banner).
+    func dismissSwitchBreakdownSuggestion() {
+        switchBreakdownSuggestion = nil
+    }
+
+    /// Accepting the FR-030 invite: routes straight into the EXISTING breakdown flow
+    /// (`openBreakdown(for:)`, unchanged) rather than inventing a second one — this is a shortcut
+    /// into "Break down into steps…", the same feature already reachable from the hero card's/
+    /// `TaskRow`'s own context menu.
+    func acceptSwitchBreakdownSuggestion() {
+        guard let task = switchBreakdownSuggestion else { return }
+        switchBreakdownSuggestion = nil
+        openBreakdown(for: task)
+    }
+
+    // MARK: - "Stuck?" (anh Khôi, 2026-07-29) — one button, three plainly-worded reasons, three
+    // deliberately different responses. See the state doc comments above (`stuckPickerTask`
+    // onward) for why "chia nhỏ" (breakdown) alone doesn't cover all three.
+
+    /// Opens the reason picker for `task`. Both Stuck buttons (`FocusOverlay`, `TodayView`'s hero
+    /// card) call this and nothing else — mirrors `openBreakdown(for:)`'s single-entry-point shape.
+    func openStuckPicker(for task: TaskItem) {
+        stuckPickerTask = task
+    }
+
+    /// Declining the picker without choosing a reason (tapping elsewhere / closing the popover).
+    func dismissStuckPicker() {
+        stuckPickerTask = nil
+    }
+
+    /// Routes a chosen reason to its own fix. Closes the picker synchronously in every case (the
+    /// three branches below diverge on what happens NEXT, not on whether the picker stays open).
+    ///
+    /// `.tooBig` REDESIGNED (anh Khôi, 2026-07-29, same day as the first version, after he
+    /// challenged it directly): used to route straight into `openBreakdown(for:)` (a full 3-9 step
+    /// plan). Rejected because Volar has no real context for a task beyond a short spoken title —
+    /// asking for a full plan under that blindness meant steps 3+ were fabrication dressed as
+    /// advice. Now fetches exactly ONE next physical action instead (`fetchStuckNextAction`); the
+    /// full plan is still one tap away via that banner's own "See full plan" button
+    /// (`openFullPlanFromStuck`), which is the ONLY place `openBreakdown(for:)` is still reached
+    /// from this feature.
+    func chooseStuckReason(_ reason: StuckReason, for task: TaskItem) {
+        stuckPickerTask = nil
+        switch reason {
+        case .tooBig:
+            fetchStuckNextAction(for: task)
+        case .dread:
+            fetchStuckDread(for: task)
+        case .cantStart:
+            // No task binding, no model call at all — see `startStuckCantStartTimer`'s doc comment
+            // (next to `startFocus()`) for why "cant_start" needs neither.
+            startStuckCantStartTimer()
+        }
+    }
+
+    /// The async "dread" fetch, split out so `chooseStuckReason` stays synchronous — same
+    /// "synchronous state flip before the async hop" shape `fetchBreakdown` documents.
+    /// `sourceTranscript`/`deadline`/`existingSubtasks` (anh Khôi, 2026-07-29 "richer context"
+    /// addendum) are computed synchronously here, same "read `self.tasks` before the async hop,
+    /// not inside it" reasoning `fetchBreakdown` documents for the identical pattern.
+    private func fetchStuckDread(for task: TaskItem) {
+        stuckDreadSession += 1
+        let session = stuckDreadSession
+        stuckDreadTask = task
+        stuckDreadState = .loading
+        let context = existingSubtaskContext(for: task)
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let message = await self.router.stuckDread(
+                title: task.title,
+                notes: task.notes,
+                sourceTranscript: task.sourceTranscript,
+                deadline: task.deadline,
+                existingSubtasks: context
+            )
+            self.applyStuckDreadResult(message, session: session)
+        }
+    }
+
+    /// The synchronous tail of `fetchStuckDread`, split out for the same direct-unit-testability
+    /// reason `applyBreakdownFetchResult` documents: a test can simulate "the router came back
+    /// with this" (or came back with `nil`) without a real FM/network round trip. Not `private`
+    /// for that reason.
+    func applyStuckDreadResult(_ message: String?, session: Int) {
+        // Stale? The banner was dismissed, or Stuck was reopened for a different task, while this
+        // fetch was in flight — same `captureSession`/`breakdownSession` guard shape.
+        guard stuckDreadSession == session else { return }
+        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stuckDreadState = .loaded(message)
+        } else {
+            // Neither tier produced anything usable — the STATIC fallback sentence takes over
+            // (`Self.stuckDreadFallbackMessage`), never silence, never an invented claim about the
+            // task.
+            stuckDreadState = .fallback
+        }
+    }
+
+    /// Dismissing the dread message/fallback banner without acting on it.
+    func dismissStuckDread() {
+        stuckDreadSession += 1 // invalidate any fetch still in flight for this task
+        stuckDreadState = .idle
+        stuckDreadTask = nil
+    }
+
+    /// Accepting the dread message's proposed 2-minute action. Deliberately lands on the EXACT
+    /// same task-agnostic timer `chooseStuckReason(.cantStart, for:)` starts — both are, at bottom,
+    /// "do one small physical thing for up to two minutes, no judgment either way," so there is no
+    /// reason for a second timer implementation here.
+    func acceptStuckDreadAction() {
+        stuckDreadState = .idle
+        stuckDreadTask = nil
+        startStuckCantStartTimer()
+    }
+
+    // MARK: - "Stuck?" — "too_big" reason's single next-action fetch (anh Khôi, 2026-07-29
+    // REDESIGN). See `chooseStuckReason`'s doc comment above for why this reason no longer opens
+    // `TaskBreakdownView` directly.
+
+    /// State machine for the "too_big" reason's async single-next-action fetch. Deliberately a
+    /// SEPARATE state machine from `StuckDreadState` above, not a shared/generalized one: the two
+    /// reasons' failure modes are NOT the same shape (see `.unavailable` below), and forcing them
+    /// through one enum would either give `too_big` a fabricated-content fallback case it must
+    /// never have, or strip `dread`'s legitimate static fallback — either way, blurring a
+    /// distinction anh Khôi drew deliberately.
+    enum StuckNextActionState: Equatable, Sendable {
+        case idle
+        case loading
+        /// A real, model-produced single next action (on-device FM or Cloud — see
+        /// `IntentRouter.stuckNextAction`).
+        case loaded(String)
+        /// Neither FM nor Cloud produced anything usable. Deliberately NOT the same shape as
+        /// `StuckDreadState.fallback`: that case carries a STATIC SUGGESTED ACTION, which is safe
+        /// because it is the app's own generic words, not a claim about the task; a next-action
+        /// equivalent would have to claim SOME specific-sounding physical action, which would
+        /// misrepresent a guess as something the app actually determined for THIS task — exactly
+        /// the fabrication this reason's redesign exists to avoid. So this case carries NO
+        /// suggested content at all, only the fact that nothing was found — mirrors
+        /// `BreakdownFetchState.failed`'s "tell the truth, never fabricate" rule.
+        case unavailable
+    }
+    var stuckNextActionState: StuckNextActionState = .idle
+    /// Whichever task `stuckNextActionState` currently describes — `nil` while idle. Same role as
+    /// `stuckDreadTask` for the sibling state machine above.
+    var stuckNextActionTask: TaskItem?
+    /// Monotonic guard token, exact same shape as `stuckDreadSession`/`breakdownSession`.
+    private var stuckNextActionSession = 0
+
+    /// The async "too_big" fetch, split out so `chooseStuckReason` stays synchronous — same shape
+    /// as `fetchStuckDread` right above, including computing `existingSubtaskContext` synchronously
+    /// before the async hop.
+    private func fetchStuckNextAction(for task: TaskItem) {
+        stuckNextActionSession += 1
+        let session = stuckNextActionSession
+        stuckNextActionTask = task
+        stuckNextActionState = .loading
+        let context = existingSubtaskContext(for: task)
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let message = await self.router.stuckNextAction(
+                title: task.title,
+                notes: task.notes,
+                sourceTranscript: task.sourceTranscript,
+                deadline: task.deadline,
+                existingSubtasks: context
+            )
+            self.applyStuckNextActionResult(message, session: session)
+        }
+    }
+
+    /// The synchronous tail of `fetchStuckNextAction`, split out for the same direct-
+    /// unit-testability reason `applyStuckDreadResult`/`applyBreakdownFetchResult` document. Not
+    /// `private` for that reason.
+    func applyStuckNextActionResult(_ message: String?, session: Int) {
+        guard stuckNextActionSession == session else { return }
+        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stuckNextActionState = .loaded(message)
+        } else {
+            // No static fallback here — see `StuckNextActionState.unavailable`'s own doc comment
+            // for why a fabricated-sounding "do something" claim would misrepresent a guess as a
+            // real answer for THIS task, unlike `dread`'s legitimately app-authored fallback text.
+            stuckNextActionState = .unavailable
+        }
+    }
+
+    /// Dismissing the next-action banner without acting on it.
+    func dismissStuckNextAction() {
+        stuckNextActionSession += 1 // invalidate any fetch still in flight for this task
+        stuckNextActionState = .idle
+        stuckNextActionTask = nil
+    }
+
+    /// Accepting the next action's proposed 2-minute action. Lands on the EXACT same task-agnostic
+    /// timer every other "start the small thing" acceptance uses (`acceptStuckDreadAction`,
+    /// `cant_start`) — same reasoning as that method's own doc comment.
+    func acceptStuckNextActionAction() {
+        stuckNextActionState = .idle
+        stuckNextActionTask = nil
+        startStuckCantStartTimer()
+    }
+
+    /// The next-action banner's secondary "See full plan" action (anh Khôi, 2026-07-29 REDESIGN) —
+    /// the ONLY place this feature still reaches the full existing breakdown flow
+    /// (`openBreakdown(for:)`, entirely unchanged) — never a second implementation of it. Available
+    /// regardless of whether the quick single-action fetch succeeded, is still loading, or came
+    /// back `.unavailable`: this is a deliberate escape hatch to the full plan, not conditioned on
+    /// the quick answer's own outcome.
+    func openFullPlanFromStuck(for task: TaskItem) {
+        stuckNextActionState = .idle
+        stuckNextActionTask = nil
+        openBreakdown(for: task)
+    }
+
+    /// Shared plumbing for `switchFocusTask()`/`canSwitchFocusTask` (the `FocusOverlay` path): the
+    /// task currently in the focus slot, the task `nextSwitchTarget` would hand focus to next, and
+    /// that replacement's own index in `openTasks` — `nil` whenever there is nothing to switch TO
+    /// (focus not active, `openTasks` empty, or every other open task is currently ineligible).
+    /// Kept side-effect-free so the view can poll `canSwitchFocusTask` on every render without
+    /// accidentally mutating anything.
+    private func focusSwitchCandidate() -> (current: TaskItem, replacement: TaskItem, newIndex: Int)? {
+        guard focusActive else { return nil }
+        let openNow = openTasks
+        guard !openNow.isEmpty else { return nil }
+        let clampedIndex = min(max(focusIndex, 0), openNow.count - 1)
+        let current = openNow[clampedIndex]
+        guard
+            let replacement = Self.nextSwitchTarget(excluding: current.id, from: openNow, now: clock(), calendar: .current),
+            let newIndex = openNow.firstIndex(where: { $0.id == replacement.id })
+        else { return nil }
+        return (current, replacement, newIndex)
+    }
+
+    /// Drives the Switch button's disabled state (mirrors `bottomNav`'s existing prev/next
+    /// disabled-at-the-bound convention in `FocusOverlay`) — false when there is genuinely nowhere
+    /// else to send focus right now (e.g. exactly one open task left).
+    var canSwitchFocusTask: Bool { focusSwitchCandidate() != nil }
+
+    /// Hands the focus slot to a different open task. The task being left gets exactly ONE thing
+    /// written to it — `switchAwayCount + 1`, via `recordSwitchAway` (never shown anywhere, purely
+    /// an internal FR-030 signal) — and nothing else: no `status` change, no negative flag. It
+    /// simply stops being the one shown, and re-enters normal `nextTask()` contention exactly where
+    /// it already sat. Next time it wins selection again it comes back with its existing
+    /// `sourceTranscript`/`resumeNote`/step progress intact (`FocusOverlay` re-displays those as-is
+    /// via `stepProgress(for:)`), because nothing else about the task itself ever changed.
+    ///
+    /// Recomputes the replacement's index AFTER `recordSwitchAway` (rather than reusing
+    /// `focusSwitchCandidate()`'s pre-mutation index) — same "refresh, then recompute" discipline
+    /// `completeFocusTask` above already uses, since a store-backed `recordSwitchAway` reloads
+    /// `tasks` from the store. A no-op when there is nowhere else to switch to
+    /// (`canSwitchFocusTask == false`) — the UI disables the button for that same state, this guard
+    /// is just the backstop.
+    func switchFocusTask() {
+        guard let candidate = focusSwitchCandidate() else { return }
+        recordSwitchAway(from: candidate.current)
+        if let refreshedIndex = openTasks.firstIndex(where: { $0.id == candidate.replacement.id }) {
+            focusIndex = refreshedIndex
+        }
+        if voiceFeedback {
+            voice.speak("Switched. \(candidate.replacement.title)")
+        }
+    }
+
+    /// Shared plumbing for `switchDashboardActiveTask()`/`canSwitchDashboardActiveTask` (the
+    /// `TodayView` hero-card path): today's dashboard-spotlit task (`dashboardActiveTask`) plus the
+    /// task `nextSwitchTarget` would hand the spotlight to next — `nil` when there's nothing spotlit
+    /// or nothing else eligible.
+    private func dashboardSwitchCandidate() -> (current: TaskItem, replacement: TaskItem)? {
+        guard let current = dashboardActiveTask else { return nil }
+        guard let replacement = Self.nextSwitchTarget(excluding: current.id, from: openTasks, now: clock(), calendar: .current) else {
+            return nil
+        }
+        return (current, replacement)
+    }
+
+    /// Drives the hero card's Switch button disabled state — same "false when nothing else is
+    /// eligible" contract as `canSwitchFocusTask`, just against `dashboardActiveTask` instead of
+    /// `focusIndex`.
+    var canSwitchDashboardActiveTask: Bool { dashboardSwitchCandidate() != nil }
+
+    /// Hands the dashboard hero card's spotlight to a different open task — same non-mutation
+    /// contract as `switchFocusTask()` above (only `switchAwayCount` changes on the task being
+    /// left, via the same shared `recordSwitchAway`). Sets `dashboardSwitchOverrideID` so
+    /// `dashboardActiveTask` picks the replacement up immediately; self-heals back to the engine's
+    /// own `activeTask` once the replacement itself is done/deleted/switched away from in turn.
+    func switchDashboardActiveTask() {
+        guard let candidate = dashboardSwitchCandidate() else { return }
+        recordSwitchAway(from: candidate.current)
+        dashboardSwitchOverrideID = candidate.replacement.id
+        if voiceFeedback {
+            voice.speak("Switched. \(candidate.replacement.title)")
+        }
     }
 
     // MARK: - Appearance controls (Settings → Appearance)
@@ -4047,7 +4636,22 @@ final class AppState {
     func openBreakdown(for task: TaskItem) {
         breakdownTask = task
         showBreakdown = true
-        fetchBreakdown(title: task.title, notes: task.notes)
+        fetchBreakdown(for: task)
+    }
+
+    /// title+done snapshot of `task`'s existing children (anh Khôi, 2026-07-29 "richer context"
+    /// addendum) — the extra grounding this app can offer `breakdown`/`stuck` calls beyond a bare
+    /// title, so a repeat call never regenerates/repeats a step already finished. `nil` when there
+    /// are no children yet, matching the wire's own "omit the field entirely" convention for an
+    /// absent/empty `existingSubtasks` (see `TaskContextSubtask`'s doc comment,
+    /// `Sources/Parsing/IntentParsing.swift`, for the shared type both this and the transport layer
+    /// use). Shared by `fetchBreakdown`, `fetchStuckDread`, and `fetchStuckNextAction` below — one
+    /// definition, so the three call sites can never compute "which children count" three
+    /// different ways.
+    private func existingSubtaskContext(for task: TaskItem) -> [TaskContextSubtask]? {
+        let children = tasks.filter { $0.parentId == task.id }
+        guard !children.isEmpty else { return nil }
+        return children.map { TaskContextSubtask(title: $0.title, done: $0.done) }
     }
 
     /// `TaskBreakdownView`'s `.onDisappear` calls this on EVERY dismissal path (Cancel, Edit-as-
@@ -4067,11 +4671,13 @@ final class AppState {
     /// `.loading` assignment happen SYNCHRONOUSLY before the `_Concurrency.Task` hop — exactly
     /// `runParse`'s own shape (`captureSession`/`captureState = .parsing` set synchronously, THEN
     /// the async router call, further down this file). Routes through the SAME `IntentRouter` the
-    /// rest of cloud parsing already uses (`router.breakdown(title:notes:)`, alongside the
-    /// existing `router.parse`/`router.resolveCompletion`) rather than a second networking path
-    /// opened directly from a View.
+    /// rest of cloud parsing already uses — `router.breakdownWithContext(...)` (anh Khôi, 2026-07-29
+    /// "richer context" addendum; see that method's own doc comment for why it's a separate method
+    /// from the frozen `router.breakdown(title:notes:)` protocol witness), alongside the existing
+    /// `router.parse`/`router.resolveCompletion` — rather than a second networking path opened
+    /// directly from a View.
     ///
-    /// `router.breakdown` itself tries FM (on-device, macOS 26+) -> Cloud -> `[]`.
+    /// `router.breakdownWithContext` itself tries FM (on-device, macOS 26+) -> Cloud -> `[]`.
     ///
     /// (2026-07-28, anh Khôi chốt: `router.breakdown` USED to fall through, unconditionally, to a
     /// hard-coded heuristic floor — `HeuristicNLParser.breakdown`, `Sources/Model/NLParser.swift`:
@@ -4099,7 +4705,7 @@ final class AppState {
     ///      and the comparison is dead weight (never true, since `steps` is non-empty by the time
     ///      it's reached). Left in place rather than reworking that test's signature, which is out
     ///      of scope for this change (see backlog.md).
-    private func fetchBreakdown(title: String, notes: String?) {
+    private func fetchBreakdown(for task: TaskItem) {
         breakdownSession += 1
         let session = breakdownSession
         breakdownFetchState = .loading
@@ -4109,9 +4715,22 @@ final class AppState {
             return
         }
 
+        // anh Khôi, 2026-07-29 "richer context" addendum: `task.sourceTranscript`/`task.deadline`
+        // plus a snapshot of any existing children now ride along with the request — computed
+        // synchronously here (pure reads off `self.tasks`, no `await` needed) rather than inside
+        // the `_Concurrency.Task` below, so a mutation to `tasks` between now and the network
+        // response can't change which snapshot this particular fetch reports.
+        let context = existingSubtaskContext(for: task)
+
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
-            let steps = await self.router.breakdown(title: title, notes: notes)
+            let steps = await self.router.breakdownWithContext(
+                title: task.title,
+                notes: task.notes,
+                sourceTranscript: task.sourceTranscript,
+                deadline: task.deadline,
+                existingSubtasks: context
+            )
             // No more `HeuristicNLParser().breakdown(...)` floor to diff against (removed
             // 2026-07-28 — see doc comment above): pass `[]` for `heuristicFloor` so
             // `applyBreakdownFetchResult`'s legacy disguised-floor comparison is a no-op from this
