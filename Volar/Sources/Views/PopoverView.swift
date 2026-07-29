@@ -52,6 +52,16 @@ struct PopoverView: View {
                         .transition(.opacity.combined(with: .move(edge: .top)))
                 }
 
+                // Cycle-detection contract §3: BATCH-level, sits directly above `actionsRow`
+                // (never inside `taskDraftCard`) because a cycle can span several drafts and so
+                // belongs to none of their individual cards. Gated on the same `showActions`
+                // lifetime as the row it sits above — `appState.confirmCycle` is only ever
+                // non-nil while a batch is being confirmed.
+                if showActions, let cycle = appState.confirmCycle {
+                    cycleWarningRow(cycle)
+                        .transition(.opacity)
+                }
+
                 if showActions {
                     actionsRow(accent: accent)
                         .transition(.opacity)
@@ -590,35 +600,16 @@ struct PopoverView: View {
             // separate `View` struct rather than another branch inlined here (it needs its own
             // `@State` to own the popover-editor's presentation).
             DeadlineControl(draft: draft, appState: appState)
-            if let estimate = draft.task.estimateMinutes, !draft.dismissed.contains(.estimate) {
-                // Estimate is a duration readout — mono instrument face.
-                Chip(
-                    label: formattedDuration(estimate.value),
-                    uncertain: estimate.isUncertain,
-                    accepted: draft.accepted.contains(.estimate),
-                    mono: true,
-                    onAccept: { appState.acceptUncertainAttribute(.estimate, forDraft: draft.id) },
-                    onDismiss: { appState.dismissAttribute(.estimate, forDraft: draft.id) }
-                )
-            }
-            if let priority = draft.task.priority, !draft.dismissed.contains(.priority) {
-                Chip(
-                    label: priorityLabel(priority.value),
-                    uncertain: priority.isUncertain,
-                    accepted: draft.accepted.contains(.priority),
-                    onAccept: { appState.acceptUncertainAttribute(.priority, forDraft: draft.id) },
-                    onDismiss: { appState.dismissAttribute(.priority, forDraft: draft.id) }
-                )
-            }
-            if let reminder = draft.task.reminderOverride, !draft.dismissed.contains(.reminder) {
-                Chip(
-                    label: reminderLabel(reminder.value),
-                    uncertain: reminder.isUncertain,
-                    accepted: draft.accepted.contains(.reminder),
-                    onAccept: { appState.acceptUncertainAttribute(.reminder, forDraft: draft.id) },
-                    onDismiss: { appState.dismissAttribute(.reminder, forDraft: draft.id) }
-                )
-            }
+            // T-manual-edit (2026-07-29, manual-edit-contract.md §3): estimate/priority/reminder
+            // chips are now tap-to-edit, same "own `View` struct so `.popover`/`Menu` state stays
+            // per-draft" reasoning as `DeadlineControl` right above — see each control's own doc
+            // comment for why it's `.popover` (estimate/reminder: a plain preset list, following
+            // the contract's explicit per-field assignment) vs `Menu` (priority — `dependencyPicker`'s
+            // convention, ~801). All three read `draft.effective*` (never `draft.task.*`) so a tap
+            // edit actually shows up here instead of the stale parser value.
+            EstimateControl(draft: draft, appState: appState)
+            PriorityControl(draft: draft, appState: appState)
+            ReminderControl(draft: draft, appState: appState)
             if let recurrence = draft.task.recurrence, !draft.dismissed.contains(.recurrence) {
                 Chip(
                     label: recurrenceLabel(recurrence.value),
@@ -653,23 +644,16 @@ struct PopoverView: View {
                 )
             }
             // T-disposition (2026-07-28, "làm ngay lập tức" disposition): distinct from `.deadline`
-            // above — this is WHEN the user said they'd start, not when it's due. Dismissible/
-            // uncertain-gated like every other scalar chip on this card; deliberately NOT editable
-            // via a `.popover`+`DatePicker` control the way `DeadlineControl` is (self-review "UI
-            // regression"/scope note: `startTime` is inert display-only data per `TaskItem.
-            // startTime`'s own doc comment, so a full edit affordance isn't earned here the way it
-            // was for the deadline that actually drives ordering/reminders — considered, not built,
-            // see this task's final report).
-            if let startTime = draft.task.startTime, !draft.dismissed.contains(.startTime) {
-                Chip(
-                    label: startTimeLabel(startTime.value),
-                    uncertain: startTime.isUncertain,
-                    accepted: draft.accepted.contains(.startTime),
-                    mono: true,
-                    onAccept: { appState.acceptUncertainAttribute(.startTime, forDraft: draft.id) },
-                    onDismiss: { appState.dismissAttribute(.startTime, forDraft: draft.id) }
-                )
-            }
+            // above — this is WHEN the user said they'd start, not when it's due.
+            //
+            // T-manual-edit (2026-07-29): the "deliberately NOT editable" call this comment used to
+            // make is superseded — manual-edit-contract.md §3 explicitly puts `startTime` in the
+            // same tap-to-edit set as the other three scalar chips (anh Khôi's 7-field list). Now a
+            // `.popover`+`DatePicker` control, same shape as `DeadlineControl`, via `StartTimeControl`
+            // below — `startTime` stays inert display-only data (`TaskItem.startTime`'s own doc
+            // comment, unchanged by this edit: it still never drives ordering/eligibility/reminders
+            // on its own), only HOW it's set changed.
+            StartTimeControl(draft: draft, appState: appState)
         }
     }
 
@@ -1015,8 +999,16 @@ struct PopoverView: View {
     }
 
     // MARK: - Chip label formatting
+    //
+    // T-manual-edit (2026-07-29): `fileprivate static` (was `private` instance methods) so the new
+    // tap-to-edit control structs below (`PriorityControl`/`EstimateControl`/`ReminderControl`/
+    // `StartTimeControl`) can share the SAME formatting `attributeChips` already used, instead of
+    // duplicating it a second time the way `DeadlineControl.deadlineLabel`/`suggestedDefault` had
+    // to (those are `static` on `DeadlineControl` itself, with no equivalent on `PopoverView` to
+    // reuse). `static` costs nothing here — none of these read `self` — and keeps the label a
+    // single source of truth for both the read-only chip and its own edit popover/menu.
 
-    private func priorityLabel(_ raw: Int) -> String {
+    fileprivate static func priorityLabel(_ raw: Int) -> String {
         switch raw {
         case 1: return "High priority"
         case 2: return "Medium priority"
@@ -1025,8 +1017,34 @@ struct PopoverView: View {
         }
     }
 
-    private func reminderLabel(_ policy: ReminderPolicy) -> String {
-        policy.repeatEvery != nil ? "Custom reminders" : "\(policy.offsets.count) reminder\(policy.offsets.count == 1 ? "" : "s")"
+    /// T-manual-edit (2026-07-29, manual-edit-contract.md §3): used to only ever count `offsets`,
+    /// so a user who tapped `ReminderControl` to set an explicit cadence (`remindPeriod`) saw the
+    /// chip's label sit there unchanged — a silent-looking edit. `remindPeriod` (when set) now wins
+    /// the label the same way it already wins resolution (`ReminderRecord.derive`, contract §1.1:
+    /// "remindPeriod thắng fractionsRemaining"); `repeatEvery`/plain-offset-count fall back exactly
+    /// as before when there's no user-set cadence.
+    fileprivate static func reminderLabel(_ policy: ReminderPolicy) -> String {
+        if let remindPeriod = policy.remindPeriod {
+            return "Every \(formattedReminderPeriod(remindPeriod))"
+        }
+        return policy.repeatEvery != nil ? "Custom reminders" : "\(policy.offsets.count) reminder\(policy.offsets.count == 1 ? "" : "s")"
+    }
+
+    /// Formats a `remindPeriod` (seconds) for both `reminderLabel` above and `ReminderControl`'s
+    /// own preset list — "15m"/"30m"/"1h"/"2h"/"4h"/"1 day" for this control's fixed preset set
+    /// (`ReminderControl.presets`); a non-preset value (should not occur through this UI today,
+    /// nothing else writes `remindPeriod`) still degrades gracefully to whichever unit divides it
+    /// evenly, else falls back to whole minutes.
+    fileprivate static func formattedReminderPeriod(_ seconds: TimeInterval) -> String {
+        let totalMinutes = Int((seconds / 60).rounded())
+        if totalMinutes > 0, totalMinutes % (24 * 60) == 0 {
+            let days = totalMinutes / (24 * 60)
+            return days == 1 ? "1 day" : "\(days) days"
+        }
+        if totalMinutes > 0, totalMinutes % 60 == 0 {
+            return "\(totalMinutes / 60)h"
+        }
+        return "\(totalMinutes)m"
     }
 
     private func recurrenceLabel(_ recurrence: Recurrence) -> String {
@@ -1049,7 +1067,7 @@ struct PopoverView: View {
     /// directly rather than threading a captured "now" through `ConfirmDraft` — this is a label
     /// formatter, not state, and re-evaluating it on each render is exactly as correct as any
     /// snapshot would be for a card that's on-screen for at most a few seconds.
-    private func startTimeLabel(_ date: Date) -> String {
+    fileprivate static func startTimeLabel(_ date: Date) -> String {
         abs(date.timeIntervalSinceNow) <= 120
             ? "Starts now"
             : "Starts \(date.formatted(.dateTime.hour().minute()))"
@@ -1058,12 +1076,71 @@ struct PopoverView: View {
     /// Mirrors `TaskItem.durationLabel`'s formatting ("45 min" / "1 hr" / "1h 30m"); duplicated
     /// here (rather than reaching into `TaskItem`) because `ParsedTask` is a distinct, smaller
     /// pre-save value type and this file must not modify frozen Model files.
-    private func formattedDuration(_ minutes: Int) -> String {
+    fileprivate static func formattedDuration(_ minutes: Int) -> String {
         if minutes < 60 { return "\(minutes) min" }
         let hours = minutes / 60
         let mins = minutes % 60
         if mins == 0 { return hours == 1 ? "1 hr" : "\(hours) hrs" }
         return "\(hours)h \(mins)m"
+    }
+
+    // MARK: - Dependency cycle (blocking)
+
+    /// Cycle-detection contract §3. **This is a real ERROR, not an advisory** — deliberately NOT
+    /// styled like `conflictAdvisoryRow`/`overdueAdvisoryRow` above (calm, dismiss-only, `Enter`
+    /// still saves regardless). Read those two rows' doc comments: their whole design rests on
+    /// dismissing being a legitimate "I saw this, proceeding anyway" choice, because the thing
+    /// they're flagging (an overdue deadline, a scheduling clash) is still a perfectly valid task
+    /// to save. A dependency cycle has no such "proceed anyway" — `A → B → C → A` means NONE of
+    /// those tasks can ever become eligible (`VolarCore.findCycle`/`cyclePath`,
+    /// `DependencyGraph.swift`), so saving it silently would write a permanently-stuck graph the
+    /// user never agreed to. That's why this row has no tap-to-dismiss at all: the only way it
+    /// goes away is `appState.confirmCycle` itself returning to `nil`, which only happens once one
+    /// of the `removableEdges` buttons below is actually pressed (`AppState.dismissCondition`,
+    /// re-evaluated by `AppState.recomputeConfirmCycle()`). `VolarColor.high` (not `.reschedule`,
+    /// which those calm rows use) marks the escalation.
+    @ViewBuilder
+    private func cycleWarningRow(_ cycle: ConfirmCycle) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Dependency cycle")
+                .font(.system(size: 11.5, weight: .semibold))
+                .foregroundStyle(VolarColor.high)
+            // "A → B → C → A" — `cycle.titles` already arrives closed (first == last), per
+            // `ConfirmCycle.titles`'s contract.
+            Text(cycle.titles.joined(separator: " \u{2192} "))
+                .font(.system(size: 11.5, weight: .medium))
+                .foregroundStyle(VolarColor.high)
+                .lineLimit(3)
+            Text("None of these can ever start — each is waiting on the next.")
+                .font(.system(size: 11))
+                .foregroundStyle(VolarColor.high.opacity(0.85))
+                .lineLimit(2)
+            if !cycle.removableEdges.isEmpty {
+                VStack(alignment: .leading, spacing: 4) {
+                    ForEach(cycle.removableEdges) { edge in
+                        Button {
+                            appState.dismissCondition(at: edge.conditionIndex, forDraft: edge.draftID)
+                        } label: {
+                            Text("Remove: \(edge.label)")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(VolarColor.high)
+                                .underline()
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(.top, 2)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(VolarColor.high.opacity(0.12))
+        .overlay(
+            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                .stroke(VolarColor.high.opacity(0.4), lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .padding(.top, 10)
     }
 
     // MARK: - Actions (parsed / saving)
@@ -1119,8 +1196,18 @@ struct PopoverView: View {
             .shadow(color: appState.captureState == .saving ? .clear : accent.glow, radius: 10, x: 0, y: 4)
             // 2026-07-28 (Việc 1): nothing to save once every draft is unticked — same disabled
             // treatment `.saving` already gets, so Enter can't fire a no-op save either.
-            .opacity(includedDraftCount == 0 ? 0.5 : 1)
-            .disabled(appState.captureState == .saving || includedDraftCount == 0)
+            //
+            // Cycle-detection contract §3: `appState.confirmCycle != nil` disables this button the
+            // same way. `.disabled(true)` on a SwiftUI `Button` also suppresses its own
+            // `.keyboardShortcut(.defaultAction)` below — so Enter genuinely can't fire a save
+            // through THIS control while a cycle is unresolved, not just visually greyed out.
+            // (The title `TextField`'s own `.onKeyPress(.return)`/`.onSubmit` a few hundred lines
+            // up call `appState.confirmSave()` directly and are NOT gated here — that path's
+            // safety net is `confirmSave()`'s own `guard confirmCycle == nil else { return }`,
+            // contract §2, so a cycle still can't be saved through it even though the button
+            // itself stays visually untouched from that code path.)
+            .opacity(includedDraftCount == 0 || appState.confirmCycle != nil ? 0.5 : 1)
+            .disabled(appState.captureState == .saving || includedDraftCount == 0 || appState.confirmCycle != nil)
             .keyboardShortcut(.defaultAction)
         }
         .padding(.top, 10)
@@ -1509,6 +1596,325 @@ private struct DeadlineControl: View {
         let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now
         return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? tomorrow
     }
+}
+
+/// T-manual-edit (2026-07-29, manual-edit-contract.md §3): the confirm card's tappable ESTIMATE
+/// control — same 3-state shape as `DeadlineControl` right above (present+editable / present-but-
+/// dismissed-renders-nothing / absent-shows-"Add") and the same reason it's its own `View` struct
+/// (owns `@State` for the `.popover`, which a plain `@ViewBuilder` method shared across every draft
+/// in `attributeChips` cannot do per-draft). `.popover` + a flat preset list, per the contract's
+/// explicit assignment (`estimate`/`startTime`/`reminder` → `.popover`; only `priority` → `Menu`,
+/// see `PriorityControl` below) — NOT because a preset list has the same "`Menu` can't host a live
+/// control" problem `DeadlineControl`'s `DatePicker` has (a flat list of buttons is exactly what
+/// `NSMenu` is good at), but because the contract calls it out as a separate lane from `priority`
+/// and this file has no standing to relitigate that split.
+private struct EstimateControl: View {
+    let draft: ConfirmDraft
+    let appState: AppState
+    @State private var showingPicker = false
+
+    /// Fixed per the contract (§3) — not derived from anything, so no risk of an empty/degenerate
+    /// list; `[5, 10, 15, 30, 45, 60, 90, 120, 180, 240]` minutes.
+    private static let presets = [5, 10, 15, 30, 45, 60, 90, 120, 180, 240]
+
+    var body: some View {
+        Group {
+            if let estimate = draft.effectiveEstimateMinutes, !draft.dismissed.contains(.estimate) {
+                // Estimate is a duration readout — mono instrument face, unchanged from before.
+                Chip(
+                    label: PopoverView.formattedDuration(estimate.value),
+                    uncertain: estimate.isUncertain,
+                    accepted: draft.accepted.contains(.estimate),
+                    mono: true,
+                    onAccept: { appState.acceptUncertainAttribute(.estimate, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.estimate, forDraft: draft.id) },
+                    onTap: { showingPicker = true }
+                )
+            } else if draft.effectiveEstimateMinutes == nil {
+                addPill(label: "Add estimate", icon: .clock) { showingPicker = true }
+            }
+            // Present-but-dismissed: renders nothing, same as `DeadlineControl` (dismiss wins).
+        }
+        .popover(isPresented: $showingPicker) {
+            estimatePopoverContent
+        }
+    }
+
+    /// Closes on selection (unlike `DeadlineControl`'s `DatePicker`, which stays open — a
+    /// continuous control has no single "done" moment) since every row here is a single discrete
+    /// choice: picking one IS the completed action, so there's nothing left for the popover to stay
+    /// open for.
+    private var estimatePopoverContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Self.presets, id: \.self) { minutes in
+                Button {
+                    appState.setDraftEstimateMinutes(minutes, forDraft: draft.id)
+                    showingPicker = false
+                } label: {
+                    Text(PopoverView.formattedDuration(minutes))
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(VolarColor.textPri)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
+        .frame(minWidth: 120)
+    }
+}
+
+/// T-manual-edit (2026-07-29): the confirm card's tappable PRIORITY control — per the contract's
+/// explicit assignment (§3), this one is a `Menu` ("dùng khuôn `dependencyPicker`'s Menu, ~801"),
+/// not a `.popover` like the other three. Deliberately does NOT reuse `Chip` as the `Menu`'s
+/// `label` the way `EstimateControl`/`ReminderControl`/`StartTimeControl` reuse it as the `.popover`
+/// anchor: `Chip` bundles its own dismiss "x" as an internal `Button`, and `dependencyPicker`
+/// (~801, this file's one pre-existing `Menu` convention) already documents why nesting a `Button`
+/// inside a `Menu`'s label doesn't reliably get its own tap target on macOS — so, matching that
+/// precedent exactly, this hand-styles a `Chip`-equivalent trigger (same capsule/dashed-uncertain
+/// look) as the `Menu` label and keeps the dismiss "x" as a sibling `Button`, same shape as
+/// `dependencyPicker`'s own `Menu` + sibling "x".
+///
+/// One consequence of using `Menu` instead of `Chip.onTap`: there is no single "tap the capsule to
+/// accept the guess as-is" gesture the way `Chip`'s own `onTapGesture`(`showsDashed` branch) gives
+/// every other chip — opening the `Menu` and re-tapping the SAME (already-current) value is the
+/// equivalent here. That still commits it (`AppState.setDraftPriority` pins confidence to 1.0 per
+/// the contract's §1.1), it just costs one extra tap versus the single-tap accept every other chip
+/// on this card has. Considered adding a leading "Keep as guessed" menu row to close that gap
+/// one-for-one with `Chip.onAccept`, but skipped it: the value is ALREADY the top-of-list item the
+/// user would tap to reconfirm, so a duplicate first row saying the same thing risked being more
+/// confusing than the extra tap it would save.
+private struct PriorityControl: View {
+    let draft: ConfirmDraft
+    let appState: AppState
+
+    // `[Int]` rather than a `[(raw:label:)]` tuple array — a plain tuple isn't `Hashable`/
+    // `Identifiable` (tuples can't conform to protocols; only nominal types can), so `ForEach`
+    // below needs a real `Hashable` element for its `id:`. `PopoverView.priorityLabel(_:)` (shared
+    // with the read-only chip formatting) supplies the label for each raw value instead.
+    private static let priorities: [Int] = [1, 2, 3]
+
+    private var isDashed: Bool {
+        guard let priority = draft.effectivePriority else { return false }
+        return priority.isUncertain && !draft.accepted.contains(.priority)
+    }
+
+    var body: some View {
+        if let priority = draft.effectivePriority, !draft.dismissed.contains(.priority) {
+            HStack(spacing: 4) {
+                Menu {
+                    menuItems
+                } label: {
+                    triggerLabel(text: PopoverView.priorityLabel(priority.value), dashed: isDashed)
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                Button {
+                    appState.dismissAttribute(.priority, forDraft: draft.id)
+                } label: {
+                    VolarIcon(.x, size: 8, color: VolarColor.textMut)
+                }
+                .buttonStyle(.plain)
+            }
+        } else if draft.effectivePriority == nil {
+            Menu {
+                menuItems
+            } label: {
+                addPillLabel(label: "Add priority", icon: .flag)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+        }
+        // Present-but-dismissed: renders nothing, same as `DeadlineControl` (dismiss wins).
+    }
+
+    @ViewBuilder
+    private var menuItems: some View {
+        ForEach(Self.priorities, id: \.self) { raw in
+            Button(PopoverView.priorityLabel(raw)) {
+                appState.setDraftPriority(raw, forDraft: draft.id)
+            }
+        }
+    }
+
+    /// Mirrors `Chip`'s own visual language (dashed border + leading "?" while uncertain and not
+    /// yet accepted, solid capsule otherwise) by hand — see this struct's own doc comment for why
+    /// `Chip` itself can't be reused as a `Menu` label here.
+    private func triggerLabel(text: String, dashed: Bool) -> some View {
+        HStack(spacing: 5) {
+            if dashed {
+                Text("?").font(.system(size: 10, weight: .bold))
+            }
+            Text(text)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .font(.system(size: 11.5, weight: .medium))
+        .foregroundStyle(dashed ? VolarColor.textSec : VolarColor.textPri)
+        .padding(.horizontal, 9)
+        .frame(height: 22)
+        .overlay(
+            Capsule().strokeBorder(
+                dashed ? VolarColor.textMut : VolarColor.border,
+                style: StrokeStyle(lineWidth: 0.5, dash: dashed ? [3, 2] : [])
+            )
+        )
+    }
+
+    private func addPillLabel(label: String, icon: VolarIconName) -> some View {
+        HStack(spacing: 4) {
+            VolarIcon(icon, size: 9, color: VolarColor.textMut)
+            Text(label).font(.system(size: 11, weight: .medium))
+        }
+        .foregroundStyle(VolarColor.textMut)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .overlay(
+            Capsule().strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+        )
+    }
+}
+
+/// T-manual-edit (2026-07-29): the confirm card's tappable REMINDER-CADENCE control — same
+/// `.popover` + flat-preset shape as `EstimateControl` above (see that struct's doc comment for why
+/// `.popover`, not `Menu`, per the contract's explicit per-field split). Editing here writes
+/// `editedRemindPeriod` (`AppState.setDraftRemindPeriod`), which `ConfirmDraft.
+/// effectiveReminderOverride` (contract §1.1) folds into a full `ReminderPolicy` — base
+/// `task.reminderOverride ?? .defaultPolicy` with ONLY `remindPeriod` swapped — so this control
+/// never has to know about `offsets`/`fractionsRemaining` itself.
+private struct ReminderControl: View {
+    let draft: ConfirmDraft
+    let appState: AppState
+    @State private var showingPicker = false
+
+    /// Fixed per the contract (§3): 15m / 30m / 1h / 2h / 4h / 1 day, expressed in seconds
+    /// (`ReminderPolicy.remindPeriod`'s own unit).
+    private static let presets: [TimeInterval] = [
+        15 * 60, 30 * 60, 60 * 60, 2 * 60 * 60, 4 * 60 * 60, 24 * 60 * 60,
+    ]
+
+    var body: some View {
+        Group {
+            if let reminder = draft.effectiveReminderOverride, !draft.dismissed.contains(.reminder) {
+                Chip(
+                    label: PopoverView.reminderLabel(reminder.value),
+                    uncertain: reminder.isUncertain,
+                    accepted: draft.accepted.contains(.reminder),
+                    onAccept: { appState.acceptUncertainAttribute(.reminder, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.reminder, forDraft: draft.id) },
+                    onTap: { showingPicker = true }
+                )
+            } else if draft.effectiveReminderOverride == nil {
+                addPill(label: "Add reminder", icon: .bell) { showingPicker = true }
+            }
+            // Present-but-dismissed: renders nothing, same as `DeadlineControl` (dismiss wins).
+        }
+        .popover(isPresented: $showingPicker) {
+            reminderPopoverContent
+        }
+    }
+
+    private var reminderPopoverContent: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            ForEach(Self.presets, id: \.self) { seconds in
+                Button {
+                    appState.setDraftRemindPeriod(seconds, forDraft: draft.id)
+                    showingPicker = false
+                } label: {
+                    Text("Every \(PopoverView.formattedReminderPeriod(seconds))")
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(VolarColor.textPri)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 5)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(.vertical, 4)
+        .frame(minWidth: 140)
+    }
+}
+
+/// T-manual-edit (2026-07-29): the confirm card's tappable START-TIME control — same `.popover` +
+/// `DatePicker` shape as `DeadlineControl` above (sao y, per the contract), now that `startTime`
+/// has moved from "inert, display-only, deliberately not editable" (see the superseded comment this
+/// replaced at its `attributeChips` call site) into the same 7-field manual-edit set as the other
+/// three. `startTime` itself stays exactly as inert as before — `TaskItem.startTime`'s own doc
+/// comment still holds, this control only changes HOW the value is set, not what it drives.
+private struct StartTimeControl: View {
+    let draft: ConfirmDraft
+    let appState: AppState
+    @State private var showingPicker = false
+
+    var body: some View {
+        Group {
+            if let startTime = draft.effectiveStartTime, !draft.dismissed.contains(.startTime) {
+                Chip(
+                    label: PopoverView.startTimeLabel(startTime.value),
+                    uncertain: startTime.isUncertain,
+                    accepted: draft.accepted.contains(.startTime),
+                    mono: true,
+                    onAccept: { appState.acceptUncertainAttribute(.startTime, forDraft: draft.id) },
+                    onDismiss: { appState.dismissAttribute(.startTime, forDraft: draft.id) },
+                    onTap: { showingPicker = true }
+                )
+            } else if draft.effectiveStartTime == nil {
+                addPill(label: "Add start time", icon: .clock) { showingPicker = true }
+            }
+            // Present-but-dismissed: renders nothing, same as `DeadlineControl` (dismiss wins).
+        }
+        .popover(isPresented: $showingPicker) {
+            startTimePopoverContent
+        }
+    }
+
+    /// Binding shape mirrors `DeadlineControl.deadlinePopoverContent`'s exactly (`get` reads the
+    /// live effective value with a display-only fallback, `set` writes straight through `AppState`,
+    /// no intermediate local `@State` to fall out of sync). Fallback default is a bare `Date()`
+    /// ("now") rather than `DeadlineControl`'s smarter "6pm today / 9am tomorrow" — `startTime` is
+    /// "when did/do you start", and "now" is the one default that's actually likely right for it,
+    /// unlike a deadline where "right now" is almost never what's meant (see `DeadlineControl.
+    /// suggestedDefault`'s own doc comment for that contrast).
+    private var startTimePopoverContent: some View {
+        DatePicker(
+            "",
+            selection: Binding(
+                get: { draft.effectiveStartTime?.value ?? Date() },
+                set: { appState.setDraftStartTime($0, forDraft: draft.id) }
+            ),
+            displayedComponents: [.date, .hourAndMinute]
+        )
+        .labelsHidden()
+        .padding(12)
+        .fixedSize()
+    }
+}
+
+/// Shared "Add …" dashed-pill affordance for `EstimateControl`/`ReminderControl`/`StartTimeControl`
+/// — visually identical to `DeadlineControl`'s inline "Add time" button (same padding/capsule/dash
+/// pattern), factored out once these three additional call sites needed the exact same look rather
+/// than duplicating the `HStack`/`Capsule` three more times. `DeadlineControl.body` itself is left
+/// with its own inline copy, unchanged — it predates this helper and touching working, already-
+/// shipped deadline code for a pure style refactor is out of scope for this task.
+private func addPill(label: String, icon: VolarIconName, action: @escaping () -> Void) -> some View {
+    Button(action: action) {
+        HStack(spacing: 4) {
+            VolarIcon(icon, size: 9, color: VolarColor.textMut)
+            Text(label)
+                .font(.system(size: 11, weight: .medium))
+        }
+        .foregroundStyle(VolarColor.textMut)
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .overlay(
+            Capsule().strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+        )
+    }
+    .buttonStyle(.plain)
 }
 
 /// T-edit-notes (2026-07-28, same anh Khôi request as `DeadlineControl` above): the confirm

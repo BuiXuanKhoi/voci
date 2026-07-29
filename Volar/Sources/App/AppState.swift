@@ -198,6 +198,33 @@ struct OverdueSuggestion: Equatable, Sendable {
     }
 }
 
+/// cycle-detection-contract.md §1.2 (2026-07-29, anh Khôi: "A đợi B, B đợi C, C đợi A" must be
+/// caught and explained, not silently dropped): the confirm-card batch's current `.taskDone`
+/// cycle, if the drafts-plus-already-persisted-tasks graph has one right now. `nil` = clean —
+/// `AppState.recomputeConfirmCycle()` is the only writer, called after every mutation that can
+/// change the batch's edge set (see that method's own doc comment for the full call-site list).
+/// `PopoverView` renders a BATCH-level (not per-draft) warning row off this and locks Save while
+/// it's non-nil — unlike `conflicts`/`overdueSuggestion` above, this is a real error, not a
+/// dismissible advisory, because dismissing it wouldn't make the cycle go away.
+struct ConfirmCycle: Equatable {
+    /// Closed display path: `["A", "B", "C", "A"]` — first == last, same shape
+    /// `VolarCore.cyclePath`/`findCycle` return, just titles instead of ids.
+    var titles: [String]
+    /// Edges IN the cycle the user can remove right from the confirm card (an edge belonging to
+    /// a draft in THIS batch). An edge belonging to an already-persisted task's own condition
+    /// isn't in here — there's no draft/index for the card to dismiss it by; that half of the
+    /// cycle has to be broken from `TaskDetailView` (§4) instead.
+    var removableEdges: [RemovableEdge]
+
+    struct RemovableEdge: Equatable, Identifiable {
+        var id: String { "\(draftID)-\(conditionIndex)" }
+        var draftID: ConfirmDraft.ID
+        var conditionIndex: Int
+        /// "C waits on A" — human-readable, same "from waits on to" reading as the titles path.
+        var label: String
+    }
+}
+
 /// One confirmed task's editable confirm-card state, layered OVER a router-parsed `ParsedTask`
 /// (the sibling-owned contract type, never mutated in place) so every chip edit is reversible
 /// before Save and `ParsedTask` itself stays exactly what the parser/router produced. This is
@@ -365,6 +392,70 @@ struct ConfirmDraft: Identifiable, Equatable {
         let trimmed = editedNotes.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? task.notes : trimmed
     }
+
+    // MARK: - T-edit-attrs (2026-07-29, manual-edit-contract.md §1.1): the remaining 4 confirm-card
+    // attributes anh Khôi wants editable — priority/startTime/estimate/reminder-cadence — laid out
+    // in the SAME overlay shape `editedDeadline`/`effectiveDeadline` above already establish (`nil`
+    // until the user acts, never mutate `task` in place). Each `edited*` is written by exactly one
+    // setter below (`AppState.setDraftPriority` etc.); each `effective*` is what `materialize`/
+    // `mergeTransform`/`PopoverView`'s chips must read instead of `task.*` directly — see §2.
+
+    /// User-edited priority from the confirm card's priority chip. `nil` = user chưa sửa.
+    var editedPriority: Int?              // 1...3, nil = user chưa sửa
+    /// User-edited start time from the confirm card's start-time chip.
+    var editedStartTime: Date?
+    /// User-edited estimate/duration (minutes) from the confirm card's estimate chip.
+    var editedEstimateMinutes: Int?       // > 0
+    /// User-edited reminder CADENCE (not a full policy) from the confirm card's reminder chip —
+    /// see `effectiveReminderOverride` below for how a lone period gets folded into a full
+    /// `ReminderPolicy` at read time.
+    var editedRemindPeriod: TimeInterval? // giây, > 0
+
+    /// The priority actually resolved and saved: `editedPriority` if set, else the parser's
+    /// original `task.priority`. Confidence is pinned to `1.0` whenever `editedPriority` is set —
+    /// same non-negotiable reasoning `effectiveDeadline`'s doc comment above spells out in full:
+    /// inheriting the parser's own (possibly <0.7) confidence would route an already-explicit tap
+    /// back through `ChipKind.priority`'s uncertain-accept gate (`resolvedValue`), silently
+    /// demanding a SECOND confirmation before the user's own edit actually saves — turning the edit
+    /// into a lie. `materialize`/`mergeTransform` must read priority through THIS property, never
+    /// `task.priority` directly, exactly like `effectiveDeadline`'s call sites.
+    var effectivePriority: ParsedValue<Int>? {
+        if let editedPriority {
+            return ParsedValue(value: editedPriority, confidence: 1.0)
+        }
+        return task.priority
+    }
+    /// The start time actually resolved and saved — same shape/confidence-pinning reasoning as
+    /// `effectivePriority` immediately above.
+    var effectiveStartTime: ParsedValue<Date>? {
+        if let editedStartTime {
+            return ParsedValue(value: editedStartTime, confidence: 1.0)
+        }
+        return task.startTime
+    }
+    /// The estimate/duration actually resolved and saved — same shape/confidence-pinning reasoning
+    /// as `effectivePriority` above.
+    var effectiveEstimateMinutes: ParsedValue<Int>? {
+        if let editedEstimateMinutes {
+            return ParsedValue(value: editedEstimateMinutes, confidence: 1.0)
+        }
+        return task.estimateMinutes
+    }
+    /// The reminder policy actually resolved and saved. UNLIKE the three accessors above, this
+    /// can't just swap in the raw edited value — `editedRemindPeriod` is a single cadence, not a
+    /// full `ReminderPolicy` — so it folds onto a BASE policy first: `task.reminderOverride`'s
+    /// value if the parser produced one, else `.defaultPolicy` (never `nil` — there must always be
+    /// SOME base to carry `offsets`/`repeatEvery`/`fractionsRemaining` forward from). Only
+    /// `remindPeriod` itself is overwritten; every other field of the base survives untouched
+    /// (manual-edit-contract.md §1.1). `ReminderRecord.derive` already prefers `remindPeriod` over
+    /// `fractionsRemaining` whenever both are present, so overwriting just this one field is enough
+    /// to make the user's stated cadence win — no need to also clear `fractionsRemaining` here.
+    var effectiveReminderOverride: ParsedValue<ReminderPolicy>? {
+        guard let editedRemindPeriod else { return task.reminderOverride }
+        var policy = task.reminderOverride?.value ?? .defaultPolicy
+        policy.remindPeriod = editedRemindPeriod
+        return ParsedValue(value: policy, confidence: 1.0)
+    }
 }
 
 // MARK: - Phase 5 (T036): voice-done confirm state (contract A `VoiceDoneIntent`/`VoiceMatch`)
@@ -443,6 +534,11 @@ final class AppState {
     /// v1 single `ParsedTask?` now that one utterance can yield a compound/multi-task result
     /// (contract "Confirm + materialize": multi-task confirm, ≤10). Empty = nothing to confirm.
     var confirmDrafts: [ConfirmDraft] = []
+    /// cycle-detection-contract.md §1.2: `nil` = batch sạch (no `.taskDone` cycle right now).
+    /// Non-nil means `PopoverView` must show the batch-level cycle warning and LOCK Save — see
+    /// `ConfirmCycle`'s own doc comment and `AppState.recomputeConfirmCycle()`. Only that method
+    /// writes this; every other reader treats it as derived state.
+    private(set) var confirmCycle: ConfirmCycle?
     /// T036: populated INSTEAD OF `confirmDrafts` when `finishRecording` classifies the transcript
     /// as `.complete`/`.clearExternal` (contract A) — routes to a distinct one-tap/disambiguation
     /// card in `PopoverView` rather than the normal parsed-task confirm card. `nil` = no voice-done
@@ -1400,6 +1496,85 @@ final class AppState {
         syncCalendarMirror()
     }
 
+    /// T-edit-attrs (2026-07-29, manual-edit-contract.md §1.4 — anh Khôi: `TaskDetailView` becomes
+    /// sửa-tại-chỗ for an already-created task): the ONE write path for the 7 manually-editable
+    /// fields on an existing task. `TaskDetailView` (Agent C) is the only caller today, but any
+    /// future editor must route through here too, never through `TaskStore` directly, so every
+    /// side effect below (reminders/eligibility/calendar) always fires together rather than being
+    /// re-implemented (and possibly forgotten) at each call site. Mirrors `addTask`/`toggleDone`'s
+    /// own "before/now snapshot -> store mutation -> tasks = store.fetchAll() -> reminders ->
+    /// eligibility -> calendar" shape exactly — see those two immediately above for the established
+    /// convention this follows. `id` not found (task deleted out from under an open detail view,
+    /// e.g. via the notification "Done" action bypass `refreshFromStore`'s own doc comment
+    /// describes) is a silent no-op, same "can't act on what isn't there anymore" convention every
+    /// other mutator in this file (`setDraftDeadline` et al.) already follows for an unknown id.
+    func updateTask(
+        _ id: UUID,
+        title: String,
+        details: String,
+        priority: Priority,
+        startTime: Date?,
+        deadline: Date?,
+        durationMinutes: Int?,
+        remindPeriod: TimeInterval?
+    ) {
+        let before = tasks
+        let now = clock()
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        var edited = tasks[index]
+        edited.title = title
+        // `details` AND `notes` MUST both be written to the SAME value (manual-edit-contract.md
+        // §1.4): `details` is what `TaskDetailView`/`speakDetails` actually render/read aloud;
+        // `notes` is the "did a human really author a note" signal `mergeTransform`'s notes-append
+        // path (and `effectiveNotes` elsewhere) keys off of. Writing only one leaves the other
+        // stale — either the edit never shows, or a later confirm-card merge treats a real edit as
+        // if nothing was ever typed. Empty -> `nil` for `notes`, same "blank collapses to absent"
+        // convention `effectiveNotes`/`effectiveTitle` already use elsewhere in this file, so
+        // clearing the description doesn't leave a phantom empty-string note behind.
+        edited.details = details
+        edited.notes = details.isEmpty ? nil : details
+        edited.priority = priority
+        edited.startTime = startTime
+        edited.deadline = deadline
+        edited.durationMinutes = durationMinutes
+        // `remindPeriod == nil` does NOT mean "wipe the whole override" — a task can carry a real
+        // `reminderOverride` (parser-derived offsets/fractionsRemaining, or a previous edit) that
+        // simply never had a fixed cadence set; clearing the cadence back to "not set" must leave
+        // the rest of that override alone rather than nuking it. Only when there was no override to
+        // begin with does it stay `nil` (nothing to carry forward, manual-edit-contract.md §1.4).
+        // Mirrors `ConfirmDraft.effectiveReminderOverride`'s "fold the one edited field onto a base
+        // policy" shape (§1.1) — `globalReminderPolicy` is the base here instead of `.defaultPolicy`
+        // since an already-created task's baseline behavior is the user's own configured default,
+        // not the app's hardcoded starting point.
+        if let remindPeriod {
+            var base = edited.reminderOverride ?? globalReminderPolicy
+            base.remindPeriod = remindPeriod
+            edited.reminderOverride = base
+        } else if var base = edited.reminderOverride {
+            base.remindPeriod = nil
+            edited.reminderOverride = base
+        }
+
+        if let store {
+            store.updateEditableFields(from: edited)
+            tasks = store.fetchAll()
+        } else {
+            tasks[index] = edited
+        }
+        // manual-edit-contract.md §1.4 step 5: LUÔN gọi, không điều kiện. `ReminderScheduler.
+        // scheduleReminders(taskId:)` re-reads the task fresh from the store and replaces every
+        // `.scheduled`-but-not-yet-sent row (deadline edits land here, per that method's own doc
+        // comment) while preserving `.delivered`/`.satisfied` history — so this must run even when
+        // `deadline`/`remindPeriod` didn't actually change (the call is idempotent) and even when
+        // `deadline` was just cleared to `nil` (that still needs `derive` to re-run and fall into
+        // its nudge-backoff branch instead of leaving a stale deadline-based row armed). Skipping
+        // this on a "nothing dated changed" edit would leave a notification armed for the OLD time
+        // after the user changes it, e.g. 15:00 -> 20:00 with the OS still holding the 15:00 request.
+        scheduler?.scheduleReminders(taskId: id)
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        syncCalendarMirror()
+    }
+
     /// WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done" action calls
     /// `store.toggle(...)` directly rather than routing through this file's `toggleDone` funnel (by
     /// design — FR-014/015/016 forbid the notification path from touching the app/AppState
@@ -1451,6 +1626,84 @@ final class AppState {
         syncCalendarMirror()
     }
 
+    // MARK: - Dependency editing on an already-created task (cycle-detection-contract.md §1.3/§4)
+    //
+    // `TaskDetailView`'s "Waiting on" section (Agent 4) routes here rather than through
+    // `TaskStore` directly, same "one write path, every side effect fires together" convention
+    // `updateTask` above already establishes — validation happens INLINE, at the moment the user
+    // taps, not deferred to some later commit step, because a rejected dependency has to explain
+    // itself right there.
+
+    /// Adds "task `id` waits on task `dependsOn` (via `.taskDone`)" — the dependency picker's
+    /// resolution. Returns `nil` on success, or an English message on rejection. Checks
+    /// `VolarCore.cyclePath` itself BEFORE ever calling `TaskStore.addCondition`, rather than
+    /// catching that method's own `TaskStoreError`/`DependencyError`, specifically so the message
+    /// can show the FULL closed path ("A → B → C → A") — `DependencyError.cycle(from:to:)` only
+    /// ever carries the two endpoint titles, not enough to explain a longer loop (contract's own
+    /// "vì sao phải làm" table).
+    @discardableResult
+    func addTaskDependency(_ id: UUID, dependsOn: UUID) -> String? {
+        // UNVERIFIED: no other mutator in this file returns an error string when `store` is nil
+        // (every other one either no-ops silently for the no-store preview/test fallback, or —
+        // like `confirmSave` — has its own separate in-memory branch). `TaskDetailView` only ever
+        // shows an already-persisted task, which requires a real store to exist, so this branch
+        // should be unreachable in practice; picked the most honest message over a silent no-op.
+        guard let store else { return "No task store available." }
+        guard tasks.contains(where: { $0.id == id }), tasks.contains(where: { $0.id == dependsOn }) else {
+            return "That task no longer exists."
+        }
+        let snapshot = tasks.map { $0.snapshot() }
+        if let cycle = VolarCore.cyclePath(from: id, dependsOn: dependsOn, in: snapshot) {
+            return cycleMessage(for: cycle)
+        }
+        let before = tasks
+        do {
+            try store.addCondition(.taskDone(dependsOn), to: id)
+        } catch {
+            // Defense in depth only — the `cyclePath` check above already covers every case
+            // `TaskStore.addCondition` itself would otherwise reject for a `.taskDone` payload.
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        let now = clock()
+        // §1.3: gỡ/thêm một cạnh có thể mở khoá task khác ngay — same three-step refresh tail
+        // every other store-backed mutator in this file uses (`addTask`/`toggleDone`/`deleteTask`).
+        tasks = store.fetchAll()
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        syncCalendarMirror()
+        return nil
+    }
+
+    /// Removes the condition at `conditionIndex` from task `id` — the "×" next to a "Waiting on"
+    /// row. No-op (per `TaskStore.removeCondition`'s own contract, §1.4) if `id`/`conditionIndex`
+    /// don't resolve to anything, same "can't act on what isn't there anymore" convention every
+    /// other mutator in this file follows for an unknown id.
+    func removeTaskDependency(_ id: UUID, at conditionIndex: Int) {
+        guard let store else { return }
+        let before = tasks
+        // UNVERIFIED: `TaskStore.removeCondition(at:from:)` is Agent 4's addition
+        // (cycle-detection-contract.md §1.4) — called here exactly per its frozen signature.
+        guard store.removeCondition(at: conditionIndex, from: id) else { return }
+        let now = clock()
+        // §1.3: removing an edge can make some OTHER task newly eligible right now — this is
+        // exactly the "gỡ một cạnh có thể làm task khác đủ điều kiện chạy ngay" case the contract
+        // calls out; skipping this would silently lose that "unblocked" notification.
+        tasks = store.fetchAll()
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        syncCalendarMirror()
+    }
+
+    /// Builds "A → B → C → A" from a closed cycle path of ids (`VolarCore.cyclePath`/`findCycle`'s
+    /// shared shape — first element == last), resolving each id against `tasks`' own titles.
+    /// Deliberately NOT `DependencyError`-based (see `addTaskDependency`'s own doc comment) — this
+    /// carries the whole loop, not just the two endpoints that would close it.
+    private func cycleMessage(for cycle: [UUID]) -> String {
+        let titles = cycle.map { taskID in
+            tasks.first(where: { $0.id == taskID })?.title ?? "Unknown task"
+        }
+        let path = titles.joined(separator: " \u{2192} ")
+        return "Can't add that dependency — it would create a loop: \(path). None of these could ever start."
+    }
+
     // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
 
     func openDetail(_ id: UUID) { detailTaskID = id }
@@ -1498,6 +1751,7 @@ final class AppState {
         captureState = .recording
         liveTranscript = ""
         confirmDrafts = []
+        confirmCycle = nil
         voiceDoneConfirm = nil
         voiceDoneNoMatchTranscript = nil
         captureErrorDetail = nil
@@ -1642,6 +1896,7 @@ final class AppState {
         captureState = .idle
         liveTranscript = ""
         confirmDrafts = []
+        confirmCycle = nil
         voiceDoneConfirm = nil
         voiceDoneNoMatchTranscript = nil
         pendingCloudConsent = false
@@ -1894,6 +2149,11 @@ final class AppState {
             // the mutual-exclusion plumbing (`syncCapturePanel()`/`syncTextCapturePanel()`)
             // already exists and requires no changes.
             confirmDrafts = drafts
+            // `buildConfirmDrafts` is a pure helper with no `self` to recompute against, so this
+            // call sits right where its result actually becomes the live `confirmDrafts` instead
+            // — see `recomputeConfirmCycle`'s own doc comment. Without this, `confirmCycle` would
+            // still hold whatever a PREVIOUS confirm session left it at.
+            recomputeConfirmCycle()
             captureState = .parsed
             textCapture = .closed
             textCaptureInput = ""
@@ -1909,6 +2169,11 @@ final class AppState {
         // the batch (e.g. a dependency cycle).
         let addedTitles = drafts.map(\.effectiveTitle)
         confirmDrafts = drafts
+        // Same reasoning as the branch above: a lone zero-condition draft can never itself close
+        // a cycle, but `confirmCycle` could still be stale from a previous session — and
+        // `confirmSave()` (below) now refuses to save at all while `confirmCycle != nil` (§2), so
+        // this recompute is load-bearing, not just hygiene.
+        recomputeConfirmCycle()
         confirmSave()
 
         if captureState == .error {
@@ -2481,6 +2746,10 @@ final class AppState {
             // against the same "now" instant.
             let conflictNow = self.clock()
             self.confirmDrafts = self.buildConfirmDrafts(from: capped, conflictNow: conflictNow)
+            // `buildConfirmDrafts` stays a pure helper (no `self`) — see
+            // `recomputeConfirmCycle`'s own doc comment for why the call has to live at each of
+            // its call sites, here included, rather than inside it.
+            self.recomputeConfirmCycle()
             if self.confirmDrafts.isEmpty {
                 self.captureErrorDetail = "Didn't catch that."
                 self.captureState = .error
@@ -2697,6 +2966,7 @@ final class AppState {
             kind: nil, attribute: "condition[\(conditionIndex)]",
             task: confirmDrafts[index].task, correctedValue: "dropped"
         )
+        recomputeConfirmCycle() // dropping a condition can drop the edge that closed a cycle
     }
 
     /// Explicit tap-to-accept for an uncertain (<0.7) `.afterDate`/`.external` condition chip.
@@ -2710,6 +2980,11 @@ final class AppState {
             kind: nil, attribute: "condition[\(conditionIndex)]",
             task: confirmDrafts[index].task, correctedValue: "accepted"
         )
+        // `.taskDone` never reaches this path (see this method's own doc comment — it always
+        // resolves via `resolveTaskDone`'s explicit picker instead), so this can never actually
+        // change the `.taskDone` edge set; called anyway for the same "every condition mutator
+        // recomputes" consistency the contract asks for, at negligible cost.
+        recomputeConfirmCycle()
     }
 
     /// The dependency picker's resolution (constitution II: NEVER auto-attach below 0.7 — the
@@ -2731,6 +3006,7 @@ final class AppState {
             kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
             task: confirmDrafts[index].task, correctedValue: taskID?.uuidString ?? "dropped"
         )
+        recomputeConfirmCycle()
     }
 
     /// 2026-07-28 (confirm-list UI, Việc 3): the picker's OTHER group — "task done" resolved
@@ -2753,6 +3029,7 @@ final class AppState {
             kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
             task: confirmDrafts[index].task, correctedValue: "intraBatch:\(target.uuidString)"
         )
+        recomputeConfirmCycle()
     }
 
     /// 2026-07-28 (confirm-list UI, Việc 1): the checkbox's mutator — ticks/unticks whether this
@@ -2764,6 +3041,9 @@ final class AppState {
     func setDraftIncluded(_ draftID: ConfirmDraft.ID, _ included: Bool) {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].isIncluded = included
+        // Unticking removes this draft's node (and every edge touching it) from the graph
+        // entirely; re-ticking restores it. Either way the batch's edge set just changed.
+        recomputeConfirmCycle()
     }
 
     /// 2026-07-28 (confirm-list UI, Việc 2): the duplicate-hint picker's resolution — constitution
@@ -2772,6 +3052,127 @@ final class AppState {
     func setDuplicateResolution(_ draftID: ConfirmDraft.ID, _ resolution: ConfirmDraft.DuplicateResolution) {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].duplicateResolution = resolution
+        recomputeConfirmCycle() // changing `.useExisting` changes which node this draft's edges land on
+    }
+
+    /// cycle-detection-contract.md §2: rebuilds `confirmCycle` from the CURRENT `confirmDrafts` +
+    /// persisted `tasks` by constructing the SAME virtual `.taskDone` graph `confirmSave()` would
+    /// actually commit, then asking `VolarCore.findCycle`. Must be called after EVERY mutation
+    /// that can change the batch's edge set: wherever a fresh `buildConfirmDrafts(...)` result
+    /// becomes the live `confirmDrafts` (`runParse`'s completion handler and both branches of
+    /// `applyTextCaptureParseResult` — `buildConfirmDrafts` itself stays a pure `[ConfirmDraft]`-
+    /// returning helper with no `self` to recompute against, so the call has to sit at each of
+    /// its call sites instead of inside it), `dismissCondition`, `acceptUncertainCondition`,
+    /// `resolveTaskDone`, `resolveTaskDoneToDraft`, `setDraftIncluded`, and `setDuplicateResolution`
+    /// immediately above (changing `.useExisting` changes which node a draft's edges land on, so
+    /// it's just as edge-set-changing as the condition mutators). A skipped call site leaves
+    /// `confirmCycle` stale — either wrongly blocking a now-clean Save or wrongly letting a
+    /// still-cyclic one through.
+    private func recomputeConfirmCycle() {
+        let includedDrafts = confirmDrafts.filter(\.isIncluded)
+        guard !includedDrafts.isEmpty else {
+            confirmCycle = nil
+            return
+        }
+
+        // Step 1 (⚠️ contract's own flag for "the easy place to get this wrong"): the SAME id map
+        // `confirmSave()` builds. `.addNew` -> a virtual node keyed by the draft's OWN `id` (safe:
+        // this snapshot is thrown away the instant this method returns, so there's no real post-
+        // save id to mint yet, and `ConfirmDraft.id` is already a stable `UUID`). `.useExisting(x)`
+        // -> `x` itself, so this draft's edges MERGE into the ALREADY-EXISTING node `x` — never a
+        // second node sharing that id, which would make `findCycle` read a corrupt graph and
+        // miss/invent cycles.
+        let currentTaskIDs = Set(tasks.map(\.id))
+        func effectiveResolution(_ draft: ConfirmDraft) -> ConfirmDraft.DuplicateResolution {
+            if case .useExisting(let id) = draft.duplicateResolution, !currentTaskIDs.contains(id) {
+                return .addNew
+            }
+            return draft.duplicateResolution
+        }
+        var targetID: [ConfirmDraft.ID: UUID] = [:]
+        for draft in includedDrafts {
+            switch effectiveResolution(draft) {
+            case .addNew: targetID[draft.id] = draft.id
+            case .useExisting(let existingID): targetID[draft.id] = existingID
+            }
+        }
+
+        // Step 2: every draft's `.taskDone` edges, filtered by the EXACT same rules `confirmSave()`
+        // applies when it builds `intraBatchAttachments` (dismissed index dropped, self-edge
+        // dropped, an edge to a draft that isn't in `targetID` — unticked, or never existed —
+        // dropped) plus `resolvedConditions`'s own dismissed-index filter for the already-
+        // resolved-to-a-real-task case. `.sorted(by:)` only makes ONE draft's own edges
+        // deterministic relative to each other (`resolvedTaskDone`/`intraBatchTaskDone` are
+        // `[Int: UUID]` dictionaries, unordered) — it does not reconstruct the original
+        // `task.conditions` array order across different drafts, so when a cycle admits more than
+        // one description, exactly WHICH edge is offered as removable can still vary run to run;
+        // removing either one breaks the same cycle, so this doesn't affect correctness, only
+        // which button happens to be shown.
+        struct DraftEdge { let from: UUID; let to: UUID; let draftID: ConfirmDraft.ID; let conditionIndex: Int }
+        var draftEdges: [DraftEdge] = []
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id] else { continue }
+            for (index, resolvedID) in draft.resolvedTaskDone.sorted(by: { $0.key < $1.key }) {
+                guard !draft.dismissedConditions.contains(index), resolvedID != ownID else { continue }
+                draftEdges.append(DraftEdge(from: ownID, to: resolvedID, draftID: draft.id, conditionIndex: index))
+            }
+            for (index, referencedDraftID) in draft.intraBatchTaskDone.sorted(by: { $0.key < $1.key }) {
+                guard !draft.dismissedConditions.contains(index) else { continue }
+                guard let refID = targetID[referencedDraftID], refID != ownID else { continue }
+                draftEdges.append(DraftEdge(from: ownID, to: refID, draftID: draft.id, conditionIndex: index))
+            }
+        }
+
+        // Step 3: snapshot = every persisted task (its OWN existing conditions kept intact) with
+        // the batch's virtual edges layered ON TOP of whichever node they target — a `.useExisting`
+        // draft's edges are ADDED to that task's real conditions, never replacing them, since its
+        // already-persisted edges are just as real for cycle purposes. Whatever's left after that
+        // targets a brand-new `.addNew` node that isn't in `tasks` yet, so it becomes a fresh
+        // virtual `VolarCore.Task` (priority/deadline/etc. don't matter here — `findCycle` only
+        // ever reads `conditions`).
+        var edgesByNode: [UUID: [UUID]] = [:]
+        for edge in draftEdges { edgesByNode[edge.from, default: []].append(edge.to) }
+        var snapshot = tasks.map { $0.snapshot() }
+        for i in snapshot.indices {
+            guard let extra = edgesByNode.removeValue(forKey: snapshot[i].id) else { continue }
+            snapshot[i].conditions.append(contentsOf: extra.map { VolarCore.Condition.taskDone($0) })
+        }
+        // Titles for nodes that are NOT already-persisted tasks (i.e. `.addNew` virtual nodes) —
+        // needed below for the human-readable cycle path regardless of whether this particular
+        // draft ended up with any outgoing edge of its own (it may still be the TARGET of one).
+        var virtualTitles: [UUID: String] = [:]
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id], !currentTaskIDs.contains(ownID) else { continue }
+            virtualTitles[ownID] = draft.effectiveTitle
+            if let extra = edgesByNode[ownID] {
+                snapshot.append(VolarCore.Task(
+                    id: ownID, title: draft.effectiveTitle, status: .todo, priority: nil,
+                    deadline: nil, conditions: extra.map { VolarCore.Condition.taskDone($0) },
+                    estimateMinutes: nil, parentId: nil, createdAt: Date()
+                ))
+            }
+        }
+
+        guard let cycle = VolarCore.findCycle(in: snapshot) else {
+            confirmCycle = nil
+            return
+        }
+
+        func title(for id: UUID) -> String {
+            tasks.first(where: { $0.id == id })?.title ?? virtualTitles[id] ?? "Unknown task"
+        }
+        var removableEdges: [ConfirmCycle.RemovableEdge] = []
+        for i in 0..<(cycle.count - 1) {
+            let from = cycle[i]
+            let to = cycle[i + 1]
+            guard let edge = draftEdges.first(where: { $0.from == from && $0.to == to }) else { continue }
+            removableEdges.append(ConfirmCycle.RemovableEdge(
+                draftID: edge.draftID,
+                conditionIndex: edge.conditionIndex,
+                label: "\(title(for: from)) waits on \(title(for: to))"
+            ))
+        }
+        confirmCycle = ConfirmCycle(titles: cycle.map { title(for: $0) }, removableEdges: removableEdges)
     }
 
     /// T074: dismisses the (at most one) conflict advisory line for one draft — never re-derives
@@ -2830,6 +3231,41 @@ final class AppState {
     func setDraftDeadline(_ date: Date, forDraft draftID: ConfirmDraft.ID) {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].editedDeadline = date
+    }
+
+    /// T-edit-attrs (2026-07-29, manual-edit-contract.md §1.2): the priority chip's `Menu` write
+    /// side (`PopoverView.attributeChips`) — sets `editedPriority`, never `task.priority` directly,
+    /// same "never mutate the parser's `ParsedTask`" contract `setDraftDeadline` above already
+    /// follows. MUST reach through `confirmDrafts[index]`, never a local copy — `ConfirmDraft` is a
+    /// `struct`, so mutating a copy silently loses the edit the instant it goes out of scope (same
+    /// value-type trap `updateDraftTitle`'s doc comment warns about). Does NOT touch `dismissed` —
+    /// constitution II: dismiss always wins, same as `setDraftDeadline`.
+    func setDraftPriority(_ raw: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedPriority = raw
+    }
+
+    /// Same shape/reasoning as `setDraftPriority` immediately above, for the start-time chip's
+    /// `.popover` `DatePicker` write side.
+    func setDraftStartTime(_ date: Date, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedStartTime = date
+    }
+
+    /// Same shape/reasoning as `setDraftPriority` above, for the estimate/duration chip's preset
+    /// list write side.
+    func setDraftEstimateMinutes(_ minutes: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedEstimateMinutes = minutes
+    }
+
+    /// Same shape/reasoning as `setDraftPriority` above, for the reminder-cadence chip's preset
+    /// list write side. Stores the RAW period only — `ConfirmDraft.effectiveReminderOverride` is
+    /// where that gets folded into a full `ReminderPolicy` at read time, same "normalize once, at
+    /// read time" split `updateDraftNotes`'s doc comment documents for notes below.
+    func setDraftRemindPeriod(_ seconds: TimeInterval, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedRemindPeriod = seconds
     }
 
     /// T-edit-notes (2026-07-28, same request as `setDraftDeadline` above): the notes editor's
@@ -2905,10 +3341,18 @@ final class AppState {
     /// (`TaskStore.addCondition`) — because step 3 needs every id from steps 1 and 2 to already be
     /// real. A failure in step 1 aborts before steps 2/3 ever run (same "leave `confirmDrafts`
     /// intact, let the user retry" contract the pre-existing catch block already had); a rejected
-    /// edge in step 3 drops just that one edge (`try?`) rather than unwinding tasks that, by then,
-    /// have already committed — same "partial success beats losing everything over one bad edge"
-    /// precedent `TaskStore.sanitizedConditions` already sets for bulk inserts.
+    /// edge in step 3 (should not happen — see the `confirmCycle == nil` guard and step 3's own
+    /// comment below for why, per cycle-detection-contract.md §2) now surfaces through the shared
+    /// `catch` below rather than being silently dropped via `try?`, same as every other failure in
+    /// this method.
     func confirmSave() {
+        // cycle-detection-contract.md §2: safety net. `PopoverView` already locks the Save button
+        // (and its `.keyboardShortcut(.defaultAction)`) while `confirmCycle != nil`, but this
+        // guard is the one place that's actually load-bearing — Enter/hotkey routes here directly
+        // (`handleHotkey`'s `.parsed` case) without going through any button `.disabled` state at
+        // all, so a stale/missed `recomputeConfirmCycle()` call must not be the only thing
+        // standing between a cyclic batch and the store.
+        guard confirmCycle == nil else { return }
         guard !confirmDrafts.isEmpty else { return }
         captureState = .saving
         let now = clock()
@@ -3063,11 +3507,17 @@ final class AppState {
                 store.mergeIntoExisting(existingID, applying: mergeTransform(for: draft))
             }
             // Việc 2, pass two: attach every intra-batch `.taskDone` now that both ends (new OR
-            // merged) are real, persisted ids. `try?` — see this method's own doc comment for why
-            // a rejected edge here (e.g. two drafts in the same utterance depending on each other)
-            // drops just that one edge instead of unwinding an already-committed save.
+            // merged) are real, persisted ids. cycle-detection-contract.md §2: this USED to be
+            // `try?`, silently dropping a rejected edge — but `recomputeConfirmCycle()` (called
+            // after every edit) plus the `confirmCycle == nil` guard at the top of this method
+            // mean a batch that reaches here should already be acyclic, so a throw here now means
+            // something slipped past that check. Surfacing it via the `catch` below (rather than
+            // swallowing it) turns a silent lie into a visible, human-readable error instead — a
+            // task that's already committed by the time this throws stays committed either way
+            // (this loop runs strictly after the `addBatch`/merge steps above), just without the
+            // one edge that failed.
             for attachment in intraBatchAttachments {
-                try? store.addCondition(attachment.condition, to: attachment.ownID)
+                try store.addCondition(attachment.condition, to: attachment.ownID)
             }
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
             tasks = store.fetchAll()
@@ -3143,16 +3593,21 @@ final class AppState {
             // free-text authorship, so it follows the scalar convention: present, not dismissed,
             // and confident (or explicitly accepted) overwrites the existing task's value exactly
             // like every other attribute here.
-            if let startTime = resolvedValue(draft.task.startTime, kind: .startTime, draft: draft) {
+            // T-edit-attrs (manual-edit-contract.md §2): reads through `draft.effective*`, NOT
+            // `draft.task.*` directly — same "everywhere this attribute is read" reasoning
+            // `effectiveDeadline`'s call sites already document above, applied to the 4 fields
+            // T-edit-attrs added. A merge that resolved from a manual chip edit must carry the
+            // EDITED value into the existing task, same as a brand-new task's `materialize` below.
+            if let startTime = resolvedValue(draft.effectiveStartTime, kind: .startTime, draft: draft) {
                 merged.startTime = startTime
             }
-            if let priorityRaw = resolvedValue(draft.task.priority, kind: .priority, draft: draft) {
+            if let priorityRaw = resolvedValue(draft.effectivePriority, kind: .priority, draft: draft) {
                 merged.priority = Self.uiPriority(from: priorityRaw)
             }
-            if let estimate = resolvedValue(draft.task.estimateMinutes, kind: .estimate, draft: draft) {
+            if let estimate = resolvedValue(draft.effectiveEstimateMinutes, kind: .estimate, draft: draft) {
                 merged.durationMinutes = estimate
             }
-            if let reminder = resolvedValue(draft.task.reminderOverride, kind: .reminder, draft: draft) {
+            if let reminder = resolvedValue(draft.effectiveReminderOverride, kind: .reminder, draft: draft) {
                 merged.reminderOverride = reminder
             }
             if let recurrence = resolvedValue(draft.task.recurrence, kind: .recurrence, draft: draft) {
@@ -3250,10 +3705,14 @@ final class AppState {
         // happens here or anywhere else in this file — that derivation already happened at the
         // router/parse layer BEFORE this draft existed (`ParsedTask.deadline` already carries it);
         // this file only ever reads the two values through, never recomputes either.
-        let startTime = resolvedValue(task.startTime, kind: .startTime, draft: draft)
-        let estimate = resolvedValue(task.estimateMinutes, kind: .estimate, draft: draft)
-        let priorityInt = resolvedValue(task.priority, kind: .priority, draft: draft)
-        let reminder = resolvedValue(task.reminderOverride, kind: .reminder, draft: draft)
+        // T-edit-attrs (manual-edit-contract.md §2 — THIS is the call site that decides whether a
+        // manual chip edit actually gets saved, exactly like `effectiveDeadline` above already is
+        // for the deadline chip): reads through `draft.effective*`, never `task.*` directly, or a
+        // chip that visually shows the user's edit would still materialize the parser's old value.
+        let startTime = resolvedValue(draft.effectiveStartTime, kind: .startTime, draft: draft)
+        let estimate = resolvedValue(draft.effectiveEstimateMinutes, kind: .estimate, draft: draft)
+        let priorityInt = resolvedValue(draft.effectivePriority, kind: .priority, draft: draft)
+        let reminder = resolvedValue(draft.effectiveReminderOverride, kind: .reminder, draft: draft)
         let recurrence = resolvedValue(task.recurrence, kind: .recurrence, draft: draft)
         let kind = draft.dismissed.contains(.kind) ? .task : task.kind
 
@@ -3361,6 +3820,7 @@ final class AppState {
     private func finishSaveUI(titles: [String]) {
         captureState = .done
         confirmDrafts = []
+        confirmCycle = nil
         runningEngine?.stop()
         voice.speak(titles.count == 1 ? (titles.first ?? "Saved") : "\(titles.count) tasks saved.")
         captureSession += 1
@@ -3854,8 +4314,13 @@ final class AppState {
         // exists, so `effectiveDeadline == task.deadline` at every actual call site right now), but
         // keeps the invariant true regardless of call order, rather than depending on it.
         let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft)
-        let estimate = resolvedValue(draft.task.estimateMinutes, kind: .estimate, draft: draft)
-        let priorityInt = resolvedValue(draft.task.priority, kind: .priority, draft: draft)
+        // T-edit-attrs: `draft.effective*` rather than `draft.task.*` directly, same "everywhere
+        // this attribute is read" reasoning as the `effectiveDeadline` line right above (and
+        // `materialize`/`mergeTransform`'s own copies of this same note) — a no-op in practice
+        // today (this only ever runs from `buildConfirmDrafts`, before any edit exists), but keeps
+        // the invariant true regardless of call order rather than depending on it.
+        let estimate = resolvedValue(draft.effectiveEstimateMinutes, kind: .estimate, draft: draft)
+        let priorityInt = resolvedValue(draft.effectivePriority, kind: .priority, draft: draft)
         let candidate = VolarCore.Task(
             id: draft.id,
             title: draft.task.title,

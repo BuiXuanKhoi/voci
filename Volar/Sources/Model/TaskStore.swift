@@ -172,6 +172,51 @@ final class TaskStore {
         return merged
     }
 
+    /// Manual-edit contract §1.3
+    /// (`specs/002-workflow-command-center/contracts/manual-edit-contract.md`): writes ONLY the 7
+    /// fields a user can edit by hand on an already-created task — `title`, `details`, `notes`,
+    /// `priorityRaw`, `startTime`, `deadline`, `durationMinutes`, `reminderOverride` — then saves.
+    /// `AppState.updateTask` (the manual-edit contract's single write path, §1.4) is the sole
+    /// caller. Returns `false` (no save) for an unknown id.
+    ///
+    /// Deliberately does NOT go through `VolarTask.apply(_:)` even though that method's own doc
+    /// comment invites a future "edit task" API to reuse it (`mergeIntoExisting` above already
+    /// does, for its own validated merge path). `apply` also overwrites `conditions`/`parentId`/
+    /// `createdAt`/`status`/`completedAt` — invariants (`.taskDone` DAG-ness, parent/child
+    /// structure, recurring-task no-children rule, completion history) this call has no validated
+    /// snapshot to re-check. `mergeIntoExisting` earns the right to use `apply` by re-running
+    /// `sanitizedConditions`/the recurrence-vs-children guard on the merged result first; a bare
+    /// 7-field manual edit does none of that and has no business touching any of the four.
+    @discardableResult
+    func updateEditableFields(from item: TaskItem) -> Bool {
+        guard let model = fetchModel(item.id) else { return false }
+        model.title = item.title
+        model.details = item.details
+        model.notes = item.notes
+        model.priorityRaw = item.priority.rawValue
+        model.startTime = item.startTime
+        model.deadline = item.deadline
+        model.durationMinutes = item.durationMinutes
+        model.reminderOverride = item.reminderOverride
+        save()
+        return true
+    }
+
+    /// Cycle-detection contract §1.4: removes the condition at `index` from task `id`. Returns
+    /// `false` (no save, no mutation) if `id` is unknown or `index` is out of bounds — same "safe
+    /// no-op for bad input" convention as `clearFirstExternal`/`delete` above. `addCondition`
+    /// keeps rejecting a cyclic `.taskDone` via `TaskStoreError.invalidCondition`; this is purely
+    /// the removal half (an edge always being removed can never introduce a cycle, so there's
+    /// nothing to validate here).
+    @discardableResult
+    func removeCondition(at index: Int, from id: UUID) -> Bool {
+        guard let model = fetchModel(id) else { return false }
+        guard model.conditions.indices.contains(index) else { return false }
+        model.conditions.remove(at: index)
+        save()
+        return true
+    }
+
     /// Validation rule 2: recurrence is only ever allowed on a task with no children.
     func setRecurrence(_ recurrence: Recurrence?, on id: UUID) throws {
         guard let model = fetchModel(id) else { return }
