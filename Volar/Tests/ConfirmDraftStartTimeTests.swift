@@ -291,4 +291,110 @@ final class ConfirmDraftStartTimeTests: XCTestCase {
         state.setDefaultTaskDurationMinutes(0) // UserDefaults.integer's own "absent key" value
         XCTAssertEqual(state.defaultTaskDurationMinutes, 30)
     }
+
+    // MARK: - 9. A DERIVED deadline follows the two values it was derived from (2026-08-01)
+    //
+    // The bug these pin down: `applyStartTimeDerivation` fills `deadline` AND `estimateMinutes`
+    // from the SAME number so the two chips can never state different durations — but the confirm
+    // card's estimate/start-time chips wrote only their own `edited*` overlay, and `materialize`
+    // does no date math of its own, so editing 30' -> 60' moved the estimate chip and left the
+    // deadline chip at start+30'. Test 7 above (a plain Save, no edits) could never catch it.
+
+    func testEditingTheEstimateMovesADerivedDeadline() throws {
+        let now = Date()
+        var task = makeParsedTask(title: "File the disposition report")
+        task.startTime = ParsedValue(value: now, confidence: 0.95)
+        let derived = try XCTUnwrap(
+            IntentRouter.applyStartTimeDerivation([task], defaultMinutes: 30).first
+        )
+        let draft = ConfirmDraft(task: derived)
+
+        let state = AppState()
+        state.confirmDrafts = [draft]
+        state.captureState = .parsed
+
+        state.setDraftEstimateMinutes(60, forDraft: draft.id)
+        state.confirmSave()
+
+        let saved = state.tasks.first { $0.title == "File the disposition report" }
+        let expected = try XCTUnwrap(Calendar.current.date(byAdding: .minute, value: 60, to: now))
+        XCTAssertEqual(saved?.durationMinutes, 60)
+        XCTAssertEqual(
+            saved?.deadline, expected,
+            "a derived deadline must follow the estimate it was derived from, or the two chips " +
+            "disagree about how long the same task takes"
+        )
+    }
+
+    func testEditingTheStartTimeMovesADerivedDeadline() throws {
+        let now = Date()
+        var task = makeParsedTask(title: "File the disposition report")
+        task.startTime = ParsedValue(value: now, confidence: 0.95)
+        let derived = try XCTUnwrap(
+            IntentRouter.applyStartTimeDerivation([task], defaultMinutes: 30).first
+        )
+        let draft = ConfirmDraft(task: derived)
+
+        let state = AppState()
+        state.confirmDrafts = [draft]
+        state.captureState = .parsed
+
+        let movedStart = try XCTUnwrap(Calendar.current.date(byAdding: .hour, value: 2, to: now))
+        state.setDraftStartTime(movedStart, forDraft: draft.id)
+        state.confirmSave()
+
+        let saved = state.tasks.first { $0.title == "File the disposition report" }
+        let expected = try XCTUnwrap(Calendar.current.date(byAdding: .minute, value: 30, to: movedStart))
+        XCTAssertEqual(saved?.startTime, movedStart)
+        XCTAssertEqual(saved?.deadline, expected)
+    }
+
+    /// The other half of the rule, and the more important one: a deadline the USER actually stated
+    /// ("làm ngay, 5 giờ chiều phải xong" -> `deadlineIsEstimated == false`) is never recomputed,
+    /// no matter what the estimate is edited to (constitution II — never overwrite what was said).
+    func testEditingTheEstimateLeavesAUserStatedDeadlineUntouched() throws {
+        let now = Date()
+        let statedDeadline = try XCTUnwrap(Calendar.current.date(byAdding: .hour, value: 8, to: now))
+        var task = makeParsedTask(title: "File the disposition report")
+        task.startTime = ParsedValue(value: now, confidence: 0.95)
+        task.deadline = ParsedValue(value: statedDeadline, confidence: 0.95)
+        // NOT run through `applyStartTimeDerivation`: a task that already carries a deadline is
+        // returned untouched by it, so `deadlineIsEstimated` stays `false` — exactly this case.
+        let draft = ConfirmDraft(task: task)
+
+        let state = AppState()
+        state.confirmDrafts = [draft]
+        state.captureState = .parsed
+
+        state.setDraftEstimateMinutes(60, forDraft: draft.id)
+        state.confirmSave()
+
+        let saved = state.tasks.first { $0.title == "File the disposition report" }
+        XCTAssertEqual(saved?.durationMinutes, 60)
+        XCTAssertEqual(saved?.deadline, statedDeadline)
+    }
+
+    /// An explicit manual deadline edit outranks the derivation in both directions — editing the
+    /// estimate afterwards must not walk the user's own picked instant back.
+    func testAManualDeadlineEditWinsOverTheDerivation() throws {
+        let now = Date()
+        var task = makeParsedTask(title: "File the disposition report")
+        task.startTime = ParsedValue(value: now, confidence: 0.95)
+        let derived = try XCTUnwrap(
+            IntentRouter.applyStartTimeDerivation([task], defaultMinutes: 30).first
+        )
+        let draft = ConfirmDraft(task: derived)
+
+        let state = AppState()
+        state.confirmDrafts = [draft]
+        state.captureState = .parsed
+
+        let picked = try XCTUnwrap(Calendar.current.date(byAdding: .hour, value: 5, to: now))
+        state.setDraftDeadline(picked, forDraft: draft.id)
+        state.setDraftEstimateMinutes(60, forDraft: draft.id)
+        state.confirmSave()
+
+        let saved = state.tasks.first { $0.title == "File the disposition report" }
+        XCTAssertEqual(saved?.deadline, picked)
+    }
 }

@@ -176,7 +176,11 @@ final class CloudParserTests: XCTestCase {
             deadline: deadline.map { RawConfidence(value: $0, confidence: deadlineConfidence) },
             startTime: startTime.map { RawConfidence(value: $0, confidence: startTimeConfidence) },
             estimateMinutes: estimateMinutes.map { RawConfidence(value: $0, confidence: 0.9) },
-            priority: priority.map { RawConfidence(value: $0, confidence: 0.9) }
+            // `Double($0)`: `RawParsedTask.priority` became `RawConfidence<Double>?` on 2026-08-01 so
+            // a fractional priority from the wire can't throw mid-decode and discard the whole
+            // batch — this helper still takes a plain `Int` since every caller below writes a whole
+            // number, and `validate` narrows it back with `Int(exactly:)`.
+            priority: priority.map { RawConfidence(value: Double($0), confidence: 0.9) }
         )
     }
 
@@ -474,5 +478,150 @@ final class CloudParserTests: XCTestCase {
         XCTAssertNil(task.startTime)
         XCTAssertEqual(task.title, "Test task")
         XCTAssertEqual(task.priority?.value, 2)
+    }
+
+    // MARK: - `reminderOverride` decode (2026-08-01 review findings)
+    //
+    // The bug these pin down: `RawParsedReminderOverride` had no `remindPeriodMinutes` field at
+    // all, so the server's "nhắc tôi mỗi 15 phút" answer — which `_shared/gemini.ts` has a whole
+    // prompt rule dedicated to producing, and `ReminderRecord.derive`/`PopoverView.reminderLabel`
+    // both already consume — was silently dropped at the wire boundary. Nothing crashed and no
+    // other field was affected, which is exactly why it went unnoticed: the user just quietly got
+    // the app's default proportional cadence instead of the one they asked for out loud.
+
+    private func makeRawReminderTask(
+        offsetsMinutes: [Double] = [-60],
+        repeatEveryMinutes: Double? = nil,
+        remindPeriodMinutes: Double? = nil,
+        confidence: Double = 0.9
+    ) -> RawParsedTask {
+        RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            reminderOverride: RawConfidence(
+                value: RawParsedReminderOverride(
+                    offsetsMinutes: offsetsMinutes,
+                    repeatEveryMinutes: repeatEveryMinutes,
+                    remindPeriodMinutes: remindPeriodMinutes
+                ),
+                confidence: confidence
+            )
+        )
+    }
+
+    /// `remindPeriodMinutes: 15` ("nhắc tôi mỗi 15 phút") must reach `ReminderPolicy.remindPeriod`
+    /// as 900 SECONDS — the unit `ReminderRecord.derive` walks the deadline back by.
+    func testValidateCarriesRemindPeriodMinutesIntoTheReminderPolicy() throws {
+        let raw = makeRawReminderTask(remindPeriodMinutes: 15)
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "nhắc tôi mỗi 15 phút")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertEqual(policy.remindPeriod, 15 * 60)
+    }
+
+    /// Absent `remindPeriodMinutes` (the overwhelmingly common case) stays `nil` — the app then
+    /// falls back to its own proportional cadence, per `ReminderPolicy.remindPeriod`'s contract.
+    func testValidateLeavesRemindPeriodNilWhenTheServerDidNotSendOne() throws {
+        let raw = makeRawReminderTask()
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertNil(policy.remindPeriod)
+    }
+
+    /// `repeatEveryMinutes` (repeat AFTER the deadline) and `remindPeriodMinutes` (cadence BEFORE
+    /// it) are different fields with different meanings — `_shared/schema.ts` says so explicitly.
+    /// This pins that they never get crossed.
+    func testValidateKeepsRepeatEveryAndRemindPeriodDistinct() throws {
+        let raw = makeRawReminderTask(repeatEveryMinutes: 30, remindPeriodMinutes: 15)
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertEqual(policy.repeatEvery, 30 * 60)
+        XCTAssertEqual(policy.remindPeriod, 15 * 60)
+    }
+
+    /// Offset sign is PRESERVED, not flipped: both the server (`offsetsMinutes`, "negative =
+    /// before") and `ReminderPolicy.offsets` use the same convention, so a flip here would fire
+    /// every reminder AFTER the deadline instead of before it.
+    func testValidatePreservesNegativeOffsetSignInSeconds() throws {
+        let raw = makeRawReminderTask(offsetsMinutes: [-60, -15])
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertEqual(policy.offsets, [-3600, -900])
+    }
+
+    /// An absurd-but-finite offset (the server bounds neither magnitude nor count) drops ITSELF and
+    /// keeps its sane neighbours — same per-field fail-open rule as every other bound here.
+    func testValidateDropsOnlyTheOutOfRangeOffsets() throws {
+        let raw = makeRawReminderTask(offsetsMinutes: [-60, 1e15, .infinity, -30])
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertEqual(policy.offsets, [-3600, -1800])
+    }
+
+    /// A non-positive cadence would make `ReminderRecord.derive`'s walk-back loop meaningless —
+    /// drop the cadence, keep the rest of the override.
+    func testValidateDropsNonPositiveRemindPeriodKeepingOffsets() throws {
+        let raw = makeRawReminderTask(offsetsMinutes: [-60], remindPeriodMinutes: 0)
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertNil(policy.remindPeriod)
+        XCTAssertEqual(policy.offsets, [-3600])
+    }
+
+    // MARK: - Non-integer wire numbers must not discard the whole task (2026-08-01)
+    //
+    // `priority`/`everyDays` are decoded as `Double` and narrowed with `Int(exactly:)` precisely so
+    // a fractional value can't throw inside `JSONDecoder` — that throw would abort the decode of the
+    // ENTIRE `[RawParsedTask]` array in `parseDetailed`, losing every task in the batch over one bad
+    // number. The server's own validator permits a non-integer `everyDays` (it checks only
+    // `isFiniteNumber(...) > 0`), so this is reachable, not theoretical.
+
+    func testValidateDropsFractionalPriorityKeepingTheTask() {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            priority: RawConfidence(value: 2.4, confidence: 0.9)
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertNil(task.priority, "a fractional priority is a schema violation, never rounded")
+        XCTAssertEqual(task.title, "Test task")
+    }
+
+    func testValidateDropsFractionalEveryDaysKeepingTheTask() {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            recurrence: RawConfidence(
+                value: RawParsedRecurrence(type: "every", everyDays: 2.5), confidence: 0.9
+            )
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertNil(task.recurrence)
+        XCTAssertEqual(task.title, "Test task")
+    }
+
+    func testValidateAcceptsWholeNumberEveryDays() throws {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            recurrence: RawConfidence(
+                value: RawParsedRecurrence(type: "every", everyDays: 3), confidence: 0.9
+            )
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertEqual(try XCTUnwrap(task.recurrence?.value), .every(days: 3))
     }
 }

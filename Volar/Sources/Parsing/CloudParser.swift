@@ -294,7 +294,18 @@ struct CloudParser: Sendable {
         switch http.statusCode {
         case 200:
             guard data.count <= maxResponseBytes else { return .unavailable }
-            guard let raws = try? JSONDecoder().decode([RawParsedTask].self, from: data), !raws.isEmpty else {
+            // 2026-08-01: an EMPTY array is no longer folded into `.unavailable`. `200 []` is a
+            // well-formed, deliberate server answer — "the model read the utterance and found no
+            // actionable task in it" (small talk) — and `supabase/functions/_shared/schema.ts`'s
+            // `validateParsedTaskArray` documents it as such explicitly, returning `200 []` rather
+            // than a 502 on purpose. Reporting it as `.unavailable` claimed the Cloud tier had
+            // FAILED when it had actually succeeded: `IntentRouter.lastRoute` recorded the wrong
+            // tier, and the router's `case .tasks:` empty branch was unreachable dead code.
+            //
+            // What the user sees is UNCHANGED (anh Khôi chốt 2026-08-01): the router still falls
+            // through to its title-only floor either way, so an utterance never silently vanishes —
+            // only the diagnosis of WHY it fell through is now honest.
+            guard let raws = try? JSONDecoder().decode([RawParsedTask].self, from: data) else {
                 return .unavailable
             }
             let capped = Array(raws.prefix(IntentRouter.maxTaskCap))

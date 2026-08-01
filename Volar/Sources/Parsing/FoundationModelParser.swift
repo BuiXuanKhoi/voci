@@ -469,12 +469,20 @@ extension FoundationModelParser {
             estimateMinutes: generated.estimateMinutes.map {
                 RawConfidence(value: Double($0), confidence: generated.estimateConfidence ?? 0.5)
             },
+            // `Double(...)` on both numeric fields: `RawParsedTask.priority`/
+            // `RawParsedRecurrence.everyDays` are `Double` on the wire shape (2026-08-01, so a
+            // non-integer from the CLOUD tier can't throw during decode and take a whole batch of
+            // tasks down with it — see their doc comments). The FM tier generates real `Int`s, so
+            // this is a widening conversion that can never lose anything; `ParsedTaskValidation`
+            // narrows both back via `Int(exactly:)`, which every whole number passes.
             priority: generated.priority.map {
-                RawConfidence(value: $0, confidence: generated.priorityConfidence ?? 0.5)
+                RawConfidence(value: Double($0), confidence: generated.priorityConfidence ?? 0.5)
             },
             recurrence: generated.recurrenceType.map {
                 RawConfidence(
-                    value: RawParsedRecurrence(type: $0, everyDays: generated.recurrenceEveryDays),
+                    value: RawParsedRecurrence(
+                        type: $0, everyDays: generated.recurrenceEveryDays.map(Double.init)
+                    ),
                     confidence: generated.recurrenceConfidence ?? 0.5
                 )
             },

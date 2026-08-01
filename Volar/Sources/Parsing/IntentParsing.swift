@@ -183,7 +183,13 @@ final class IntentRouter: IntentParser {
                 lastRoute = .cloud
                 return Self.applyStartTimeDerivation(Self.cap(tasks), defaultMinutes: defaultDurationMinutes)
             case .tasks:
-                break // decoded but empty — fall through same as any other Cloud non-result
+                // Decoded fine, but the model found no actionable task in the utterance (small
+                // talk). Reachable as of 2026-08-01 — `CloudParser.parseDetailed` used to report
+                // this same case as `.unavailable`, making this branch dead code; see that guard's
+                // comment. Falls through to the title-only floor below exactly like any other Cloud
+                // non-result: anh Khôi chốt 2026-08-01 that a captured utterance must still become
+                // something the user can see and dismiss, never silently nothing.
+                break
             case .quotaExceeded:
                 lastCloudQuotaNote = true
             case .unavailable:
@@ -590,19 +596,52 @@ extension RawParsedCondition: Decodable {}
 struct RawParsedRecurrence: Sendable {
     /// "daily" | "weekly" | "monthly" | "every"
     var type: String
-    var everyDays: Int?
+    /// `Double`, NOT `Int`, deliberately (2026-08-01): every numeric field on this wire shape is
+    /// decoded as `Double` and narrowed to `Int` inside `ParsedTaskValidation.validate` via
+    /// `Int(exactly:)`. `JSONDecoder` THROWS when a JSON number doesn't fit the requested integer
+    /// type (`2.5` into an `Int?` is a decode failure, not a `nil`), and one thrown field kills the
+    /// decode of the ENTIRE `[RawParsedTask]` array in `CloudParser.parseDetailed` — every task in
+    /// the batch lost over one bad number, which is precisely what constitution II's "a parsing
+    /// error on one attribute MUST NOT discard the others" forbids. The server's own validator
+    /// (`_shared/schema.ts`'s `validateRecurrence`) only checks `isFiniteNumber(...) > 0` here, NOT
+    /// `Number.isInteger`, so a non-integer really can reach this decoder even though Gemini's
+    /// response schema declares `everyDays` as `integer`.
+    var everyDays: Double?
 }
 extension RawParsedRecurrence: Decodable {}
 
 struct RawParsedReminderOverride: Sendable {
+    /// Minutes relative to the deadline, NEGATIVE = before (server: `_shared/schema.ts`'s
+    /// `ParsedReminderOverrideOut.offsetsMinutes`). Converted to seconds, sign preserved, by
+    /// `ParsedTaskValidation.validate` — `ReminderPolicy.offsets` uses the identical convention.
     var offsetsMinutes: [Double]
+    /// Repeat cadence AFTER the deadline (`ReminderPolicy.repeatEvery`).
     var repeatEveryMinutes: Double?
+    /// Repeat cadence BEFORE the deadline (`ReminderPolicy.remindPeriod`) — "nhắc tôi mỗi 15 phút"
+    /// -> `15`. NOT the same thing as `repeatEveryMinutes` right above (that one repeats AFTER the
+    /// deadline); the server's prompt has a whole rule teaching the model to keep the two apart
+    /// (`_shared/gemini.ts`'s REMINDPERIOD section).
+    ///
+    /// ADDED 2026-08-01 — this field was MISSING here while every other layer already supported it:
+    /// the server emitted it (`gemini.ts` response schema + `schema.ts`'s `validateReminderOverride`)
+    /// and the client consumed it (`ReminderRecord.derive` prefers `remindPeriod` over
+    /// `fractionsRemaining`; `PopoverView.reminderLabel` renders "Every 15 min"; `AppState`'s
+    /// reminder chip writes it by hand). Only the wire DECODE was missing, so a user who actually
+    /// said "nhắc tôi mỗi 15 phút" silently got the default proportional cadence instead — the one
+    /// place the whole feature could be dropped, and it was.
+    var remindPeriodMinutes: Double?
 }
 extension RawParsedReminderOverride: Decodable {}
 
 struct RawParsedSubtask: Sendable {
     var title: RawConfidence<String>
-    var estimateMinutes: RawConfidence<Double>
+    /// OPTIONAL even though the server always sends it (`_shared/schema.ts`'s `validateSubtask`
+    /// rejects a subtask without one): `validate` below uses subtask TITLES only and discards this
+    /// value entirely, so requiring it here buys nothing and costs everything — a missing/malformed
+    /// `estimateMinutes` on one subtask would throw during decode and take the whole batch of tasks
+    /// down with it (same "one bad field must not discard the others" reasoning as
+    /// `RawParsedRecurrence.everyDays` above).
+    var estimateMinutes: RawConfidence<Double>?
 }
 extension RawParsedSubtask: Decodable {}
 
@@ -622,7 +661,9 @@ struct RawParsedTask: Sendable {
     /// (2026-07-28, anh Khôi chốt: no new task "kind"/flag for this — just this one extra field).
     var startTime: RawConfidence<String>?
     var estimateMinutes: RawConfidence<Double>?
-    var priority: RawConfidence<Int>?
+    /// `Double`, not `Int` — same decode-safety reasoning as `RawParsedRecurrence.everyDays`;
+    /// narrowed via `Int(exactly:)` in `ParsedTaskValidation.validate`.
+    var priority: RawConfidence<Double>?
     var recurrence: RawConfidence<RawParsedRecurrence>?
     var reminderOverride: RawConfidence<RawParsedReminderOverride>?
     var conditions: [RawConfidence<RawParsedCondition>]?
@@ -637,7 +678,7 @@ struct RawParsedTask: Sendable {
         deadline: RawConfidence<String>? = nil,
         startTime: RawConfidence<String>? = nil,
         estimateMinutes: RawConfidence<Double>? = nil,
-        priority: RawConfidence<Int>? = nil,
+        priority: RawConfidence<Double>? = nil,
         recurrence: RawConfidence<RawParsedRecurrence>? = nil,
         reminderOverride: RawConfidence<RawParsedReminderOverride>? = nil,
         conditions: [RawConfidence<RawParsedCondition>]? = nil,
@@ -694,6 +735,28 @@ enum ParsedTaskValidation {
         value.isFinite && (0...1).contains(value)
     }
 
+    // MARK: Reminder-override bounds (2026-08-01)
+    //
+    // The server deliberately does NOT bound these (`_shared/schema.ts`'s `validateReminderOverride`
+    // checks `isFiniteNumber` and, for the two periods, `> 0` — nothing more), so this client is the
+    // only place an absurd-but-finite value gets stopped. Same per-field/per-entry fail-open rule as
+    // every other bound in this file: an out-of-range value drops ITSELF, never the task around it.
+
+    /// One year, in minutes. Generous on purpose — "nhắc tôi trước 6 tháng" is unusual but real,
+    /// while anything past a year is a glitch, not an intention.
+    private static let maxReminderOffsetMinutes: Double = 365 * 24 * 60
+    /// Ceiling on how many one-off offset marks a single override may carry. `ReminderScheduler`
+    /// has its own system-wide notification-request cap; this stops one task from eating it.
+    private static let maxReminderMarks = 10
+
+    /// A repeat cadence (`repeatEveryMinutes` / `remindPeriodMinutes`) must be a real, finite,
+    /// positive number of minutes no larger than `maxReminderOffsetMinutes` — a zero/negative period
+    /// would make `ReminderRecord.derive`'s walk-back loop meaningless, and an enormous one produces
+    /// a single mark so far out it never fires.
+    private static func isValidReminderPeriodMinutes(_ minutes: Double) -> Bool {
+        minutes.isFinite && minutes > 0 && minutes <= maxReminderOffsetMinutes
+    }
+
     static func validateAll(_ raws: [RawParsedTask], sourceTranscript: String) -> [ParsedTask] {
         raws.map { validate($0, sourceTranscript: sourceTranscript) }
     }
@@ -738,8 +801,14 @@ enum ParsedTaskValidation {
         }
 
         let priority: ParsedValue<Int>? = raw.priority.flatMap { c in
-            guard validConfidence(c.confidence), (1...4).contains(c.value) else { return nil }
-            return ParsedValue(value: c.value, confidence: c.confidence)
+            // `Int(exactly:)` WITHOUT `.rounded()` (unlike `estimateMinutes` above, where rounding a
+            // duration is harmless): priority is a 4-value enum, not a measurement — a fractional
+            // `2.4` is a schema violation, not a value to round, so it drops the field rather than
+            // silently picking one of the two neighbouring priorities on the user's behalf.
+            guard validConfidence(c.confidence), c.value.isFinite,
+                  let level = Int(exactly: c.value), (1...4).contains(level)
+            else { return nil }
+            return ParsedValue(value: level, confidence: c.confidence)
         }
 
         let recurrence: ParsedValue<Recurrence>? = raw.recurrence.flatMap { c in
@@ -750,7 +819,10 @@ enum ParsedTaskValidation {
             case "weekly": mapped = .weekly
             case "monthly": mapped = .monthly
             case "every":
-                if let days = c.value.everyDays, days > 0 {
+                // Same strict `Int(exactly:)` narrowing as `priority` above — "every 2.5 days" is a
+                // schema violation, not something to round into a plausible-looking cadence.
+                if let raw = c.value.everyDays, raw.isFinite,
+                   let days = Int(exactly: raw), days > 0 {
                     mapped = .every(days: days)
                 } else {
                     mapped = nil
@@ -763,13 +835,41 @@ enum ParsedTaskValidation {
 
         let reminderOverride: ParsedValue<ReminderPolicy>? = raw.reminderOverride.flatMap { c in
             guard validConfidence(c.confidence) else { return nil }
-            let offsets = c.value.offsetsMinutes.filter { $0.isFinite }.map { $0 * 60 }
+            // Sign is PRESERVED, never flipped: both sides use "negative = before the deadline"
+            // (`_shared/schema.ts`'s `offsetsMinutes` comment and `ReminderPolicy.offsets`'s own doc
+            // comment agree), so this is a pure minutes -> seconds conversion.
+            //
+            // `maxReminderOffsetMinutes`/`maxReminderMarks` bound what the server does NOT: its
+            // `validateReminderOverride` only checks `isFiniteNumber`, so a hostile/glitched
+            // `offsetsMinutes: [1e15]` would otherwise reach `ReminderRecord.derive` and turn into a
+            // reminder date ~2 billion years out (plus one scheduled notification per entry, against
+            // a hard system cap). Out-of-range entries are dropped INDIVIDUALLY — an utterance that
+            // produced one sane offset and one absurd one keeps the sane one.
+            let offsets = c.value.offsetsMinutes
+                .filter { $0.isFinite && abs($0) <= Self.maxReminderOffsetMinutes }
+                .prefix(Self.maxReminderMarks)
+                .map { $0 * 60 }
             guard !offsets.isEmpty else { return nil }
             var repeatEvery: TimeInterval?
-            if let minutes = c.value.repeatEveryMinutes, minutes.isFinite, minutes > 0 {
+            if let minutes = c.value.repeatEveryMinutes, Self.isValidReminderPeriodMinutes(minutes) {
                 repeatEvery = minutes * 60
             }
-            let policy = ReminderPolicy(offsets: offsets, repeatEvery: repeatEvery)
+            // 2026-08-01: previously dropped on the floor — see `RawParsedReminderOverride
+            // .remindPeriodMinutes`'s doc comment for the full story. `remindPeriod` is what
+            // `ReminderRecord.derive` prefers over `fractionsRemaining`, so losing it here silently
+            // downgraded "nhắc tôi mỗi 15 phút" to the app's default proportional cadence.
+            var remindPeriod: TimeInterval?
+            if let minutes = c.value.remindPeriodMinutes, Self.isValidReminderPeriodMinutes(minutes) {
+                remindPeriod = minutes * 60
+            }
+            // Called by keyword, skipping `fractionsRemaining` (which keeps its `[]` default) —
+            // `ReminderPolicy`'s own doc comment in `Recurrence.swift` pins this memberwise-init
+            // shape precisely so this call site keeps compiling. `[]` is correct, not an oversight:
+            // an explicit user-stated override replaces the app's proportional default rather than
+            // stacking on top of it.
+            let policy = ReminderPolicy(
+                offsets: offsets, repeatEvery: repeatEvery, remindPeriod: remindPeriod
+            )
             return ParsedValue(value: policy, confidence: c.confidence)
         }
 

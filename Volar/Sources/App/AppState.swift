@@ -391,7 +391,55 @@ struct ConfirmDraft: Identifiable, Equatable {
         if let editedDeadline {
             return ParsedValue(value: editedDeadline, confidence: 1.0)
         }
+        // 2026-08-01: a DERIVED deadline follows the two values it was derived from. See
+        // `rederivedDeadline` below — returns `nil` for every deadline the user actually stated, so
+        // this line is the unchanged path for all of them.
+        if let rederived = rederivedDeadline {
+            return rederived
+        }
         return task.deadline
+    }
+
+    /// Recomputes a MACHINE-DERIVED deadline (`startTime + estimate`) whenever the user edits either
+    /// input it was built from — `nil` in every other case, so the ordinary path through
+    /// `effectiveDeadline` above is untouched.
+    ///
+    /// THE BUG THIS FIXES (2026-08-01): `IntentRouter.applyStartTimeDerivation` fills an urgent,
+    /// no-deadline utterance's `deadline` AND `estimateMinutes` from the SAME number — anh Khôi's
+    /// single "default task duration" setting — precisely so the estimate chip and the deadline chip
+    /// can never state two different durations for one task. But the confirm card's estimate chip
+    /// wrote only `editedEstimateMinutes`, and `materialize` deliberately does no date math of its
+    /// own, so changing 30' to 60' moved the estimate chip and left the deadline chip at start+30':
+    /// the exact disagreement the one-setting design exists to prevent, now visible on screen.
+    /// Editing the START TIME had the same effect — the derived deadline stayed anchored to the old
+    /// start.
+    ///
+    /// Three guards keep this narrow, and each one matters:
+    ///   - `task.deadlineIsEstimated` — the ONLY signal that this deadline was machine-derived
+    ///     rather than spoken. A user who said "5 giờ chiều phải xong" gets `false` here, so their
+    ///     stated deadline is never recomputed out from under them (constitution II).
+    ///   - `editedDeadline == nil` (enforced by the caller above) — an explicit manual deadline edit
+    ///     always wins over anything derived, in both directions.
+    ///   - a positive `estimate` and a real `startTime` — with either missing there is nothing to
+    ///     derive from, so the original derived value stands rather than being dropped.
+    ///
+    /// Confidence is INHERITED from the original derived deadline (0.75 today), never raised to
+    /// `1.0` the way `editedDeadline` is: the user edited the estimate, not the deadline — the
+    /// deadline is still the app's arithmetic, and it must keep rendering with `PopoverView
+    /// .DeadlineControl`'s "est" marker (which keys off `deadlineIsEstimated` + `editedDeadline ==
+    /// nil`, both still true here). It stays above `ParsedValue.isUncertain`'s 0.7 bar for the same
+    /// reason the derivation picked 0.75 in the first place — see `applyStartTimeDerivation`'s long
+    /// comment on why dropping below that bar silently broke the whole urgent-task feature once.
+    private var rederivedDeadline: ParsedValue<Date>? {
+        guard task.deadlineIsEstimated, let original = task.deadline else { return nil }
+        guard let start = effectiveStartTime?.value,
+              let minutes = effectiveEstimateMinutes?.value, minutes > 0 else { return nil }
+        // `Calendar`, never raw `TimeInterval` second-math — same DST-safe convention (and the same
+        // "return the value unchanged rather than fabricate one from a failed computation" handling
+        // of a `nil` overflow result) as `applyStartTimeDerivation`, which produced `original`.
+        guard let recomputed = Calendar.current.date(byAdding: .minute, value: minutes, to: start)
+        else { return nil }
+        return ParsedValue(value: recomputed, confidence: original.confidence)
     }
     /// User-edited notes/description from the confirm card's notes editor
     /// (`PopoverView.notesEditor`, T-edit-notes 2026-07-28 — anh Khôi: users need to fix a
@@ -1019,8 +1067,14 @@ final class AppState {
     /// value through, same reasoning as `voiceDeliveryModeKey`'s doc comment above). Referenced BY
     /// NAME from that file (`AppState.defaultTaskDurationMinutesKey`) rather than a duplicated
     /// string literal, so the two sides can never drift apart — see `IntentParsing.swift` for the
-    /// read side.
-    static let defaultTaskDurationMinutesKey = "volar.defaultTaskDurationMinutes"
+    /// read side. `nonisolated` for the exact reason `cloudParseConsentKey` above is: a `static let`
+    /// inside a `@MainActor` type inherits that isolation, and the reader
+    /// (`IntentRouter.currentDefaultDurationMinutes()`) is deliberately `nonisolated` so the
+    /// off-main `CloudParser`/`FoundationModelParser` side can reach it — without this the reader
+    /// fails to compile with "main actor-isolated static property ... cannot be referenced from a
+    /// nonisolated context". Unlike `voiceDeliveryModeKey`/`globalReminderPolicyKey` right above,
+    /// whose only sibling reader (`ReminderScheduler`) is itself `@MainActor` and so needs nothing.
+    nonisolated static let defaultTaskDurationMinutesKey = "volar.defaultTaskDurationMinutes"
     /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
     /// file; no sibling reads this one.
     private static let triageKeptAtKey = "volar.triageKeptAt"
