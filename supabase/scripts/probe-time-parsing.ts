@@ -79,7 +79,50 @@ interface Case {
    *  offset (minutes, negative = before deadline) — paired with `expectRemindPeriodAbsent` to prove
    *  a single stated offset ("nhắc tôi trước 1 tiếng") does NOT get misread as a repeating cadence. */
   expectedOffsetMinutes?: number;
+  /** Splitting-rule cases only (2026-08-02): exact number of tasks the utterance must produce.
+   *  Every pre-existing case implicitly expects 1 and asserts only on `tasks[0]`; these cases are
+   *  the first that care how many came back at all. */
+  expectedTaskCount?: number;
+  /** Dependency-rule cases only: asserts the LAST task carries a `taskDone` condition, and that
+   *  its `referenceTitle` would ACTUALLY link to the first task on the client. That second half is
+   *  the point — a model can obey "emit a taskDone condition" while writing a reference too short
+   *  to match, which loses the ordering with no error anywhere. See `wouldClientLink` below. */
+  expectDependencyOnFirstTask?: boolean;
+  /** Regression guard for the splitting rule: asserts NO task carries any condition at all — a
+   *  compound-object utterance ("mua sữa và bánh mì") must neither split nor invent an ordering. */
+  expectNoConditions?: boolean;
   why: string;
+}
+
+/** Mirrors `AppState.tokenize` (`Volar/Sources/App/AppState.swift`): lowercase, strip diacritics,
+ *  split on whitespace, dedupe. `đ`/`Đ` are mapped explicitly because Swift's
+ *  `.folding(options: .diacriticInsensitive)` folds them to `d`, while Unicode NFD does NOT
+ *  decompose U+0111 (it is its own letter, not `d` + a combining mark) — without this line the two
+ *  sides would tokenize "đã"/"đơn" differently and this probe would disagree with the real client.
+ *  Punctuation is deliberately NOT stripped, matching the Swift side exactly: "Sugashack." and
+ *  "Sugashack" really are different tokens there. */
+function tokenize(text: string): Set<string> {
+  const folded = text
+    .toLowerCase()
+    .replace(/đ/g, "d")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "");
+  return new Set(folded.split(/\s+/).filter((t) => t.length > 0));
+}
+
+/** Replays the client's dependency-matching decision (`AppState.preResolveConditions` ->
+ *  `scoredMatches(similarity: .strict)`): Jaccard over the token sets, linked only at >= 0.7. This
+ *  is why the prompt insists `referenceTitle` repeat the earlier title word for word — "landing
+ *  page" against "Làm landing page cho Sugashack" is 2/6 = 0.33 and would be dropped in silence. */
+function wouldClientLink(referenceTitle: string, taskTitle: string): { linked: boolean; score: number } {
+  const a = tokenize(referenceTitle);
+  const b = tokenize(taskTitle);
+  if (a.size === 0 || b.size === 0) return { linked: false, score: 0 };
+  let shared = 0;
+  for (const t of a) if (b.has(t)) shared++;
+  const union = new Set([...a, ...b]).size;
+  const score = union === 0 ? 0 : shared / union;
+  return { linked: score >= 0.7, score };
 }
 
 const CASES: Case[] = [
@@ -239,6 +282,47 @@ const CASES: Case[] = [
       + "tiếng\") is offsetsMinutes: [-60], a ONE-OFF reminder -- NOT a repeating cadence, so "
       + "remindPeriodMinutes must be absent even though a reminderOverride IS legitimately present",
   },
+
+  // --- Splitting + dependency (anh Khôi 2026-08-02) ---------------------------------------------
+  // The rule these probe lives entirely in `SYSTEM_PREAMBLE`; before it existed the first case
+  // below came back as ONE task, which is what prompted the whole rule.
+  {
+    transcript: "làm xong landing page và gửi cho khách hàng Sugashack",
+    now: NOW_VN,
+    timezone: TZ_VN,
+    expectedTaskCount: 2,
+    expectDependencyOnFirstTask: true,
+    why: "THE case that started this rule: two different actions (làm / gửi) at two different "
+      + "moments, with \"xong ... và\" stating the ordering -> 2 tasks, and the SECOND must carry "
+      + "a taskDone condition whose referenceTitle actually links back to the first",
+  },
+  {
+    transcript: "sau khi deploy xong thì nhắn cho team QA",
+    now: NOW_VN,
+    timezone: TZ_VN,
+    expectedTaskCount: 2,
+    expectDependencyOnFirstTask: true,
+    why: "the explicit \"sau khi ... thì\" form -- same two-task + dependency shape, different "
+      + "connective, so the rule can't be passing on the word \"xong\" alone",
+  },
+  {
+    transcript: "mua sữa và bánh mì",
+    now: NOW_VN,
+    timezone: TZ_VN,
+    expectedTaskCount: 1,
+    expectNoConditions: true,
+    why: "MOST IMPORTANT regression guard for over-splitting: ONE action (mua) with two objects "
+      + "is ONE task -- a rule that splits this has misread \"và\" as a task separator",
+  },
+  {
+    transcript: "gọi cho Nam và Hoa về hợp đồng",
+    now: NOW_VN,
+    timezone: TZ_VN,
+    expectedTaskCount: 1,
+    expectNoConditions: true,
+    why: "second over-splitting guard, harder than the shopping one: same verb, two PEOPLE, and "
+      + "no stated ordering between them -- one task, and no invented dependency",
+  },
 ];
 
 /** Compares two ISO strings as WRITTEN, not as instants: `...T18:00:00+07:00` and
@@ -359,6 +443,63 @@ async function main() {
       if (c.expectedPriority !== undefined) {
         if (gotPriority !== c.expectedPriority) {
           problems.push(`priority: got ${gotPriority ?? "none"}, want ${c.expectedPriority}`);
+        }
+      }
+
+      // --- Splitting + dependency (2026-08-02) --------------------------------------------------
+      const tasks = validated?.tasks ?? [];
+
+      if (c.expectedTaskCount !== undefined && tasks.length !== c.expectedTaskCount) {
+        problems.push(
+          `taskCount: got ${tasks.length}, want ${c.expectedTaskCount} ` +
+            `[${tasks.map((t) => `"${t.title.value}"`).join(", ")}]`,
+        );
+      }
+
+      if (c.expectNoConditions) {
+        const withConditions = tasks.filter((t) => (t.conditions?.length ?? 0) > 0);
+        if (withConditions.length > 0) {
+          problems.push(
+            `conditions: expected NONE, got ${withConditions.length} task(s) carrying one ` +
+              `(an ordering was invented that the utterance never stated)`,
+          );
+        }
+      }
+
+      if (c.expectDependencyOnFirstTask) {
+        // Deliberately checks the LAST task, not "some task": the dependency has a direction, and
+        // the earlier task pointing at the later one is a real failure mode, not a near-miss.
+        const first = tasks[0];
+        const last = tasks[tasks.length - 1];
+        const firstHasCondition = (first?.conditions?.length ?? 0) > 0;
+        const dep = last?.conditions?.find((c) => c.value.kind === "taskDone");
+
+        if (tasks.length < 2 || !first || !last) {
+          // The taskCount assertion above already reported this; don't double-report.
+        } else if (firstHasCondition) {
+          problems.push(
+            `dependency: the FIRST task carries a condition — the ordering is backwards ` +
+              `("${first.title.value}" should not wait on anything here)`,
+          );
+        } else if (!dep) {
+          problems.push(
+            `dependency: last task "${last.title.value}" carries no taskDone condition ` +
+              `(it must wait on "${first.title.value}")`,
+          );
+        } else {
+          const ref = dep.value.referenceTitle ?? "";
+          const { linked, score } = wouldClientLink(ref, first.title.value);
+          if (!linked) {
+            // The model DID follow the rule's letter and still produced a dead link. This is the
+            // single most valuable line in this probe: nothing else anywhere — not `deno check`,
+            // not the server validator, not a Swift unit test — can catch it, because both sides
+            // are individually well-formed and the loss happens only when they meet.
+            problems.push(
+              `dependency: referenceTitle "${ref}" would NOT link to "${first.title.value}" on ` +
+                `the client (Jaccard ${score.toFixed(2)} < 0.70) — the ordering would be dropped ` +
+                `in silence`,
+            );
+          }
         }
       }
 
