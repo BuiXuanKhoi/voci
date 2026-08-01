@@ -55,7 +55,20 @@ final class ReminderScheduler: NSObject {
     /// task's report as a candidate follow-up if anh Khôi instead wants persistent one-shot state
     /// or a repeat cadence).
     private var escalatedRecordIds: Set<UUID> = []
-    private var fullScreenSweepTimer: Timer?
+    // NO `fullScreenSweepTimer` STORED PROPERTY, and no `deinit` (2026-08-01). Both used to exist
+    // purely so `deinit` could `invalidate()` the sweep timer, on the assumption that
+    // `Timer.invalidate()` being thread-safe made it legal there. It isn't: a `deinit` on a
+    // `@MainActor` class runs NONISOLATED under Swift 6, and reaching a stored property of the
+    // non-`Sendable` type `Timer?` from that context is a hard error ("cannot access property
+    // 'fullScreenSweepTimer' with a non-Sendable type 'Timer?'") — the thread-safety of the method
+    // being CALLED is irrelevant, it's touching the property at all that's rejected.
+    //
+    // Same conclusion `HotkeyManager.swift` already reached for the identical rule ("No `deinit`:
+    // teardown happens via `stop()`... Swift 6 also forbids a `deinit` on a `@MainActor`-isolated
+    // class from touching actor-isolated stored properties"). Teardown moved INTO the timer block
+    // instead — see `startFullScreenEscalationSweep()`, where the tick invalidates its own timer as
+    // soon as `self` is gone. Nothing else ever read this property, so storing it bought nothing
+    // once `deinit` couldn't use it.
     /// How often the sweep re-checks for a delivered, high-urgency, non-nudge record that has sat
     /// undismissed long enough to escalate. Independent of `FullScreenEscalationDecision.ignoredAfter`
     /// (the 5-minute "has it been ignored" threshold) — this is just the polling cadence.
@@ -101,14 +114,6 @@ final class ReminderScheduler: NSObject {
         // calls `scheduler?.rebuildFromStorage()` from there.
 
         startFullScreenEscalationSweep()
-    }
-
-    deinit {
-        // `Timer.invalidate()` itself is documented as safe to call from any thread/isolation, and
-        // is the one AppKit/Foundation teardown call this class makes outside its `@MainActor`
-        // methods — `deinit` on a `@MainActor` class runs nonisolated in Swift 6, so nothing else
-        // belonging to this class may be touched here.
-        fullScreenSweepTimer?.invalidate()
     }
 
     // MARK: - Contract §A
@@ -592,13 +597,26 @@ final class ReminderScheduler: NSObject {
         // onto `@MainActor` via `_Concurrency.Task` for the same Swift 6 isolation reason documented
         // there (a MainActor-inferred method called directly from a non-isolated `Timer` callback
         // traps at runtime under strict concurrency checking).
-        let timer = Timer(timeInterval: Self.fullScreenSweepInterval, repeats: true) { @Sendable [weak self] _ in
+        let timer = Timer(timeInterval: Self.fullScreenSweepInterval, repeats: true) { @Sendable [weak self] firingTimer in
+            // Self-teardown, replacing the `deinit` that used to hold (and invalidate) this timer —
+            // see the comment where that property used to be declared for why `deinit` cannot do it
+            // under Swift 6. `RunLoop.main` owns the timer, so without this an outlived scheduler
+            // would leave a no-op tick firing every 60s for the rest of the process's life.
+            // `invalidate()` runs on the same thread that scheduled the timer (the main run loop),
+            // which is exactly what Foundation requires of it.
+            //
+            // In practice this is belt-and-braces: `AppState` builds exactly one scheduler and
+            // holds it for the whole app lifetime, so `self` outliving the process is the norm and
+            // this branch is expected never to run outside tests.
+            guard self != nil else {
+                firingTimer.invalidate()
+                return
+            }
             _Concurrency.Task { @MainActor [weak self] in
                 self?.sweepForFullScreenEscalation()
             }
         }
         RunLoop.main.add(timer, forMode: .common)
-        fullScreenSweepTimer = timer
     }
 
     /// One tick: gather every `.delivered`, `isHighUrgency`, non-`"nudge"` record that hasn't
