@@ -624,4 +624,335 @@ final class CloudParserTests: XCTestCase {
 
         XCTAssertEqual(try XCTUnwrap(task.recurrence?.value), .every(days: 3))
     }
+
+    // MARK: - task_refs_v1 (anh Khôi, 2026-08-02 task-refs design)
+    //
+    // Everything below is exercised at the SAME layer every other test in this file already uses
+    // for decode/validation coverage — `JSONDecoder` straight into the `Raw*` wire structs, then
+    // `ParsedTaskValidation.validate`/`validateCapture` — never a live network call, for the exact
+    // same reason the file header gives ("no `URLProtocol`-stub test infrastructure exists in this
+    // target"). That reasoning also covers item (h) of this task's own test list — "assert the
+    // request body includes `client_caps`": there is no seam here to intercept the actual
+    // `URLRequest` `CloudParser.performParse` builds, so this file cannot assert on the wire body
+    // directly. What CAN be pinned, and is, below: the capability string literal itself
+    // (`CloudParser.taskRefsCapability`) never silently drifts from `"task_refs_v1"`, which is the
+    // one thing `performParse`'s envelope-vs-bare-array decode fallback depends on matching the
+    // server's own handshake (`_shared/schema.ts`) — see `testTaskRefsCapabilityWireLiteralIsStable`
+    // near the end of this section.
+    //
+    // `RawParsedCondition(...)` below is ALWAYS constructed with every parameter passed explicitly
+    // by name (never omitting `date`/`description`/`refIndex`/etc even where they're conceptually
+    // irrelevant to a given fixture) — deliberately sidesteps any ambiguity about whether a bare
+    // `Optional` stored property earns a default in Swift's synthesized memberwise initializer
+    // (this file is written without a Swift toolchain to compile-check that assumption against).
+
+    /// (a) The envelope shape decodes: 1 task + 1 ref + 1 update carrying `deadline`,
+    /// `notesAppend`, and an `addConditions` entry pointing at the response's own `tasks[1]`.
+    func testEnvelopeJSONDecodesTaskRefAndUpdateTogether() throws {
+        let json = """
+        {
+          "tasks": [
+            {"title": {"value": "New task", "confidence": 0.9}}
+          ],
+          "taskRefs": [
+            {"titleQuery": {"value": "Old task", "confidence": 0.8}, "assumeExisting": true}
+          ],
+          "updates": [
+            {
+              "refIndex": 1,
+              "set": {
+                "deadline": {"value": "2026-08-02T10:00:00+07:00", "confidence": 0.9},
+                "notesAppend": {"value": "extra note", "confidence": 0.85}
+              },
+              "addConditions": [
+                {"kind": "taskDone", "newTaskIndex": 1}
+              ]
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RawParseEnvelope.self, from: json)
+        let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: "test transcript")
+
+        XCTAssertEqual(capture.tasks.count, 1)
+        XCTAssertEqual(capture.tasks.first?.title, "New task")
+
+        XCTAssertEqual(capture.taskRefs.count, 1)
+        XCTAssertEqual(capture.taskRefs.first?.titleQuery, "Old task")
+        XCTAssertEqual(capture.taskRefs.first?.assumeExisting, true)
+
+        let update = try XCTUnwrap(capture.updates.first)
+        XCTAssertEqual(capture.updates.count, 1)
+        XCTAssertEqual(update.refIndex, 1)
+        XCTAssertEqual(update.deadline?.value, ParsedTaskValidation.parseISO8601("2026-08-02T10:00:00+07:00"))
+        XCTAssertEqual(update.notesAppend?.value, "extra note")
+        XCTAssertEqual(update.addConditions, [.taskDoneNewTask(index: 1)])
+    }
+
+    /// (b) A bare `[RawParsedTask]` array (today's shape, or an old/rolled-back server that never
+    /// recognized `client_caps`) still decodes — as `ParsedCapture` with empty `taskRefs`/`updates`
+    /// — the back-compat/rollback path `CloudParser.performParse` falls back to. Also pins the
+    /// actual mechanism that fallback depends on: a bare JSON array can never satisfy
+    /// `RawParseEnvelope`'s object-keyed container, so the envelope decode attempt fails cleanly
+    /// (never partially/incorrectly parses array elements as envelope fields) and `performParse`
+    /// moves on to the array decode.
+    func testBareArrayResponseDecodesToCaptureWithEmptyRefsAndUpdates() throws {
+        let json = """
+        [
+          {"title": {"value": "Task A", "confidence": 0.9}}
+        ]
+        """.data(using: .utf8)!
+
+        XCTAssertThrowsError(
+            try JSONDecoder().decode(RawParseEnvelope.self, from: json),
+            "a bare array must never satisfy the object-keyed envelope decode"
+        )
+
+        let raws = try JSONDecoder().decode([RawParsedTask].self, from: json)
+        let capture = ParsedCapture(
+            tasks: ParsedTaskValidation.validateAll(raws, sourceTranscript: "test transcript"),
+            taskRefs: [],
+            updates: []
+        )
+
+        XCTAssertEqual(capture.tasks.count, 1)
+        XCTAssertEqual(capture.tasks.first?.title, "Task A")
+        XCTAssertTrue(capture.taskRefs.isEmpty)
+        XCTAssertTrue(capture.updates.isEmpty)
+    }
+
+    /// (c) An update whose `refIndex` doesn't land inside the validated `taskRefs` is dropped
+    /// WHOLE — never guessed at, never misapplied to the wrong (or no) ref — while the unrelated
+    /// task and ref it arrived alongside are both kept untouched.
+    func testUpdateWithOutOfRangeRefIndexIsDroppedKeepingTaskAndRef() throws {
+        let json = """
+        {
+          "tasks": [{"title": {"value": "T1", "confidence": 0.9}}],
+          "taskRefs": [{"titleQuery": {"value": "Ref1", "confidence": 0.8}}],
+          "updates": [
+            {"refIndex": 5, "set": {"priority": {"value": 2, "confidence": 0.8}}}
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RawParseEnvelope.self, from: json)
+        let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: "test transcript")
+
+        XCTAssertEqual(capture.tasks.count, 1, "an unrelated update's own failure must not cost the task")
+        XCTAssertEqual(capture.taskRefs.count, 1, "an unrelated update's own failure must not cost the ref")
+        XCTAssertTrue(capture.updates.isEmpty, "refIndex 5 is out of range against a 1-element taskRefs")
+    }
+
+    /// (d) A fractional `priority` on an update drops ONLY that field — same per-attribute
+    /// fail-open rule `ParsedTask.priority` itself already follows (`testValidateDropsFractional
+    /// PriorityKeepingTheTask` above) — while `deadline` on the SAME `set` survives untouched.
+    func testUpdatePriorityFractionalValueIsDroppedKeepingDeadline() throws {
+        let json = """
+        {
+          "tasks": [{"title": {"value": "T1", "confidence": 0.9}}],
+          "taskRefs": [{"titleQuery": {"value": "Ref1", "confidence": 0.8}}],
+          "updates": [
+            {
+              "refIndex": 1,
+              "set": {
+                "deadline": {"value": "2026-08-02T10:00:00+07:00", "confidence": 0.9},
+                "priority": {"value": 2.5, "confidence": 0.8}
+              }
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RawParseEnvelope.self, from: json)
+        let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: "test transcript")
+
+        let update = try XCTUnwrap(capture.updates.first)
+        XCTAssertNil(update.priority, "a fractional priority is a schema violation, never rounded")
+        XCTAssertEqual(update.deadline?.value, ParsedTaskValidation.parseISO8601("2026-08-02T10:00:00+07:00"))
+    }
+
+    /// (e) A `taskDone` condition carrying `offsetMinutes` keeps its normal `.taskDone` condition
+    /// (the existing dependency-blocking UI keeps working) AND gets a human-readable notes line —
+    /// `ParsedCondition` (`Sources/Model/NLParser.swift`) has no structural field for the offset
+    /// this round, so this is how the app avoids silently dropping what the user said about it.
+    func testTaskDoneConditionWithOffsetMinutesKeepsConditionAndAddsNotesLine() throws {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            conditions: [
+                RawConfidence(
+                    value: RawParsedCondition(
+                        kind: "taskDone",
+                        referenceTitle: "Old task",
+                        date: nil,
+                        description: nil,
+                        refIndex: nil,
+                        offsetMinutes: 120,
+                        offsetKind: nil
+                    ),
+                    confidence: 0.8
+                )
+            ]
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertEqual(task.conditions.count, 1)
+        guard case .taskDone(let titleQuery, _) = try XCTUnwrap(task.conditions.first) else {
+            return XCTFail("expected .taskDone to survive alongside its offset note")
+        }
+        XCTAssertEqual(titleQuery, "Old task")
+        XCTAssertEqual(task.notes, "Sau khi xong 'Old task' + 2h")
+    }
+
+    /// `offsetKind: "atLeast"` renders the "ít nhất" (at-least) wording instead of the exact "+"
+    /// wording — the two must never read the same, since they mean different things to the user.
+    func testTaskDoneConditionWithAtLeastOffsetKindUsesAtLeastWording() throws {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            conditions: [
+                RawConfidence(
+                    value: RawParsedCondition(
+                        kind: "taskDone",
+                        referenceTitle: "Old task",
+                        date: nil,
+                        description: nil,
+                        refIndex: nil,
+                        offsetMinutes: 90,
+                        offsetKind: "atLeast"
+                    ),
+                    confidence: 0.8
+                )
+            ]
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertEqual(task.notes, "Sau khi xong 'Old task' ít nhất 1h30p")
+    }
+
+    /// (f) A `taskStart` condition has NO structural representation this round at all (unlike
+    /// `taskDone`, which at least keeps its condition even with an offset) — it must produce ZERO
+    /// conditions and a notes line naming what was asked for and that it isn't supported yet, never
+    /// a best-effort `.taskDone` substitute (which would silently misrepresent what the user said).
+    func testTaskStartConditionProducesNoConditionButAddsNotesLine() throws {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            conditions: [
+                RawConfidence(
+                    value: RawParsedCondition(
+                        kind: "taskStart",
+                        referenceTitle: "Other task",
+                        date: nil,
+                        description: nil,
+                        refIndex: nil,
+                        offsetMinutes: 120,
+                        offsetKind: "atLeast"
+                    ),
+                    confidence: 0.8
+                )
+            ]
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertTrue(task.conditions.isEmpty, "taskStart never becomes a condition this round")
+        XCTAssertEqual(task.notes, "Trước khi làm 'Other task' ít nhất 2h — chưa hỗ trợ tự nhắc")
+    }
+
+    /// A `taskStart` condition with NO `offsetMinutes` at all still produces a notes line (never
+    /// silently dropped for lack of a number) — just without a duration clause.
+    func testTaskStartConditionWithoutOffsetStillAddsNotesLine() throws {
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            conditions: [
+                RawConfidence(
+                    value: RawParsedCondition(
+                        kind: "taskStart",
+                        referenceTitle: "Other task",
+                        date: nil,
+                        description: nil,
+                        refIndex: nil,
+                        offsetMinutes: nil,
+                        offsetKind: nil
+                    ),
+                    confidence: 0.8
+                )
+            ]
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        XCTAssertTrue(task.conditions.isEmpty)
+        XCTAssertEqual(task.notes, "Trước khi làm 'Other task' — chưa hỗ trợ tự nhắc")
+    }
+
+    /// (g) `reminderOverride.anchor` (wire-first, client scope decision (c): decode-tolerate-and-
+    /// ignore this round) must never fail the decode of the override it rides along on — every
+    /// other field on that SAME override survives exactly as if `anchor` had never been sent. This
+    /// exercises the pre-existing `RawParsedReminderOverride` (untouched by this task) directly,
+    /// proving the "lenient decoder skips unknown keys" claim empirically rather than by inspection.
+    func testReminderOverrideDecodeToleratesUnknownAnchorField() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "reminderOverride": {
+            "value": {
+              "offsetsMinutes": [-60],
+              "repeatEveryMinutes": 30,
+              "anchor": {"refIndex": 1, "event": "done"}
+            },
+            "confidence": 0.8
+          }
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test transcript")
+
+        let policy = try XCTUnwrap(task.reminderOverride?.value)
+        XCTAssertEqual(policy.offsets, [-3600], "an unrecognized `anchor` key must not fail decode or drop its sibling fields")
+        XCTAssertEqual(policy.repeatEvery, 30 * 60)
+    }
+
+    /// Same tolerance, but for `set.reminderOverride` on an UPDATE (`RawUpdateSet` doesn't even
+    /// declare a `reminderOverride` stored property at all — see that struct's own doc comment) —
+    /// an `anchor`-bearing `set.reminderOverride` must not fail the update's decode, and every OTHER
+    /// field in that same `set` must still validate normally.
+    func testUpdateSetReminderOverrideWithAnchorDoesNotFailTheUpdateDecode() throws {
+        let json = """
+        {
+          "tasks": [{"title": {"value": "T1", "confidence": 0.9}}],
+          "taskRefs": [{"titleQuery": {"value": "Ref1", "confidence": 0.8}}],
+          "updates": [
+            {
+              "refIndex": 1,
+              "set": {
+                "priority": {"value": 2, "confidence": 0.8},
+                "reminderOverride": {
+                  "value": {"offsetsMinutes": [-900], "anchor": {"refIndex": 1, "event": "start"}},
+                  "confidence": 0.7
+                }
+              }
+            }
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RawParseEnvelope.self, from: json)
+        let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: "test transcript")
+
+        let update = try XCTUnwrap(capture.updates.first)
+        XCTAssertEqual(
+            update.priority?.value, 2,
+            "an unrecognized set.reminderOverride (anchor or not) must not fail the whole update"
+        )
+    }
+
+    /// (h) See this section's own header comment above for why a real HTTP request body can't be
+    /// asserted on in this file — this pins the one thing that CAN be: the capability literal
+    /// itself never silently drifts from what the server's own handshake expects.
+    func testTaskRefsCapabilityWireLiteralIsStable() {
+        XCTAssertEqual(CloudParser.taskRefsCapability, "task_refs_v1")
+    }
 }

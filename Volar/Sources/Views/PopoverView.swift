@@ -315,6 +315,12 @@ struct PopoverView: View {
                     }
                     taskDraftCard(draft, isPrimary: offset == 0)
                 }
+                // task_refs_v1 (2026-08-02): confirm-card updates to EXISTING tasks, one compact
+                // card per `ConfirmUpdateDraft`, below every new-task draft — same hairline
+                // separator this `ForEach` already uses between drafts. Renders nothing at all when
+                // `appState.confirmUpdateDrafts` is empty (the common case, and every case before
+                // this feature existed), so the no-reference path stays pixel-identical.
+                confirmUpdateSection()
             }
             .padding(12)
         }
@@ -387,6 +393,11 @@ struct PopoverView: View {
             NotesEditorControl(draft: draft, appState: appState)
             attributeChips(draft)
             conditionRows(draft)
+            // task_refs_v1 (2026-08-02): extra `.taskDone`/`.afterDate` conditions merged onto THIS
+            // draft by a sibling draft's update reference (`ConfirmDraft.refConditions`) — a
+            // SEPARATE section from `conditionRows` above (different array, own index space), but
+            // same visual language, right below it.
+            refConditionRows(draft)
             duplicateHintRow(draft)
             overdueAdvisoryRow(draft)
             conflictAdvisoryRow(draft)
@@ -833,6 +844,251 @@ struct PopoverView: View {
                 VolarIcon(.x, size: 9, color: VolarColor.textMut)
             }
             .buttonStyle(.plain)
+        }
+    }
+
+    // MARK: - task_refs_v1 (2026-08-02): "update an existing task by voice"
+    //
+    // Two surfaces here: (1) `refConditionRows`, rendered on a NEW-task `ConfirmDraft`'s own card
+    // right after `conditionRows` — the visible/dismissible trace of a sibling draft's update
+    // reference having merged INTO this draft (`AppState.mergeUpdateIntoSibling`); (2)
+    // `confirmUpdateSection`/`confirmUpdateCard` and everything below it — one compact card per
+    // `ConfirmUpdateDraft`, rendered by `parsedCard()` below every new-task draft. Localization/
+    // typography matches this file's existing convention exactly: inline English strings (checked
+    // against every other chip label in this file — `dependencyPicker`'s "Skip — no dependency",
+    // `duplicateHintRow`'s "Add new", etc. — none of this popover's copy is Vietnamese-first or a
+    // localized key), same `Chip`/`Menu`-dashed-pill components, no new visual language.
+
+    /// `ConfirmDraft.refConditions` — same visual shape as `conditionRow`'s `.taskDone`/`.afterDate`
+    /// branches (a `Chip`, "After: <title>" / "After <date>"), just reading a different array/
+    /// dismiss-set pair (`refConditions`/`dismissedRefConditions`, never `task.conditions`/
+    /// `dismissedConditions` — see that field's own doc comment for why the two can't share an
+    /// index space).
+    @ViewBuilder
+    private func refConditionRows(_ draft: ConfirmDraft) -> some View {
+        let visible = draft.refConditions.indices.filter { !draft.dismissedRefConditions.contains($0) }
+        if !visible.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(visible, id: \.self) { index in
+                    HStack(spacing: 6) {
+                        Circle().fill(VolarColor.instrumentDim).frame(width: 5, height: 5)
+                        switch draft.refConditions[index] {
+                        case .taskDone(let targetDraftID):
+                            let title = appState.confirmDrafts.first { $0.id == targetDraftID }?.effectiveTitle ?? "task"
+                            Chip(
+                                label: "After: \(title)",
+                                uncertain: false, accepted: true, onAccept: nil,
+                                onDismiss: { appState.dismissRefCondition(at: index, forDraft: draft.id) }
+                            )
+                        case .afterDate(let date):
+                            Chip(
+                                label: "After \(date.formatted(.dateTime.month().day()))",
+                                uncertain: false, accepted: true, mono: true, onAccept: nil,
+                                onDismiss: { appState.dismissRefCondition(at: index, forDraft: draft.id) }
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// `parsedCard()`'s task_refs_v1 addition — one card per NON-dismissed `ConfirmUpdateDraft`,
+    /// each preceded by the SAME hairline separator `parsedCard()`'s own `ForEach` uses between
+    /// new-task drafts, so the whole scroll region reads as one continuous list.
+    @ViewBuilder
+    private func confirmUpdateSection() -> some View {
+        let visible = appState.confirmUpdateDrafts.filter { !$0.cardDismissed }
+        ForEach(visible) { draft in
+            Rectangle().fill(VolarColor.border).frame(height: 0.5)
+            confirmUpdateCard(draft)
+        }
+    }
+
+    /// One `ConfirmUpdateDraft` card: header names the resolved target (`.existing`) or shows the
+    /// picker (`.unresolved`/the unreachable-in-practice `.sibling` fallback — see
+    /// `ConfirmUpdateDraft`'s own doc comment); body (field chips + `addConditions` rows) only
+    /// renders once there IS a resolved target to show them against.
+    private func confirmUpdateCard(_ draft: ConfirmUpdateDraft) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 8) {
+                updateHeaderContent(draft)
+                Spacer(minLength: 4)
+                // The `.unresolved` picker already offers "Skip" inline (mirroring
+                // `dependencyPicker`'s own "Skip — no dependency" row) — a second, redundant
+                // dismiss "x" next to it would be visual noise for no extra capability, so this
+                // only appears once there's a resolved header to sit beside.
+                if case .existing = draft.resolution {
+                    Button {
+                        appState.dismissConfirmUpdateDraft(draft.id)
+                    } label: {
+                        VolarIcon(.x, size: 9, color: VolarColor.textMut)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            if case .existing = draft.resolution {
+                updateFieldChips(draft)
+                updateConditionRows(draft)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func updateHeaderContent(_ draft: ConfirmUpdateDraft) -> some View {
+        switch draft.resolution {
+        case .existing(let id):
+            let title = appState.tasks.first { $0.id == id }?.title ?? draft.sourceTitleQuery
+            Text("Update: \u{201C}\(title)\u{201D}")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(VolarColor.textPri)
+                .lineLimit(2)
+        case .unresolved, .sibling:
+            // `.sibling` is unreachable here in practice (`AppState.buildConfirmUpdateDrafts` never
+            // constructs a `ConfirmUpdateDraft` for it — see that struct's own doc comment); falls
+            // back to the SAME picker as `.unresolved` rather than rendering nothing, in case that
+            // invariant is ever violated.
+            updateTargetPicker(draft)
+        }
+    }
+
+    /// The `.unresolved` picker — adapted from `dependencyPicker`'s exact `Menu`+dashed-pill
+    /// pattern (native `Menu`, not `Chip`, for the same "a `Button` nested in a `Menu`'s label
+    /// doesn't reliably get its own tap target" reason that method's own doc comment gives).
+    /// Deliberately offers EXISTING open tasks only, not this batch's other new-task drafts the way
+    /// `dependencyPicker`'s sibling group does — a sibling match already had its chance in
+    /// `AppState.resolveTaskRefs`'s ladder (step 2) before this ever renders, so re-offering that
+    /// same group here would just be a second, redundant shot at a match the ladder already tried
+    /// and failed at the same 0.7 bar.
+    private func updateTargetPicker(_ draft: ConfirmUpdateDraft) -> some View {
+        Menu {
+            Button("Skip") {
+                appState.resolveUpdateTarget(draft.id, to: nil)
+            }
+            if !appState.openTasks.isEmpty {
+                Divider()
+                ForEach(appState.openTasks.prefix(100)) { task in
+                    Button(task.title) {
+                        appState.resolveUpdateTarget(draft.id, to: task.id)
+                    }
+                }
+            }
+        } label: {
+            HStack(spacing: 5) {
+                Text("?").font(.system(size: 10, weight: .bold))
+                Text("Update: \u{201C}\(draft.sourceTitleQuery)\u{201D}")
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            .font(.system(size: 11.5, weight: .medium))
+            .foregroundStyle(VolarColor.instrument.opacity(0.85))
+            .padding(.horizontal, 9)
+            .frame(height: 22)
+            .overlay(
+                Capsule().strokeBorder(VolarColor.instrumentDim, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+            )
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+    }
+
+    /// One chip per PRESENT, non-dismissed field on an `.existing`-target `ConfirmUpdateDraft` —
+    /// "old → new" for deadline/startTime (current task value, looked up live off `appState.tasks`,
+    /// -> the proposed value), plain labels for priority/notesAppend. Same `Chip` component/accept-
+    /// dismiss wiring `attributeChips` already uses for a brand-new task's own chips — every field
+    /// here goes through `AppState.resolvedUpdateValue`'s identical uncertain-accept gate (via
+    /// `dismissed`/`accepted`), so a `?`-prefixed dashed chip behaves exactly the same way here as
+    /// it does on a new-task draft.
+    @ViewBuilder
+    private func updateFieldChips(_ draft: ConfirmUpdateDraft) -> some View {
+        if case .existing(let existingID) = draft.resolution {
+            let existing = appState.tasks.first { $0.id == existingID }
+            FlowLayout(spacing: 6) {
+                if let deadline = draft.deadline, !draft.dismissed.contains(.deadline) {
+                    Chip(
+                        label: Self.updateOldToNewLabel(old: existing?.deadline, new: deadline.value),
+                        uncertain: deadline.isUncertain,
+                        accepted: draft.accepted.contains(.deadline),
+                        mono: true,
+                        onAccept: { appState.acceptUpdateField(.deadline, forDraft: draft.id) },
+                        onDismiss: { appState.dismissUpdateField(.deadline, forDraft: draft.id) }
+                    )
+                }
+                if let startTime = draft.startTime, !draft.dismissed.contains(.startTime) {
+                    Chip(
+                        label: Self.updateOldToNewLabel(old: existing?.startTime, new: startTime.value),
+                        uncertain: startTime.isUncertain,
+                        accepted: draft.accepted.contains(.startTime),
+                        mono: true,
+                        onAccept: { appState.acceptUpdateField(.startTime, forDraft: draft.id) },
+                        onDismiss: { appState.dismissUpdateField(.startTime, forDraft: draft.id) }
+                    )
+                }
+                if let priority = draft.priority, !draft.dismissed.contains(.priority) {
+                    Chip(
+                        label: Self.priorityLabel(priority.value),
+                        uncertain: priority.isUncertain,
+                        accepted: draft.accepted.contains(.priority),
+                        onAccept: { appState.acceptUpdateField(.priority, forDraft: draft.id) },
+                        onDismiss: { appState.dismissUpdateField(.priority, forDraft: draft.id) }
+                    )
+                }
+                if let notes = draft.notesAppend, !draft.dismissed.contains(.notesAppend) {
+                    Chip(
+                        label: "+ note: \(notes.value)",
+                        uncertain: notes.isUncertain,
+                        accepted: draft.accepted.contains(.notesAppend),
+                        onAccept: { appState.acceptUpdateField(.notesAppend, forDraft: draft.id) },
+                        onDismiss: { appState.dismissUpdateField(.notesAppend, forDraft: draft.id) }
+                    )
+                }
+            }
+        }
+    }
+
+    /// "current task deadline → proposed" (task brief) — `old == nil` (the existing task has no
+    /// deadline/startTime yet) just shows the proposed value alone, same "no dash arrow to nothing"
+    /// convention `DeadlineControl`'s own "Add time" state uses elsewhere in this file.
+    private static func updateOldToNewLabel(old: Date?, new: Date) -> String {
+        let newText = new.formatted(.dateTime.month().day().hour().minute())
+        guard let old else { return newText }
+        let oldText = old.formatted(.dateTime.month().day().hour().minute())
+        return "\(oldText) \u{2192} \(newText)"
+    }
+
+    /// `ConfirmUpdateDraft.addConditions`, same visual shape as `conditionRow`'s `.taskDone`/
+    /// `.afterDate` branches (and `refConditionRows` above) — "After: <title>" for a
+    /// `.taskDoneNewTask` reference (resolved against `appState.confirmDrafts` by its 1-based
+    /// index, same convention `AppState.confirmSave`'s own resolution uses), "After <date>" for
+    /// `.afterDate`.
+    @ViewBuilder
+    private func updateConditionRows(_ draft: ConfirmUpdateDraft) -> some View {
+        let visible = draft.addConditions.indices.filter { !draft.dismissedAddConditions.contains($0) }
+        if !visible.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(visible, id: \.self) { index in
+                    HStack(spacing: 6) {
+                        Circle().fill(VolarColor.instrumentDim).frame(width: 5, height: 5)
+                        switch draft.addConditions[index] {
+                        case .taskDoneNewTask(let refIndex):
+                            let title = appState.confirmDrafts.indices.contains(refIndex - 1)
+                                ? appState.confirmDrafts[refIndex - 1].effectiveTitle
+                                : "task \(refIndex)"
+                            Chip(
+                                label: "After: \(title)",
+                                uncertain: false, accepted: true, onAccept: nil,
+                                onDismiss: { appState.dismissUpdateAddCondition(at: index, forDraft: draft.id) }
+                            )
+                        case .afterDate(let date):
+                            Chip(
+                                label: "After \(date.formatted(.dateTime.month().day()))",
+                                uncertain: false, accepted: true, mono: true, onAccept: nil,
+                                onDismiss: { appState.dismissUpdateAddCondition(at: index, forDraft: draft.id) }
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 

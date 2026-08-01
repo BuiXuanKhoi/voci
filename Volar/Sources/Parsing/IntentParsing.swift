@@ -212,6 +212,83 @@ final class IntentRouter: IntentParser {
         return [Self.titleOnlyTask(transcript)]
     }
 
+    /// task_refs_v1 (anh Khôi, 2026-08-02 task-refs design): full-`ParsedCapture` sibling of
+    /// `parse` above — same FM -> Cloud -> title-only floor waterfall, same dependency-phrasing
+    /// detection, same 10-task cap, same `applyStartTimeDerivation` pass, but also carries
+    /// `taskRefs`/`updates` through from the Cloud tier instead of discarding them. Deliberately
+    /// NOT part of the frozen `IntentParser` protocol — mirrors `resolveCompletion`/`stuckDread`/
+    /// `stuckNextAction` above (same rationale, restated here: a new required protocol method would
+    /// force `HeuristicNLParser`, `Sources/Model/NLParser.swift`, off-limits this round, to grow a
+    /// case it has nothing honest to answer `taskRefs`/`updates` with).
+    ///
+    /// `AppState`'s one real call site is expected to migrate from `parse` to this method (per this
+    /// task's own instruction to the sibling agent editing `AppState.swift`); `parse` itself is left
+    /// completely unchanged and fully working, both for `IntentParser` protocol conformance and for
+    /// any other caller.
+    ///
+    /// FM and the title-only floor have no notion of task references at all — this method wraps
+    /// their plain `[ParsedTask]` result in `ParsedCapture(tasks:, taskRefs: [], updates: [])`
+    /// rather than attempting to invent refs/updates for a tier that never extracted any
+    /// (constitution II: never fabricate). Only the Cloud tier, and only when the server recognizes
+    /// `client_caps: ["task_refs_v1"]`, can ever populate a non-empty `taskRefs`/`updates`.
+    func parseCapture(_ transcript: String, now: Date, openTaskTitles: [String]) async -> ParsedCapture {
+        lastCloudQuotaNote = false
+        let trimmed = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // Same `.empty` semantics as `parse` above — no transcript to make a title (or a
+            // capture) out of at all.
+            lastRoute = .empty
+            return ParsedCapture(tasks: [], taskRefs: [], updates: [])
+        }
+
+        let titles = Self.containsDependencyPhrasing(transcript)
+            ? Array(openTaskTitles.prefix(100))
+            : []
+        let defaultDurationMinutes = Self.currentDefaultDurationMinutes()
+
+        if let fm {
+            let result = await fm.parse(transcript, now: now, openTaskTitles: titles)
+            if !result.isEmpty {
+                lastRoute = .foundationModel
+                let derived = Self.applyStartTimeDerivation(Self.cap(result), defaultMinutes: defaultDurationMinutes)
+                return ParsedCapture(tasks: derived, taskRefs: [], updates: [])
+            }
+        }
+
+        if let cloud, let cloudGate, await cloudGate.isOptedIn(), await cloudGate.isOnline() {
+            switch await cloud.parseCaptureDetailed(transcript, now: now, openTaskTitles: titles) {
+            case .capture(let capture) where !capture.tasks.isEmpty || !capture.updates.isEmpty:
+                // A pure-update utterance ("task kia phải xong hôm nay", no new task mentioned at
+                // all) legitimately produces an EMPTY `tasks[]` alongside a non-empty `updates[]` —
+                // that is real, actionable content (per the server's own `TaskUpdateOut` doc
+                // comment), so this branch must trigger on EITHER `tasks` or `updates` being
+                // non-empty, never `tasks` alone the way `parse`'s analogous check does.
+                lastRoute = .cloud
+                let derivedTasks = Self.applyStartTimeDerivation(
+                    Self.cap(capture.tasks), defaultMinutes: defaultDurationMinutes
+                )
+                // `taskRefs`/`updates` are already capped/validated inside
+                // `ParsedTaskValidation.validateCapture` — no further truncation needed here,
+                // unlike `tasks`, which always goes through the shared `Self.cap`/
+                // `applyStartTimeDerivation` pass every tier uses.
+                return ParsedCapture(tasks: derivedTasks, taskRefs: capture.taskRefs, updates: capture.updates)
+            case .capture:
+                // Envelope decoded fine but genuinely carries nothing (no tasks, no updates,
+                // possibly a `taskRefs` entry with nothing actionable attached to it) — same "small
+                // talk" case `parse` documents for its own `.tasks` empty-array branch; falls
+                // through to the title-only floor exactly the same way.
+                break
+            case .quotaExceeded:
+                lastCloudQuotaNote = true
+            case .unavailable:
+                break
+            }
+        }
+
+        lastRoute = .titleOnly
+        return ParsedCapture(tasks: [Self.titleOnlyTask(transcript)], taskRefs: [], updates: [])
+    }
+
     /// Frozen `IntentParser` witness. NOTE (anh Khôi, 2026-07-29 "richer context" addendum): the
     /// one real app call site (`AppState.fetchBreakdown`) no longer calls this exact method — it
     /// calls `breakdownWithContext` below instead, so it can also forward `sourceTranscript`/
@@ -584,12 +661,38 @@ struct RawConfidence<T: Sendable>: Sendable {
 extension RawConfidence: Decodable where T: Decodable {}
 
 struct RawParsedCondition: Sendable {
-    /// "taskDone" | "afterDate" | "external"
+    /// "taskDone" | "afterDate" | "external" | "taskStart" (`"taskStart"` added task_refs_v1, anh
+    /// Khôi 2026-08-02 task-refs design — mirrors `ParsedConditionOut.kind` in `_shared/schema.ts`;
+    /// envelope-mode-only, never present in a bare-array response).
     var kind: String
     var referenceTitle: String?
     /// ISO8601 string.
     var date: String?
     var description: String?
+    /// task_refs_v1: 1-based into the envelope's `taskRefs[]`, a precise pointer complementing the
+    /// fuzzy `referenceTitle` above. NOT consumed this round — `ParsedCondition`
+    /// (`Sources/Model/NLParser.swift`) is off-limits, so there is no structural field to carry it
+    /// into; decoded here purely so its presence never causes a decode failure, then left unused.
+    /// `referenceTitle` alone already carries everything the v1 `.taskDone` construction / notes-
+    /// line fallback below need. Defaulted (`= nil`), NOT bare `Int?`, so the pre-existing
+    /// `RawParsedCondition(kind:referenceTitle:date:description:)` call site in
+    /// `FoundationModelParser.swift` (off-limits to this change) keeps compiling untouched — same
+    /// "bare `Optional` alone doesn't earn a synthesized-memberwise-init default in this codebase"
+    /// reasoning `RawParsedTask`'s own hand-rolled `init` right below exists to work around.
+    /// `Double`, NOT `Int` (Opus review, 2026-08-02) — same 2026-08-01 rule `RawParsedRecurrence.
+    /// everyDays` documents at length: `JSONDecoder` THROWS a non-integer JSON number into an
+    /// `Int?` (it does not `nil` out), and one thrown field would kill the whole envelope decode.
+    var refIndex: Double? = nil
+    /// task_refs_v1: minutes offset relative to the referenced task's completion (`kind ==
+    /// "taskDone"`) or start (`kind == "taskStart"`). v1 scope decision (anh Khôi, 2026-08-02):
+    /// `ParsedCondition` gets no new enum case/associated value for this round, so
+    /// `ParsedTaskValidation.validate` converts a present `offsetMinutes` into a human-visible notes
+    /// line instead of silently dropping it — see `ParsedTaskValidation.taskDoneOffsetNoteLine`'s
+    /// doc comment for the full rationale. Defaulted for the same reason as `refIndex` above.
+    var offsetMinutes: Double? = nil
+    /// "exact" | "atLeast" — whether `offsetMinutes` is a precise delay or a floor/"at least".
+    /// Defaulted for the same reason as `refIndex` above.
+    var offsetKind: String? = nil
 }
 extension RawParsedCondition: Decodable {}
 
@@ -702,6 +805,95 @@ struct RawParsedTask: Sendable {
 }
 extension RawParsedTask: Decodable {}
 
+// MARK: - task_refs_v1 wire shapes (anh Khôi, 2026-08-02 task-refs design) — envelope-only
+//
+// The server sends these ONLY inside the `RawParseEnvelope` shape below (never mixed into the
+// legacy bare `[RawParsedTask]` array) — mirrors `TaskRefOut`/`TaskUpdateSetOut`/
+// `TaskUpdateConditionOut`/`TaskUpdateOut` in `supabase/functions/_shared/schema.ts` field-for-field.
+// Same untrusted-until-validated posture as `RawParsedTask` above: nothing here is used directly by
+// app code — `ParsedTaskValidation.validateCapture` is the only consumer.
+
+/// Mirrors `TaskRefOut`.
+struct RawParsedTaskRef: Sendable {
+    var titleQuery: RawConfidence<String>
+    /// `nil`/absent means "no hint either way" — validated down to a plain, non-optional `false`
+    /// in `ParsedTaskRef.assumeExisting` (see that field's own doc comment). Defaulted (`= nil`) so
+    /// this struct's synthesized memberwise init keeps it omittable at any construction site (this
+    /// file's own tests included) — a bare `Bool?` alone does NOT earn a synthesized default in
+    /// this codebase's observed convention, see `RawParsedTask`'s hand-rolled `init` above.
+    var assumeExisting: Bool? = nil
+}
+extension RawParsedTaskRef: Decodable {}
+
+/// Mirrors `TaskUpdateSetOut`. Every field independently FAIL-OPEN at validation, same as the
+/// matching field on `RawParsedTask` itself. Every field defaulted (`= nil`) for the same
+/// synthesized-memberwise-init-omittability reason `RawParsedTaskRef.assumeExisting` documents.
+struct RawUpdateSet: Sendable {
+    var deadline: RawConfidence<String>? = nil
+    var startTime: RawConfidence<String>? = nil
+    var notesAppend: RawConfidence<String>? = nil
+    /// `Double`, not `Int` — same 2026-08-01 decode-safety precedent as `RawParsedTask.priority`:
+    /// narrowed via `Int(exactly:)` at validation, so one fractional wire number can never throw
+    /// mid-decode and take the whole envelope (every task, ref, and update in it) down with it.
+    var priority: RawConfidence<Double>? = nil
+    // `reminderOverride` is DELIBERATELY NOT declared here (anh Khôi, 2026-08-02, client scope
+    // decision (c) — see `ParsedCapture.swift`'s header comment): `TaskUpdateSetOut.reminderOverride`
+    // (with its wire-first `anchor` field) is out of scope for this round's client runtime. Swift's
+    // synthesized `Decodable` ignores JSON keys with no matching stored property, so a
+    // `set.reminderOverride` on the wire (with or without an `anchor`) still decodes successfully —
+    // it is simply dropped, never causing the surrounding update (or the whole envelope) to fail
+    // decode. This is the "lenient decoder that skips unknown keys" the task brief calls for,
+    // achieved for free rather than needing any explicit handling.
+}
+extension RawUpdateSet: Decodable {}
+
+/// Mirrors `TaskUpdateConditionOut` — a NEW dependency an update proposes adding to the REFERENCED
+/// (existing) task. `newTaskIndex` is 1-based into this SAME response's `tasks[]` — a DIFFERENT
+/// index space from `RawParsedTaskUpdate.refIndex` below (which points into `taskRefs[]`); see
+/// `ParsedUpdateCondition`'s own doc comment in `ParsedCapture.swift` for why conflating the two
+/// would be a real bug, not just a naming nit.
+struct RawUpdateCondition: Sendable {
+    /// "taskDone" | "afterDate"
+    var kind: String
+    /// `Double`, NOT `Int` (Opus review, 2026-08-02) — see `RawParsedRecurrence.everyDays`'s
+    /// 2026-08-01 doc comment: a non-integer JSON number THROWS into `Int?`, killing the whole
+    /// envelope decode over one bad field. Narrowed via `Int(exactly:)` in `validateTaskUpdates`.
+    var newTaskIndex: Double? = nil
+    /// ISO8601 string.
+    var date: String? = nil
+}
+extension RawUpdateCondition: Decodable {}
+
+/// Mirrors `TaskUpdateOut`. `refIndex` is FAIL-CLOSED at validation (an update that doesn't point
+/// at a real, in-range ref is dangerous to misapply to the wrong task, so the WHOLE element is
+/// dropped rather than guessed at) — every other field is independently FAIL-OPEN.
+struct RawParsedTaskUpdate: Sendable {
+    /// `Double?`, NOT bare `Int` (Opus review, 2026-08-02), for BOTH halves of the same decode-
+    /// throw rule `RawParsedRecurrence.everyDays` documents: a non-integer number into `Int`
+    /// throws, AND a missing key into a non-optional throws — either would kill the decode of the
+    /// entire `updates` array (and with it the whole envelope, dropping the Cloud tier to
+    /// fallback) over one malformed element. The server fail-closes elements without an integer
+    /// `refIndex` so neither should ever arrive — this is belt-and-suspenders against server/client
+    /// version skew, the exact scenario `client_caps` exists for. Absent/fractional -> the element
+    /// is dropped in `validateTaskUpdates` via `Int(exactly:)`, never the whole response.
+    var refIndex: Double? = nil
+    var set: RawUpdateSet? = nil
+    var addConditions: [RawUpdateCondition]? = nil
+}
+extension RawParsedTaskUpdate: Decodable {}
+
+/// The envelope-shape response a server that recognizes `client_caps: ["task_refs_v1"]` returns
+/// INSTEAD OF the bare `[RawParsedTask]` array `CloudParser.performParse` used to decode
+/// unconditionally. `taskRefs`/`updates` are OPTIONAL on the wire (an envelope-aware server with
+/// nothing to report for either still returns valid JSON that simply omits them) — absent means
+/// "none," never a decode failure.
+struct RawParseEnvelope: Sendable {
+    var tasks: [RawParsedTask]
+    var taskRefs: [RawParsedTaskRef]? = nil
+    var updates: [RawParsedTaskUpdate]? = nil
+}
+extension RawParseEnvelope: Decodable {}
+
 /// Converts untrusted `RawParsedTask` values into validated `ParsedTask`s (constitution II: "Raw
 /// LLM output MUST NEVER be executed or persisted. It MUST be decoded into the validated
 /// `ParsedTask`... Any decode/schema violation MUST fall back to a title-only task... A parsing
@@ -767,7 +959,11 @@ enum ParsedTaskValidation {
             ? sourceTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
             : trimmedTitle
 
-        let notes: String? = raw.notes.flatMap { c in
+        // Renamed from `notes` (was computed here directly) to `baseNotes`: task_refs_v1's
+        // taskDone-offset/taskStart notes-line handling (see the `conditions` computation below)
+        // needs to APPEND to whatever the model already put in `notes`, so the final `notes` value
+        // can only be known once `conditions` has run. See `Self.combinedNotes` below.
+        let baseNotes: String? = raw.notes.flatMap { c in
             let trimmed = c.value.trimmingCharacters(in: .whitespacesAndNewlines)
             return trimmed.isEmpty ? nil : trimmed
         }
@@ -873,12 +1069,30 @@ enum ParsedTaskValidation {
             return ParsedValue(value: policy, confidence: c.confidence)
         }
 
+        // task_refs_v1 (anh Khôi, 2026-08-02 task-refs design, v1 scope decision): collects the
+        // human-visible notes lines a `taskDone` offset / a `taskStart` condition produces, since
+        // `ParsedCondition` (`Sources/Model/NLParser.swift`, off-limits this round) has no
+        // structural field/case for either — mutated from inside the `compactMap` closure below,
+        // then folded into `notes` right after. See `Self.taskDoneOffsetNoteLine`/
+        // `Self.taskStartNoteLine` for the full "never silently drop what the user said" rationale.
+        var conditionOffsetNotes: [String] = []
         let conditions: [ParsedCondition] = (raw.conditions ?? []).compactMap { c in
             guard validConfidence(c.confidence) else { return nil }
             switch c.value.kind {
             case "taskDone":
                 guard let ref = c.value.referenceTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !ref.isEmpty else { return nil }
+                // An `offsetMinutes` alongside `taskDone` keeps the normal `.taskDone` condition
+                // (the existing dependency-blocking UI keeps working unchanged) AND additionally
+                // gets this notes line — nothing the user said about the offset is lost, it just
+                // isn't structurally enforced yet.
+                if let offsetMinutes = c.value.offsetMinutes, offsetMinutes.isFinite {
+                    conditionOffsetNotes.append(
+                        Self.taskDoneOffsetNoteLine(
+                            title: ref, offsetMinutes: offsetMinutes, atLeast: c.value.offsetKind == "atLeast"
+                        )
+                    )
+                }
                 return .taskDone(titleQuery: ref, confidence: c.confidence)
             case "afterDate":
                 guard let dateString = c.value.date, let date = parseISO8601(dateString) else { return nil }
@@ -887,10 +1101,25 @@ enum ParsedTaskValidation {
                 guard let desc = c.value.description?.trimmingCharacters(in: .whitespacesAndNewlines),
                       !desc.isEmpty else { return nil }
                 return .external(description: desc, confidence: c.confidence)
+            case "taskStart":
+                // v1 scope decision: the client has no structural way to represent "block on
+                // another task STARTING" at all (only `.taskDone`'s "block until it's DONE" exists)
+                // — never silently drop it; surface as a notes line and emit NO condition, matching
+                // the task brief's explicit instruction for this exact case.
+                guard let ref = c.value.referenceTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+                      !ref.isEmpty else { return nil }
+                conditionOffsetNotes.append(
+                    Self.taskStartNoteLine(
+                        title: ref, offsetMinutes: c.value.offsetMinutes, atLeast: c.value.offsetKind == "atLeast"
+                    )
+                )
+                return nil
             default:
                 return nil
             }
         }
+
+        let notes: String? = Self.combinedNotes(base: baseNotes, appendedLines: conditionOffsetNotes)
 
         let kind: TaskKind = {
             guard let kindValue = raw.kind?.value else { return .task }
@@ -922,5 +1151,226 @@ enum ParsedTaskValidation {
             followUpReview: followUpReview,
             sourceTranscript: sourceTranscript
         )
+    }
+
+    // MARK: - task_refs_v1 (anh Khôi, 2026-08-02 task-refs design) — envelope validation
+    //
+    // Everything below turns the untrusted `RawParseEnvelope` (`CloudParser.performParse`'s new
+    // envelope-shape decode branch) into the validated `ParsedCapture` the rest of the app
+    // consumes (`IntentRouter.parseCapture`). Same fail-open/fail-closed vocabulary `validate`
+    // above already establishes:
+    //   - `taskRefs`: per-element FAIL-OPEN on confidence — CLAMPED, not dropped, a deliberate
+    //     exception to this file's usual "drop the bad field" rule (this task's own instruction:
+    //     "clamp confidence to 0...1"); FAIL-CLOSED on an empty `titleQuery` (nothing left to
+    //     search a task store by).
+    //   - `updates`: FAIL-CLOSED per element on `refIndex` (an update that can't be traced to a
+    //     real, already-validated ref is dangerous to misapply to the wrong task, so the WHOLE
+    //     element drops rather than being guessed at — mirrors `TaskUpdateOut.refIndex`'s own doc
+    //     comment server-side); FAIL-OPEN per `set` field (identical rules to the matching field on
+    //     `ParsedTask` itself, right above); FAIL-CLOSED per `addConditions` element (an element
+    //     that doesn't fully validate carries no information).
+    //   - Nothing here ever mutates/auto-applies to an existing task — `ParsedTaskUpdate` is inert,
+    //     validated data the confirm-card owner surfaces for explicit user confirmation (client
+    //     scope decision (b), `ParsedCapture.swift`'s header comment); this file's job stops at
+    //     "does this shape validate," never "apply this to a stored task."
+
+    /// Mirrors the server's own `MAX_TASK_REFS` (`_shared/schema.ts`).
+    private static let maxTaskRefs = 10
+    /// Mirrors the server's own `MAX_UPDATES` (`_shared/schema.ts`).
+    private static let maxUpdates = 10
+    /// Mirrors the server's own `MAX_NOTES_CHARS` (`_shared/schema.ts`) — reused here for
+    /// `notesAppend` per this task's own instruction ("length-capped at the same cap as notes"),
+    /// even though the sibling `notes` field above (`raw.notes.flatMap`) has never enforced a
+    /// client-side length cap of its own (it has always relied on the server's own `MAX_NOTES_CHARS`
+    /// check) — this is that same number's first real client-side enforcement.
+    private static let maxNotesAppendChars = 1000
+
+    /// Confidence is CLAMPED here, not dropped-on-violation like `validConfidence` everywhere else
+    /// in this file — a deliberate exception per this task's own instruction ("clamp confidence to
+    /// 0...1"). Non-finite (NaN/±inf) clamps to 0 (treated as "no real signal" rather than an
+    /// arbitrary in-range guess like 0.5 would be).
+    private static func clampedConfidence(_ value: Double) -> Double {
+        guard value.isFinite else { return 0 }
+        return min(max(value, 0), 1)
+    }
+
+    /// v1 scope decision (anh Khôi, 2026-08-02 task-refs design): `ParsedCondition`
+    /// (`Sources/Model/NLParser.swift`) is OFF-LIMITS this round — no new enum case/associated
+    /// value for `offsetMinutes`/`offsetKind`/`taskStart`. Rather than silently dropping what the
+    /// user actually said (constitution: never do that), a `taskDone` condition carrying an
+    /// `offsetMinutes` keeps its normal `.taskDone` condition (the existing dependency-blocking UI
+    /// keeps working) AND gets this human-readable line appended to the task's notes.
+    ///
+    /// // UNVERIFIED backlog: proper support needs a real structural field (a new `ParsedCondition`
+    /// associated value for the offset, or a genuinely new condition kind for `taskStart` with its
+    /// own scheduling behavior) — out of scope for `NLParser.swift`'s frozen surface this round;
+    /// this is a Windows-authored, compile-by-inspection-only string formatter, not risky logic, but
+    /// flagged because the FEATURE it stands in for (real offset-aware reminders/blocking) is not
+    /// yet built — see `backlog.md`.
+    private static func taskDoneOffsetNoteLine(title: String, offsetMinutes: Double, atLeast: Bool) -> String {
+        let duration = Self.formattedOffsetDuration(offsetMinutes)
+        return atLeast
+            ? "Sau khi xong '\(title)' ít nhất \(duration)"
+            : "Sau khi xong '\(title)' + \(duration)"
+    }
+
+    /// Sibling of `taskDoneOffsetNoteLine` for the `taskStart` condition kind, which the client
+    /// cannot represent AT ALL structurally (not even without the offset — there is no
+    /// `ParsedCondition` case for "block on another task STARTING", only `.taskDone`'s "block until
+    /// it's DONE") — this ALWAYS becomes a notes line, and the caller always emits zero conditions
+    /// for it, never a best-effort `.taskDone` substitute (that would silently change the user's
+    /// stated meaning, which is worse than clearly saying "not supported yet").
+    ///
+    /// // UNVERIFIED backlog: same "needs a real structural field" note as `taskDoneOffsetNoteLine`
+    /// above — see `backlog.md`.
+    private static func taskStartNoteLine(title: String, offsetMinutes: Double?, atLeast: Bool) -> String {
+        guard let offsetMinutes, offsetMinutes.isFinite else {
+            return "Trước khi làm '\(title)' — chưa hỗ trợ tự nhắc"
+        }
+        let duration = Self.formattedOffsetDuration(offsetMinutes)
+        let lead = atLeast ? "ít nhất \(duration)" : duration
+        return "Trước khi làm '\(title)' \(lead) — chưa hỗ trợ tự nhắc"
+    }
+
+    /// Shared by both note-line builders above. Sign-agnostic (`abs`) — `taskDone` offsets are
+    /// always positive on the wire, `taskStart` offsets may be negative ("before the reference's
+    /// start"), and the sign is already expressed in prose (`taskStartNoteLine`'s "Trước khi làm"),
+    /// so the number itself is always rendered as a plain, non-negative duration. Whole hours render
+    /// as `"2h"`; a non-multiple-of-60 duration over an hour renders as `"1h30p"`; anything under an
+    /// hour renders as `"<n> phút"`.
+    private static func formattedOffsetDuration(_ minutesValue: Double) -> String {
+        let minutes = Int(abs(minutesValue).rounded())
+        guard minutes > 0 else { return "0 phút" }
+        let hours = minutes / 60
+        let remainder = minutes % 60
+        if remainder == 0 { return "\(hours)h" }
+        if hours > 0 { return "\(hours)h\(remainder)p" }
+        return "\(minutes) phút"
+    }
+
+    /// Appends `appendedLines` (the offset/`taskStart` notes lines collected while validating
+    /// `conditions` above) to whatever the model already put in `notes` — one blank-line-free join,
+    /// never silently overwriting the model's own notes text.
+    private static func combinedNotes(base: String?, appendedLines: [String]) -> String? {
+        guard !appendedLines.isEmpty else { return base }
+        let appended = appendedLines.joined(separator: "\n")
+        if let base, !base.isEmpty { return base + "\n" + appended }
+        return appended
+    }
+
+    /// Mirrors `validate`'s per-attribute fallback philosophy for `TaskRefOut` -> `ParsedTaskRef`:
+    /// trims `titleQuery`, drops an element whose title is empty after trimming (nothing left to
+    /// search a task store by), clamps (never drops) confidence, and caps the result at
+    /// `maxTaskRefs` — defense-in-depth re-check of the server's own `MAX_TASK_REFS`, same
+    /// "never trust a remote response blindly" posture every other cap in this file already follows.
+    static func validateTaskRefs(_ raws: [RawParsedTaskRef]) -> [ParsedTaskRef] {
+        let mapped: [ParsedTaskRef] = raws.compactMap { raw in
+            let trimmed = raw.titleQuery.value.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { return nil }
+            return ParsedTaskRef(
+                titleQuery: trimmed,
+                confidence: Self.clampedConfidence(raw.titleQuery.confidence),
+                assumeExisting: raw.assumeExisting ?? false
+            )
+        }
+        return Array(mapped.prefix(Self.maxTaskRefs))
+    }
+
+    /// Converts `RawParsedTaskUpdate` elements into validated `ParsedTaskUpdate`s.
+    /// - Parameters:
+    ///   - refCount: the ALREADY-VALIDATED `taskRefs.count` (post-trim/drop/cap) — every
+    ///     `refIndex` is checked against THIS number, matching the server's own "`refIndex` ...
+    ///     validated AFTER `taskRefs` truncation" rule (`TaskUpdateOut.refIndex`'s doc comment,
+    ///     `_shared/schema.ts`), not the raw/pre-validation count.
+    ///   - taskCount: the ALREADY-VALIDATED `tasks.count` for THIS SAME response — what
+    ///     `addConditions`' `.taskDoneNewTask(index:)` is checked against (a different index space
+    ///     from `refIndex`, see `RawUpdateCondition`'s own doc comment).
+    static func validateTaskUpdates(
+        _ raws: [RawParsedTaskUpdate], refCount: Int, taskCount: Int
+    ) -> [ParsedTaskUpdate] {
+        let mapped: [ParsedTaskUpdate] = raws.compactMap { raw in
+            // FAIL-CLOSED: `Int(exactly:)` narrowing first (fractional/absent `refIndex` drops the
+            // element — see `RawParsedTaskUpdate.refIndex`'s doc comment), then two plain
+            // comparisons, not a `ClosedRange` (`1...refCount`) — with `refCount == 0` that range
+            // literal TRAPS at construction, and a hostile/glitched response naming a `refIndex`
+            // against an empty `taskRefs[]` must degrade to "drop this update," never crash the app
+            // (same defensive pattern `CloudParser.resolveCompletion` already uses for its own
+            // 1-based `matchIndex` bounds check).
+            guard let rawRefIndex = raw.refIndex, rawRefIndex.isFinite,
+                  let refIndex = Int(exactly: rawRefIndex),
+                  refIndex >= 1, refIndex <= refCount else { return nil }
+
+            let deadline: ParsedValue<Date>? = raw.set?.deadline.flatMap { c in
+                guard validConfidence(c.confidence), let date = parseISO8601(c.value) else { return nil }
+                return ParsedValue(value: date, confidence: c.confidence)
+            }
+            let startTime: ParsedValue<Date>? = raw.set?.startTime.flatMap { c in
+                guard validConfidence(c.confidence), let date = parseISO8601(c.value) else { return nil }
+                return ParsedValue(value: date, confidence: c.confidence)
+            }
+            let notesAppend: ParsedValue<String>? = raw.set?.notesAppend.flatMap { c in
+                guard validConfidence(c.confidence) else { return nil }
+                let trimmed = c.value.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !trimmed.isEmpty, trimmed.utf16.count <= Self.maxNotesAppendChars else { return nil }
+                return ParsedValue(value: trimmed, confidence: c.confidence)
+            }
+            let priority: ParsedValue<Int>? = raw.set?.priority.flatMap { c in
+                // `Int(exactly:)` WITHOUT `.rounded()` — same reasoning as `ParsedTask.priority`
+                // right above: a fractional priority is a schema violation, never rounded into a
+                // plausible-looking level on the user's behalf.
+                guard validConfidence(c.confidence), c.value.isFinite,
+                      let level = Int(exactly: c.value), (1...4).contains(level)
+                else { return nil }
+                return ParsedValue(value: level, confidence: c.confidence)
+            }
+
+            let addConditions: [ParsedUpdateCondition] = (raw.addConditions ?? []).compactMap { cond in
+                switch cond.kind {
+                case "taskDone":
+                    // Same `Int(exactly:)` narrowing as `refIndex` above — fractional index is a
+                    // schema violation, dropped, never rounded into a plausible-looking pointer.
+                    guard let rawIndex = cond.newTaskIndex, rawIndex.isFinite,
+                          let newTaskIndex = Int(exactly: rawIndex),
+                          newTaskIndex >= 1, newTaskIndex <= taskCount else { return nil }
+                    return .taskDoneNewTask(index: newTaskIndex)
+                case "afterDate":
+                    guard let dateString = cond.date, let date = parseISO8601(dateString) else { return nil }
+                    return .afterDate(date)
+                default:
+                    return nil
+                }
+            }
+
+            // An update with nothing left after per-field validation carries no information — drop
+            // it entirely rather than surfacing an empty confirm chip with nothing to confirm.
+            guard deadline != nil || startTime != nil || notesAppend != nil || priority != nil
+                || !addConditions.isEmpty
+            else { return nil }
+
+            return ParsedTaskUpdate(
+                refIndex: refIndex,
+                deadline: deadline,
+                startTime: startTime,
+                notesAppend: notesAppend,
+                priority: priority,
+                addConditions: addConditions
+            )
+        }
+        return Array(mapped.prefix(Self.maxUpdates))
+    }
+
+    /// Top-level envelope validator — the one entry point `CloudParser.performParse` calls on the
+    /// envelope-shape (`RawParseEnvelope`) branch. `tasks` is capped to `IntentRouter.maxTaskCap`
+    /// BEFORE validation, identical to the pre-existing bare-array path (`performParse`'s fallback
+    /// branch) — one shared cap, applied the same way regardless of which wire shape answered, so
+    /// `taskCount` below always means the same thing either way.
+    static func validateCapture(_ envelope: RawParseEnvelope, sourceTranscript: String) -> ParsedCapture {
+        let cappedRawTasks = Array(envelope.tasks.prefix(IntentRouter.maxTaskCap))
+        let tasks = Self.validateAll(cappedRawTasks, sourceTranscript: sourceTranscript)
+        let taskRefs = Self.validateTaskRefs(envelope.taskRefs ?? [])
+        let updates = Self.validateTaskUpdates(
+            envelope.updates ?? [], refCount: taskRefs.count, taskCount: tasks.count
+        )
+        return ParsedCapture(tasks: tasks, taskRefs: taskRefs, updates: updates)
     }
 }

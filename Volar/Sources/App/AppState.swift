@@ -289,6 +289,31 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// `confirmSave()`'s second pass to become a real edge — see that method's doc comment for
     /// the two-pass save this drives.
     var intraBatchTaskDone: [Int: ConfirmDraft.ID] = [:]
+    /// task_refs_v1 (2026-08-02, anh Khôi "update task đã có bằng giọng nói"): extra `.taskDone`/
+    /// `.afterDate` conditions merged onto THIS draft by a DIFFERENT draft's `ParsedTaskUpdate` when
+    /// that update's task reference resolved to THIS draft (`AppState.RefResolution.sibling` — "xong
+    /// task A thì B lúc 3 giờ, và A đợi C" said in one breath, where A is this draft and C is
+    /// another new task in the same batch). Kept as its OWN array, never folded into `task.
+    /// conditions`/`intraBatchTaskDone`/`resolvedTaskDone`, for two reasons: (1) these conditions
+    /// never came from THIS task's own parse at all — they arrived on a sibling draft's update
+    /// payload — so there is no `task.conditions` index for them to occupy without corrupting the
+    /// index space `dismissedConditions`/`acceptedConditions`/`resolvedTaskDone`/`intraBatchTaskDone`
+    /// all key off; (2) `task` itself stays exactly what the router produced, never mutated in place
+    /// (this struct's own header comment) — `AppState.mergeUpdateIntoSibling` DOES mutate `task.
+    /// deadline`/`startTime`/`priority` directly for the SAME merge (see that method's doc comment
+    /// for why THOSE three fields are a deliberate, narrow exception), but conditions have no single
+    /// scalar slot to overwrite, so they get this parallel array instead. `.taskDone` targets are
+    /// recorded as the OTHER draft's `id` (not yet a real task UUID), matching `intraBatchTaskDone`'s
+    /// own "resolved to a real id only in `confirmSave`'s second pass" deferral exactly.
+    enum RefCondition: Equatable {
+        case taskDone(ConfirmDraft.ID)
+        case afterDate(Date)
+    }
+    var refConditions: [RefCondition] = []
+    /// Same "`Set<Int>` of dismissed indices, the array itself never mutated" convention as
+    /// `dismissedConditions` above, scoped to `refConditions`' own index space (never shared with
+    /// `dismissedConditions` — the two arrays have completely independent indices).
+    var dismissedRefConditions: Set<Int> = []
     /// T074 (conflict advisory, `contracts/phase4-contract.md` §C/§E): computed ONCE, right when
     /// this draft is created from a fresh parse (`AppState.runParse`) — never recomputed per chip
     /// edit (self-review "performance"). Empty = clean capture; `PopoverView` renders AT MOST the
@@ -526,6 +551,106 @@ struct ConfirmDraft: Identifiable, Equatable {
     }
 }
 
+// MARK: - task_refs_v1 (2026-08-02): "update an existing task by voice" — resolution + confirm
+// state for `ParsedCapture.taskRefs`/`.updates` (the sibling wire-layer's `Sources/Parsing/
+// ParsedCapture.swift`, consumed here BY NAME ONLY, never redefined). See `AppState.runParse`/
+// `resolveTaskRefs`/`buildConfirmUpdateDrafts`/`confirmSave` for the pipeline this state feeds.
+
+/// How ONE `ParsedTaskRef` (a fuzzy title the model referenced, e.g. "task báo cáo") resolved
+/// against this parse's snapshot — computed ONCE per ref by `AppState.resolveTaskRefs`, then shared
+/// by every `ParsedTaskUpdate` whose `refIndex` points at it (task brief: "Resolve each ref ONCE").
+/// Mirrors `ConfirmDraft.DuplicateResolution`'s "explicit enum, no raw `UUID?`" shape for the same
+/// reason: a `nil` here would conflate "resolved to nothing yet" with "not yet attempted."
+enum RefResolution: Equatable {
+    /// A confident fuzzy match against an ALREADY-PERSISTED open task (`AppState.bestFuzzyMatch`,
+    /// same ≥0.7 `Similarity.strict` bar `preResolveConditions` uses for `.taskDone` — see that
+    /// method's doc comment for why a wrong match here is real corruption, not a glance-and-ignore
+    /// hint, and therefore needs the strict scorer).
+    case existing(UUID)
+    /// A confident fuzzy match against ANOTHER draft in this SAME batch (`AppState.scoredMatches`,
+    /// same bar) — "task A ... và cập nhật task B luôn" where B is a task this very utterance is
+    /// also creating. Carries the OTHER `ConfirmDraft`'s `id`, never a real task UUID (that task
+    /// doesn't exist until `confirmSave` creates it) — same "not real until confirmSave" deferral
+    /// `ConfirmDraft.intraBatchTaskDone`'s doc comment documents for the analogous `.taskDone` case.
+    case sibling(ConfirmDraft.ID)
+    /// Neither ladder step cleared the 0.7 bar — constitution II: never auto-attach a low-confidence
+    /// or no-match reference. `PopoverView` renders a picker (`AppState.resolveUpdateTarget`) rather
+    /// than guessing; still-unresolved at Save is dropped (`confirmSave`'s own doc comment).
+    case unresolved
+}
+
+/// One confirm-card update to an ALREADY-EXISTING (or, transiently, same-batch-sibling) task,
+/// layered over a router-parsed `ParsedTaskUpdate` (the sibling-owned contract type) the SAME way
+/// `ConfirmDraft` layers over `ParsedTask` — see that struct's header comment for the "never mutate
+/// the parsed payload in place, edits live in overlay fields" contract this follows verbatim, reused
+/// rather than reinvented (task brief: "REUSE its conventions... do not invent a second interaction
+/// grammar").
+///
+/// PRODUCT DECISION (anh Khôi, 2026-08-02, hard requirement): an update to an EXISTING task is NEVER
+/// auto-committed, at ANY confidence — mutating a task that already exists is strictly riskier than
+/// creating a new one (constitution II). That is why this struct exists as a SEPARATE confirm-card
+/// entity at all, rather than folding straight into `ConfirmDraft`/`confirmSave`: every instance
+/// here (except a `.sibling`-resolved one, which never becomes a card in the first place — see
+/// `AppState.mergeUpdateIntoSibling`) renders its OWN dismissible/editable card, and only what
+/// survives on screen to the moment the user hits Save is ever applied (`AppState.confirmSave`).
+///
+/// A `.sibling`-resolved `ParsedTaskUpdate` is merged straight into its target `ConfirmDraft` at
+/// construction time and NEVER produces one of these — "the referenced task turned out to be one the
+/// user is creating in the same breath," so its fields flow through that draft's OWN chips
+/// (`AppState.mergeUpdateIntoSibling`), which already carry the exact same confirm/dismiss gate this
+/// struct provides for an `.existing` target. `resolution` therefore only ever holds `.existing` or
+/// `.unresolved` for an instance that actually reaches `AppState.confirmUpdateDrafts` — `.sibling`
+/// stays a valid case on the shared `RefResolution` enum (so `resolveTaskRefs`'s ladder has one
+/// return type for all three outcomes) but is unreachable here in practice; `PopoverView` falls back
+/// to the `.unresolved` picker rather than rendering nothing if that invariant is ever violated.
+struct ConfirmUpdateDraft: Identifiable, Equatable {
+    let id = UUID()
+    /// 1-based, into `ParsedCapture.taskRefs` — the wire contract's own indexing convention,
+    /// preserved verbatim (not converted to 0-based) so a `// UNVERIFIED`/telemetry log naming this
+    /// index always matches what the router/server actually said.
+    var refIndex: Int
+    /// The fuzzy title the model referenced (`ParsedTaskRef.titleQuery`) — display fallback for the
+    /// `.unresolved` picker's label and for `AppState.logCorrection`-style telemetry when this draft
+    /// is dropped unresolved at Save (there is no `ParsedTask.sourceTranscript` to log against here,
+    /// unlike `ConfirmDraft`, since this struct has no `ParsedTask` of its own).
+    var sourceTitleQuery: String
+    var resolution: RefResolution
+    var deadline: ParsedValue<Date>?
+    var startTime: ParsedValue<Date>?
+    /// APPENDS to the existing task's notes at Save — never overwrites (see `AppState.
+    /// mergeNotesAppending`, the SAME helper `ConfirmDraft`'s own merge-into-existing path already
+    /// uses, reused verbatim here rather than a second copy).
+    var notesAppend: ParsedValue<String>?
+    var priority: ParsedValue<Int>?
+    var addConditions: [ParsedUpdateCondition]
+
+    /// The 4 fields above, as a dismiss/accept KEY set — deliberately a NEW small enum, not a reuse
+    /// of `ChipKind`: `ChipKind` also carries `estimate`/`reminder`/`recurrence`/`kind`/
+    /// `followUpReview`, none of which this struct has a field for, so reusing it verbatim would let
+    /// `dismissed`/`accepted` hold meaningless states (e.g. "estimate dismissed" on a struct with no
+    /// estimate). The MECHANICS below (present/dismissed/uncertain-needs-accept) are the exact same
+    /// gate `ConfirmDraft.dismissed`/`.accepted`/`AppState.resolvedValue` already apply — see
+    /// `AppState.resolvedUpdateValue`, the direct sibling of `resolvedValue` scoped to this enum —
+    /// so this is "reuse the CONVENTION," not "invent a new grammar," per the task brief's own
+    /// framing of that distinction.
+    enum Field: Hashable {
+        case deadline, startTime, notesAppend, priority
+    }
+    /// Chip explicitly removed by the user — never saved, regardless of confidence (constitution
+    /// II: dismiss always wins, same as `ConfirmDraft.dismissed`).
+    var dismissed: Set<Field> = []
+    /// Explicit tap-to-accept for an uncertain (<0.7) field chip, same gate `ConfirmDraft.accepted`
+    /// enforces for a brand-new task's attributes.
+    var accepted: Set<Field> = []
+    /// `addConditions` indices the user explicitly removed — same `Set<Int>`-over-the-array
+    /// convention as `ConfirmDraft.dismissedConditions` (the array itself is never mutated).
+    var dismissedAddConditions: Set<Int> = []
+    /// Card-level dismiss (task brief: "Card-level dismiss removes the whole update") — also how the
+    /// `.unresolved` picker's "Skip" resolves (`AppState.resolveUpdateTarget(_: to: nil)`), mirroring
+    /// `dependencyPicker`'s own "Skip — no dependency" -> `dismissCondition` wiring.
+    var cardDismissed: Bool = false
+}
+
 // MARK: - Phase 5 (T036): voice-done confirm state (contract A `VoiceDoneIntent`/`VoiceMatch`)
 
 /// Which voice-done intent (contract A) a `VoiceDoneConfirm` answers — mirrors
@@ -602,6 +727,14 @@ final class AppState {
     /// v1 single `ParsedTask?` now that one utterance can yield a compound/multi-task result
     /// (contract "Confirm + materialize": multi-task confirm, ≤10). Empty = nothing to confirm.
     var confirmDrafts: [ConfirmDraft] = []
+    /// task_refs_v1 (2026-08-02): confirm-card updates to EXISTING tasks from the last parse's
+    /// `ParsedCapture.taskRefs`/`.updates` — a `.sibling`-resolved update never lands here at all
+    /// (see `ConfirmUpdateDraft`'s own doc comment), so this is only ever `.existing`/`.unresolved`
+    /// entries. Empty = nothing to confirm, same "no reference in this utterance" degrade every
+    /// other reader of this property treats identically to the pre-task_refs_v1 behavior
+    /// (`PopoverView`'s new section renders nothing at all when this is empty — self-review
+    /// "no-reference path pixel-identical").
+    var confirmUpdateDrafts: [ConfirmUpdateDraft] = []
     /// cycle-detection-contract.md §1.2: `nil` = batch sạch (no `.taskDone` cycle right now).
     /// Non-nil means `PopoverView` must show the batch-level cycle warning and LOCK Save — see
     /// `ConfirmCycle`'s own doc comment and `AppState.recomputeConfirmCycle()`. Only that method
@@ -1202,6 +1335,7 @@ final class AppState {
         self.captureState = .idle
         self.liveTranscript = ""
         self.confirmDrafts = []
+        self.confirmUpdateDrafts = []
         self.focusActive = false
         self.focusPaused = false
         self.focusSecondsLeft = 25 * 60
@@ -1955,6 +2089,7 @@ final class AppState {
         captureState = .recording
         liveTranscript = ""
         confirmDrafts = []
+        confirmUpdateDrafts = []
         confirmCycle = nil
         voiceDoneConfirm = nil
         voiceDoneNoMatchTranscript = nil
@@ -2100,6 +2235,7 @@ final class AppState {
         captureState = .idle
         liveTranscript = ""
         confirmDrafts = []
+        confirmUpdateDrafts = []
         confirmCycle = nil
         voiceDoneConfirm = nil
         voiceDoneNoMatchTranscript = nil
@@ -2397,6 +2533,12 @@ final class AppState {
             captureState = .idle
             captureErrorDetail = nil
             confirmDrafts = []
+            // task_refs_v1: defensive symmetry only — this text-capture path never populates
+            // `confirmUpdateDrafts` itself (only `runParse`, the voice path, does), and
+            // `openTextCapture()` already tore any prior voice session down via `cancelCapture()`
+            // before this method could even run. Cleared here anyway so this reset stays exhaustive
+            // if that ever changes.
+            confirmUpdateDrafts = []
             return
         }
 
@@ -2922,12 +3064,18 @@ final class AppState {
         runParse(transcript: transcript)
     }
 
-    /// The actual `IntentRouter.parse` call, split out of `finishRecording` so the one-time
-    /// consent gate above can defer it. Builds up to `TaskStore.maxBatchSize` `ConfirmDraft`s and
-    /// pre-resolves the "easy" `.taskDone` conditions (parser-confidence >= 0.7 AND a confident
-    /// fuzzy title match) so the confirm card doesn't show a picker for those — anything left
-    /// unresolved is exactly the < 0.7 / no-match case constitution II requires a picker for
-    /// (`PopoverView`'s `dependencyPicker`).
+    /// The actual parse call, split out of `finishRecording` so the one-time consent gate above can
+    /// defer it. Builds up to `TaskStore.maxBatchSize` `ConfirmDraft`s and pre-resolves the "easy"
+    /// `.taskDone` conditions (parser-confidence >= 0.7 AND a confident fuzzy title match) so the
+    /// confirm card doesn't show a picker for those — anything left unresolved is exactly the < 0.7
+    /// / no-match case constitution II requires a picker for (`PopoverView`'s `dependencyPicker`).
+    ///
+    /// task_refs_v1 (2026-08-02): swapped `router.parse` for `router.parseCapture` — the sibling
+    /// wire-layer's superset entry point, same args as `parse`, returning `ParsedCapture` (`tasks`
+    /// plus `taskRefs`/`updates`). The FM/heuristic tiers report empty `taskRefs`/`updates` (per
+    /// that method's own doc comment), so an utterance with no reference at all degrades to exactly
+    /// today's `capture.tasks`-only behavior, byte for byte — `capture.tasks` still flows into
+    /// `buildConfirmDrafts` completely unchanged, per the task brief's explicit instruction.
     private func runParse(transcript: String) {
         captureState = .parsing
         captureSession += 1
@@ -2936,20 +3084,25 @@ final class AppState {
         let titles = openTasks.map(\.title)
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
-            let results = await self.router.parse(transcript, now: now, openTaskTitles: titles)
+            let capture = await self.router.parseCapture(transcript, now: now, openTaskTitles: titles)
             // Stale? The hold ended (Esc/cancel/a second capture) while the parse was in flight —
             // mirrors `startCapture`'s authorization-pending guard.
             guard self.captureSession == session, self.captureState == .parsing else { return }
             // Defense-in-depth cap (self-review "client-exploit"): the contract promises the
             // router already enforces the 10-task cap; this survives a malformed/hostile result
             // regardless.
-            let capped = Array(results.prefix(TaskStore.maxBatchSize))
+            let capped = Array(capture.tasks.prefix(TaskStore.maxBatchSize))
             // T074: conflict advisory computed ONCE per parse, right here — never per keystroke/
             // per chip-edit (self-review "performance"). `conflictNow` is a single fresh clock
             // read shared by every draft in the batch so a multi-task confirm scores consistently
             // against the same "now" instant.
             let conflictNow = self.clock()
-            self.confirmDrafts = self.buildConfirmDrafts(from: capped, conflictNow: conflictNow)
+            var drafts = self.buildConfirmDrafts(from: capped, conflictNow: conflictNow)
+            // task_refs_v1: `capture.taskRefs`/`.updates` resolved against THIS exact `drafts`
+            // snapshot — a `.sibling` update merges straight into its target draft in place (no
+            // card of its own; see `mergeUpdateIntoSibling`), so `drafts` can come back changed.
+            self.confirmUpdateDrafts = self.buildConfirmUpdateDrafts(from: capture, drafts: &drafts, openTasks: self.openTasks)
+            self.confirmDrafts = drafts
             // `buildConfirmDrafts` stays a pure helper (no `self`) — see
             // `recomputeConfirmCycle`'s own doc comment for why the call has to live at each of
             // its call sites, here included, rather than inside it.
@@ -3034,6 +3187,168 @@ final class AppState {
             }
         }
         return drafts
+    }
+
+    // MARK: - task_refs_v1 (2026-08-02): "update an existing task by voice"
+    //
+    // The client-side resolution + confirm-state pipeline for `ParsedCapture.taskRefs`/`.updates`
+    // (the sibling wire-layer's `Sources/Parsing/ParsedCapture.swift`) — `capture.tasks` still flows
+    // through `buildConfirmDrafts` completely unchanged (see `runParse`); this is purely additive.
+
+    /// Resolves each `ParsedTaskRef` in a fresh parse's `taskRefs` array to a `RefResolution`, ONE
+    /// time per ref — every `ParsedTaskUpdate.refIndex` sharing the same ref shares the same
+    /// resolution (task brief: "Resolve each ref ONCE"). Mirrors `preResolveConditions`'s EXACT
+    /// ladder/thresholds/scorer: step 1 is the identical `bestFuzzyMatch(for:in:)` call
+    /// `preResolveConditions` makes against `openTasks` (≥0.7, `Similarity.strict` — see that
+    /// method's own doc comment for why a wrong match here is real corruption, not a glance-and-
+    /// ignore hint, and therefore needs the STRICT scorer, never `.lenient`); step 2 is the
+    /// identical `scoredMatches(for:candidates:)` call against this batch's OTHER drafts (task
+    /// brief explicitly says "the batch's other drafts," so unlike `preResolveConditions`'s
+    /// intra-batch step, this does NOT exclude any particular draft by index — a ref legitimately
+    /// can, and typically does, match a sibling other than "self" trivially since a task-ref
+    /// query is never the referencing draft's own title).
+    ///
+    /// `ParsedTaskRef.confidence`/`.assumeExisting` are part of the pinned wire type but this
+    /// round's ladder does not gate on either — the task brief's algorithm is exactly the 3-step
+    /// ladder below, nothing more. Flagged here rather than silently ignored: if a future revision
+    /// wants low-confidence refs to skip straight to `.unresolved` (bypassing steps 1/2 entirely) or
+    /// `assumeExisting == false` to try step 2 before step 1, this is the one place that changes.
+    ///
+    /// Intentionally `internal`, not `private`, for direct testability — same exception, same
+    /// reasoning, as `AppState.mergeNotesAppending`'s own doc comment gives (`Tests/
+    /// ConfirmUpdateDraftTests.swift` calls this and the two methods below it directly rather than
+    /// only through the async `runParse` entry point, which needs a real `IntentRouter.parseCapture`
+    /// this test target cannot construct).
+    func resolveTaskRefs(
+        _ refs: [ParsedTaskRef], drafts: [ConfirmDraft], openTasks: [TaskItem]
+    ) -> [RefResolution] {
+        refs.map { ref in
+            if let match = Self.bestFuzzyMatch(for: ref.titleQuery, in: openTasks), match.score >= 0.7 {
+                return .existing(match.id)
+            }
+            let siblings: [(id: UUID, title: String)] = drafts.map { ($0.id, $0.effectiveTitle) }
+            if let match = Self.scoredMatches(for: ref.titleQuery, candidates: siblings).first, match.score >= 0.7 {
+                return .sibling(match.id)
+            }
+            return .unresolved
+        }
+    }
+
+    /// "The referenced task turned out to be one the user is creating in this same breath" (task
+    /// brief) — folds a `.sibling`-resolved `ParsedTaskUpdate` straight into its target
+    /// `ConfirmDraft` rather than becoming a separate confirm card. Mutates `drafts[i].task.
+    /// {deadline,startTime,priority}` DIRECTLY — a deliberate, narrow exception to `ConfirmDraft`'s
+    /// own "never mutate `task` in place" rule (see that struct's header comment): this runs exactly
+    /// ONCE, at draft-construction time, before the card has ever rendered or been interacted with,
+    /// so there is no live user edit to clobber — and writing straight into `task.*` (rather than
+    /// `editedDeadline`/etc, which unconditionally pins confidence to `1.0`) is what lets the
+    /// merged value flow through `DeadlineControl`/`StartTimeControl`/`PriorityControl`'s EXISTING
+    /// uncertain/dashed/accept-tap machinery completely unchanged — an update-supplied value below
+    /// the 0.7 bar still needs an explicit accept tap before it can save, exactly like any other
+    /// parsed attribute (constitution II), which an `editedX` overlay could not offer without
+    /// inventing a second confidence-tracking mechanism (self-review "reuse over invention").
+    ///
+    /// "Respecting existing chip edit precedence" (task brief) is enforced by the `== nil` guard on
+    /// each field: if the sibling's OWN parse already stated a value for that exact attribute
+    /// (`task.deadline`/`.startTime`/`.priority` already non-nil), the merge never overwrites it —
+    /// same "never second-guess what was already stated" rule `IntentRouter.
+    /// applyStartTimeDerivation` already applies one field over (never overwriting a spoken
+    /// `deadline` with a derived one).
+    ///
+    /// `notesAppend` and `addConditions` go through `ConfirmDraft.editedNotes`/`.refConditions`
+    /// instead — see each assignment below for why those two, unlike the three scalars above, are
+    /// NOT a "never overwrite what's already there" merge.
+    ///
+    /// Intentionally `internal`, not `private` — same direct-testability exception `resolveTaskRefs`
+    /// above documents.
+    func mergeUpdateIntoSibling(
+        _ update: ParsedTaskUpdate, targetDraftID: ConfirmDraft.ID, drafts: inout [ConfirmDraft]
+    ) {
+        guard let i = drafts.firstIndex(where: { $0.id == targetDraftID }) else { return }
+        if drafts[i].task.deadline == nil, let deadline = update.deadline {
+            drafts[i].task.deadline = deadline
+        }
+        if drafts[i].task.startTime == nil, let startTime = update.startTime {
+            drafts[i].task.startTime = startTime
+        }
+        if drafts[i].task.priority == nil, let priority = update.priority {
+            drafts[i].task.priority = priority
+        }
+        // `notesAppend` has no confidence gate anywhere else in this file either (`ConfirmDraft.
+        // editedNotes`/`.effectiveNotes` never check `isUncertain` — notes is free text, not a
+        // scalar chip attribute), so this merge doesn't invent one: `mergeNotesAppending` is the
+        // SAME append-or-leave-alone helper `AppState.mergeTransform`'s own notes handling already
+        // calls, reused verbatim, writing through `editedNotes` (the sibling draft's OWN existing
+        // overlay field — `NotesEditorControl` renders it with zero new UI).
+        if let notesAppend = update.notesAppend,
+           let combined = Self.mergeNotesAppending(existing: drafts[i].effectiveNotes, incoming: notesAppend.value) {
+            drafts[i].editedNotes = combined
+        }
+        // `addConditions` carries no confidence at all in the pinned `ParsedUpdateCondition` type —
+        // a deterministic index/date the router already resolved, not a fuzzy guess — so these
+        // attach unconditionally into `refConditions` (visible/dismissible on the sibling's own
+        // card via `PopoverView`'s `refConditionRows`, never silently invisible — constitution II).
+        for condition in update.addConditions {
+            switch condition {
+            case .taskDoneNewTask(let refIndex):
+                // 1-based into `ParsedCapture.tasks` == `drafts`' own order (this method runs
+                // during draft construction, before any reordering/removal is possible).
+                guard drafts.indices.contains(refIndex - 1) else { continue }
+                let referencedID = drafts[refIndex - 1].id
+                guard referencedID != drafts[i].id else { continue } // defensive: no self-reference
+                drafts[i].refConditions.append(.taskDone(referencedID))
+            case .afterDate(let date):
+                drafts[i].refConditions.append(.afterDate(date))
+            }
+        }
+    }
+
+    /// `runParse`'s task_refs_v1 step, right after `buildConfirmDrafts` (task brief: "capture.tasks
+    /// ... flow into buildConfirmDrafts unchanged" — this is a SEPARATE pass over the result, never
+    /// a change to that method's own signature/behavior). Resolves `capture.taskRefs` against this
+    /// exact `drafts`/`openTasks` snapshot, then routes each `capture.updates` entry: `.sibling` ->
+    /// merged in place via `mergeUpdateIntoSibling` (no card); `.existing`/`.unresolved` -> a
+    /// `ConfirmUpdateDraft` `PopoverView` renders.
+    ///
+    /// NOTE (self-review "known scope boundary"): `buildConfirmDrafts`'s own `conflicts`/
+    /// `overdueSuggestion` computation already ran (inside that call) BEFORE this method ever
+    /// touches `drafts`, so a deadline a `.sibling` merge fills in here will not retroactively gain
+    /// an overdue-nudge/conflict advisory this session — only a deadline the router put directly on
+    /// that task's own parse gets one. Accepted trade-off for keeping `buildConfirmDrafts` itself
+    /// completely unchanged, per the task brief's explicit instruction.
+    ///
+    /// Intentionally `internal`, not `private` — same direct-testability exception `resolveTaskRefs`
+    /// above documents.
+    func buildConfirmUpdateDrafts(
+        from capture: ParsedCapture, drafts: inout [ConfirmDraft], openTasks: [TaskItem]
+    ) -> [ConfirmUpdateDraft] {
+        let resolutions = resolveTaskRefs(capture.taskRefs, drafts: drafts, openTasks: openTasks)
+        var updateDrafts: [ConfirmUpdateDraft] = []
+        for update in capture.updates {
+            // Defense-in-depth (self-review "client-exploit"): the wire contract's own doc comment
+            // promises `refIndex` is "already bounds-validated," same as `IntentRouter.parse`'s own
+            // 10-task cap promise `runParse` still re-enforces regardless (`capped =
+            // Array(results.prefix(...))`) — this survives a malformed/hostile result either way.
+            guard resolutions.indices.contains(update.refIndex - 1) else { continue }
+            let ref = capture.taskRefs[update.refIndex - 1]
+            switch resolutions[update.refIndex - 1] {
+            case .existing(let id):
+                updateDrafts.append(ConfirmUpdateDraft(
+                    refIndex: update.refIndex, sourceTitleQuery: ref.titleQuery, resolution: .existing(id),
+                    deadline: update.deadline, startTime: update.startTime, notesAppend: update.notesAppend,
+                    priority: update.priority, addConditions: update.addConditions
+                ))
+            case .sibling(let siblingDraftID):
+                mergeUpdateIntoSibling(update, targetDraftID: siblingDraftID, drafts: &drafts)
+            case .unresolved:
+                updateDrafts.append(ConfirmUpdateDraft(
+                    refIndex: update.refIndex, sourceTitleQuery: ref.titleQuery, resolution: .unresolved,
+                    deadline: update.deadline, startTime: update.startTime, notesAppend: update.notesAppend,
+                    priority: update.priority, addConditions: update.addConditions
+                ))
+            }
+        }
+        return updateDrafts
     }
 
     private struct FuzzyMatch { let id: UUID; let score: Double }
@@ -3257,6 +3572,61 @@ final class AppState {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].duplicateResolution = resolution
         recomputeConfirmCycle() // changing `.useExisting` changes which node this draft's edges land on
+    }
+
+    /// task_refs_v1: dismisses a `ConfirmDraft.refConditions` entry — the sibling-merge equivalent
+    /// of `dismissCondition` above, kept as its own method rather than folded into that one because
+    /// the two arrays (`task.conditions` vs `refConditions`) have completely independent index
+    /// spaces (see `ConfirmDraft.refConditions`'s own doc comment).
+    func dismissRefCondition(at index: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let draftIndex = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[draftIndex].dismissedRefConditions.insert(index)
+    }
+
+    // MARK: - task_refs_v1 confirm-card interactions (`ConfirmUpdateDraft`, mirrors the
+    // `ConfirmDraft` chip-interaction section above field-for-field)
+
+    /// Task-level dismiss (task brief: "Card-level dismiss removes the whole update") — also how
+    /// the `.unresolved` picker's "Skip" resolves.
+    func dismissConfirmUpdateDraft(_ draftID: ConfirmUpdateDraft.ID) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[index].cardDismissed = true
+    }
+
+    /// The `.unresolved` picker's resolution — constitution II: the user always makes this choice
+    /// explicitly, same "never auto-attach below 0.7" reasoning `AppState.resolveTaskDone` already
+    /// documents for the analogous `.taskDone` picker. `taskID == nil` is "Skip" (same as
+    /// `dismissConfirmUpdateDraft` — the picker's own dismiss affordance routes through here so
+    /// `PopoverView` has one call for both its "pick a task" and "skip" rows).
+    func resolveUpdateTarget(_ draftID: ConfirmUpdateDraft.ID, to taskID: UUID?) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        if let taskID {
+            confirmUpdateDrafts[index].resolution = .existing(taskID)
+        } else {
+            confirmUpdateDrafts[index].cardDismissed = true
+        }
+    }
+
+    /// Removes an update field chip (deadline/startTime/notesAppend/priority) — mirrors
+    /// `AppState.dismissAttribute` exactly, scoped to `ConfirmUpdateDraft.Field`.
+    func dismissUpdateField(_ field: ConfirmUpdateDraft.Field, forDraft draftID: ConfirmUpdateDraft.ID) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[index].dismissed.insert(field)
+    }
+
+    /// Explicit tap-to-accept for an uncertain (<0.7) update field chip — mirrors
+    /// `AppState.acceptUncertainAttribute` exactly, scoped to `ConfirmUpdateDraft.Field`.
+    func acceptUpdateField(_ field: ConfirmUpdateDraft.Field, forDraft draftID: ConfirmUpdateDraft.ID) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[index].accepted.insert(field)
+    }
+
+    /// Removes one `addConditions` entry — mirrors `AppState.dismissCondition`'s
+    /// `Set<Int>`-over-the-array convention, scoped to `ConfirmUpdateDraft.addConditions`' own
+    /// index space (never shared with `ConfirmDraft.dismissedConditions`/`.dismissedRefConditions`).
+    func dismissUpdateAddCondition(at index: Int, forDraft draftID: ConfirmUpdateDraft.ID) {
+        guard let draftIndex = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[draftIndex].dismissedAddConditions.insert(index)
     }
 
     /// cycle-detection-contract.md §2: rebuilds `confirmCycle` from the CURRENT `confirmDrafts` +
@@ -3549,6 +3919,18 @@ final class AppState {
     /// comment below for why, per cycle-detection-contract.md §2) now surfaces through the shared
     /// `catch` below rather than being silently dropped via `try?`, same as every other failure in
     /// this method.
+    ///
+    /// task_refs_v1 (2026-08-02) adds a FOURTH step, threaded in between steps 2 and 3 above: every
+    /// surviving `.existing`-target `ConfirmUpdateDraft` (`self.confirmUpdateDrafts`, snapshotted as
+    /// `updateDrafts` right after `includedDrafts` below) writes its scalar fields
+    /// (deadline/startTime/priority/notesAppend) onto the ALREADY-persisted target task, and its
+    /// `addConditions` fold into the SAME `attachments` list step 3 already builds — both AFTER
+    /// `targetID` exists (a `taskDoneNewTask` reference needs a just-minted new-task id, same
+    /// "why this can't run any earlier" reasoning step 3 itself documents) but BEFORE the store's
+    /// single post-mutation refresh, so one `tasks = store.fetchAll()` picks up everything. See the
+    /// update-draft loops themselves (search `task_refs_v1`) for exactly why they call `TaskStore.
+    /// updateEditableFields(from:)` directly rather than `AppState.updateTask` (duplicate-
+    /// notification risk) and fold their target ids into `remindersTargetIDs` instead.
     func confirmSave() {
         // cycle-detection-contract.md §2: safety net. `PopoverView` already locks the Save button
         // (and its `.keyboardShortcut(.defaultAction)`) while `confirmCycle != nil`, but this
@@ -3575,9 +3957,35 @@ final class AppState {
             // silently misbehave once lượt 2b's checkbox exists). Nothing to persist; close out
             // quietly rather than announcing "0 tasks saved" via `finishSaveUI`.
             confirmDrafts = []
+            // task_refs_v1: the user backed all the way out of this batch's new tasks, so any
+            // pending update card goes with it too — see this method's doc comment addendum for why
+            // this specific (today-unreachable) branch takes the conservative "whole batch" reading
+            // rather than trying to keep a same-session update card alive with nothing left to
+            // anchor its batch-order guarantees to.
+            confirmUpdateDrafts = []
             captureState = .idle
             liveTranscript = ""
             return
+        }
+
+        // task_refs_v1: snapshot once, same "everything below reads THIS snapshot, never
+        // `self.confirmUpdateDrafts` live" discipline `includedDrafts` above already follows.
+        let updateDrafts = confirmUpdateDrafts
+        // self-review "nothing user-said silently lost": an update still `.unresolved` at Save — the
+        // picker (`PopoverView`'s `.unresolved` card) was on screen the whole time and the user
+        // neither picked a target nor dismissed it — is dropped below (never attached to a guess,
+        // constitution II), but RECORDED as a drop first, same local-telemetry convention
+        // `dismissCondition`/`resolveTaskDone`'s "dropped" correctedValue already uses for every
+        // other silent-ish drop in this file (`AppState.logCorrection`) — this one goes straight to
+        // `TaskStore.recordCorrection` instead of through that helper because `ConfirmUpdateDraft`
+        // has no `ParsedTask` to describe (see that struct's own doc comment on `sourceTitleQuery`).
+        for draft in updateDrafts where !draft.cardDismissed && draft.resolution == .unresolved {
+            store?.recordCorrection(
+                attribute: "taskRef[\(draft.refIndex)]",
+                parsed: draft.sourceTitleQuery,
+                corrected: "unresolved-dropped-at-save",
+                transcript: draft.sourceTitleQuery
+            )
         }
 
         // Việc 3 self-review: a `.useExisting` target that vanished since the draft was built
@@ -3652,10 +4060,66 @@ final class AppState {
             }
         }
 
+        // task_refs_v1: fold in the two OTHER sources of a same-batch condition attachment —
+        // (a) `ConfirmDraft.refConditions`, added by `mergeUpdateIntoSibling` when a reference
+        // resolved to a SIBLING draft (see that field's own doc comment), and (b) a surviving
+        // `.existing`-target `ConfirmUpdateDraft`'s own `addConditions`, whose `taskDoneNewTask`
+        // needs `targetID` to resolve the 1-based index into a REAL, just-minted id — which is
+        // exactly why neither can be computed any earlier than here (self-review "save-order
+        // correctness"). One combined list so the SAME try-loop (store path) / append loop
+        // (no-store path) below attaches every kind identically.
+        //
+        // UNVERIFIED / known scope boundary (self-review "known scope boundary"): unlike
+        // `intraBatchTaskDone`/`resolvedTaskDone`, neither of these two sources feeds
+        // `recomputeConfirmCycle()` — a cycle introduced ONLY through a reference update will not
+        // show the pre-save `PopoverView` warning row, but is still caught here: `store.
+        // addCondition` below re-validates every `.taskDone` attachment (including these) and
+        // throws, surfacing through the SAME `catch` block as any other rejected edge (see that
+        // catch's own comment). The no-store fallback has no such backstop (previews/tests only,
+        // never a real save) — flagged as a follow-up, not fixed in this round.
+        var attachments = intraBatchAttachments
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id] else { continue }
+            for (index, ref) in draft.refConditions.enumerated() {
+                guard !draft.dismissedRefConditions.contains(index) else { continue }
+                guard case .taskDone(let referencedDraftID) = ref else { continue }
+                guard let refID = targetID[referencedDraftID], refID != ownID else { continue }
+                attachments.append((ownID: ownID, condition: .taskDone(refID)))
+            }
+        }
+        for draft in updateDrafts where !draft.cardDismissed {
+            // `.unresolved` was already logged and is dropped here (no target to attach to);
+            // `.sibling` never reaches `confirmUpdateDrafts` at all (see `ConfirmUpdateDraft`'s doc
+            // comment) — either way, only `.existing` has anything to attach.
+            guard case .existing(let existingID) = draft.resolution else { continue }
+            for (index, condition) in draft.addConditions.enumerated() where !draft.dismissedAddConditions.contains(index) {
+                switch condition {
+                case .taskDoneNewTask(let refIndex):
+                    // 1-based into `ParsedCapture.tasks` == `confirmDrafts`' own order — both were
+                    // built from the SAME `capture.tasks` array, 1:1 (`ParsedUpdateCondition.
+                    // taskDoneNewTask`'s own pinned doc comment states this indexing convention).
+                    guard confirmDrafts.indices.contains(refIndex - 1) else { continue }
+                    guard let refID = targetID[confirmDrafts[refIndex - 1].id] else { continue } // unticked/never existed — dropped, never attached to nothing
+                    attachments.append((ownID: existingID, condition: .taskDone(refID)))
+                case .afterDate(let date):
+                    attachments.append((ownID: existingID, condition: .afterDate(date)))
+                }
+            }
+        }
+
         let mergedTitles = mergeDrafts.map(\.effectiveTitle)
         let mergedIDs = mergeDrafts.compactMap { targetID[$0.id] }
         let savedTitles = itemsToSave.map(\.title) + mergedTitles
-        let remindersTargetIDs = itemsToSave.map(\.id) + mergedIDs
+        // task_refs_v1: every surviving `.existing`-target update draft's id, folded into the SAME
+        // list `scheduleRemindersForSavedItems` already processes at this method's single batched
+        // tail — this is how "deadline/startTime changes MUST re-derive reminders" (task brief) is
+        // satisfied WITHOUT calling `AppState.updateTask` per draft (see the scalar-field-write
+        // comment further down for why that would double-fire a real notification).
+        let updateTargetIDs = updateDrafts.compactMap { draft -> UUID? in
+            guard !draft.cardDismissed, case .existing(let id) = draft.resolution else { return nil }
+            return id
+        }
+        let remindersTargetIDs = itemsToSave.map(\.id) + mergedIDs + updateTargetIDs
 
         guard let store else {
             // No-store fallback (previews/tests without a TaskStore) — mirrors `addTask`'s own
@@ -3669,8 +4133,21 @@ final class AppState {
                 else { continue }
                 tasks[index] = mergeTransform(for: draft)(tasks[index])
             }
-            // Việc 2 pass two, in-memory: append each resolved intra-batch condition directly.
-            for attachment in intraBatchAttachments {
+            // task_refs_v1: apply each surviving `.existing`-target update draft's scalar fields
+            // directly — no-store fallback, same "no validation" convention as the merge loop right
+            // above. Must run BEFORE the attachments loop below for no particular ordering reason
+            // (the two touch disjoint parts of a `TaskItem`), but grouped here to mirror the store
+            // branch's own step order exactly.
+            for draft in updateDrafts where !draft.cardDismissed {
+                guard case .existing(let existingID) = draft.resolution,
+                      let index = tasks.firstIndex(where: { $0.id == existingID })
+                else { continue } // deleted between parse and Save — no-op, matches `TaskStore.updateEditableFields`'s own guard for the store path below
+                tasks[index] = updatedTaskItem(applying: draft, to: tasks[index])
+            }
+            // Việc 2 pass two, in-memory: append each resolved intra-batch/ref/update condition
+            // directly (task_refs_v1: `attachments` now also carries `ConfirmDraft.refConditions`
+            // and `ConfirmUpdateDraft.addConditions` — see that combined list's own comment above).
+            for attachment in attachments {
                 guard let index = tasks.firstIndex(where: { $0.id == attachment.ownID }) else { continue }
                 if !tasks[index].conditions.contains(attachment.condition) {
                     tasks[index].conditions.append(attachment.condition)
@@ -3710,17 +4187,46 @@ final class AppState {
                 guard let existingID = targetID[draft.id] else { continue }
                 store.mergeIntoExisting(existingID, applying: mergeTransform(for: draft))
             }
-            // Việc 2, pass two: attach every intra-batch `.taskDone` now that both ends (new OR
-            // merged) are real, persisted ids. cycle-detection-contract.md §2: this USED to be
-            // `try?`, silently dropping a rejected edge — but `recomputeConfirmCycle()` (called
-            // after every edit) plus the `confirmCycle == nil` guard at the top of this method
-            // mean a batch that reaches here should already be acyclic, so a throw here now means
-            // something slipped past that check. Surfacing it via the `catch` below (rather than
-            // swallowing it) turns a silent lie into a visible, human-readable error instead — a
-            // task that's already committed by the time this throws stays committed either way
-            // (this loop runs strictly after the `addBatch`/merge steps above), just without the
-            // one edge that failed.
-            for attachment in intraBatchAttachments {
+            // task_refs_v1: same "after new tasks/merges, before the attachments loop" placement as
+            // the no-store branch above — deliberately NOT `AppState.updateTask` (which would call
+            // `scheduler?.scheduleReminders`/`notifyEligibilityAndScheduleResurface`/
+            // `syncCalendarMirror` a SECOND time per draft, on top of this method's own single
+            // batched tail below). `ReminderScheduler.notifyUnblocked` is NOT idempotent — it
+            // inserts and immediately DELIVERS a new `ReminderRecord`/notification every call — so
+            // calling it once per update draft AND again for the whole batch would double-fire a
+            // real, user-visible alert. Reminders still re-derive correctly: `existingID` is folded
+            // into `remindersTargetIDs` above, which `scheduleRemindersForSavedItems` (this
+            // method's existing single tail call, unchanged) re-derives for every id it's handed —
+            // satisfying "deadline/startTime changes MUST re-derive reminders" without a second
+            // reminder/eligibility/calendar pass.
+            //
+            // `mergeIntoExisting`, NOT `updateEditableFields(from:)` built off the in-memory
+            // `tasks` snapshot (Opus review, 2026-08-02): `updateEditableFields` copies EVERY
+            // editable field from the item it's handed, and the in-memory snapshot is stale by
+            // this point whenever the merge loop right above already committed to this SAME target
+            // id (a duplicate-merge appending notes to X while this update only moves X's deadline
+            // — a stale-base copy would silently revert those notes). The closure receives the
+            // FRESH post-merge row straight from the DB, and `updatedTaskItem` only touches the
+            // fields this update actually resolved, so nothing else can be dragged backwards.
+            // Unknown id (deleted between parse and Save) is `mergeIntoExisting`'s own documented
+            // no-op — same convention as before.
+            for draft in updateDrafts where !draft.cardDismissed {
+                guard case .existing(let existingID) = draft.resolution else { continue }
+                store.mergeIntoExisting(existingID) { self.updatedTaskItem(applying: draft, to: $0) }
+            }
+            // Việc 2, pass two: attach every intra-batch/ref/update `.taskDone`/`.afterDate` now
+            // that every end (new, merged, OR already-existing) has a real, persisted id.
+            // cycle-detection-contract.md §2: this USED to be `try?`, silently dropping a rejected
+            // edge — but `recomputeConfirmCycle()` (called after every edit) plus the
+            // `confirmCycle == nil` guard at the top of this method mean a batch that reaches here
+            // should already be acyclic FOR THE EDGES IT COVERS. task_refs_v1's `refConditions`/
+            // `addConditions` edges are NOT among those (see `attachments`'s own comment above) — so
+            // for THOSE two specifically, this `try` is the first and only cycle check, not a "should
+            // not happen" backstop. Either way, a throw here surfaces through the shared `catch`
+            // below rather than being silently dropped — a task that's already committed by the time
+            // this throws stays committed either way (this loop runs strictly after the `addBatch`/
+            // merge/update steps above), just without the one edge that failed.
+            for attachment in attachments {
                 try store.addCondition(attachment.condition, to: attachment.ownID)
             }
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
@@ -3738,8 +4244,15 @@ final class AppState {
             // A failure on a LATER chunk (after earlier chunks already committed) is refreshed
             // from the store here too, so the UI never shows stale/duplicate state for the part
             // that did save — the user only re-confirms what's genuinely still outstanding.
-            // Merges/intra-batch conditions never ran (they're only reached after the `do` block's
-            // chunk loop finishes without throwing), so there is nothing further to unwind here.
+            // Merges/task_refs_v1 update-field-writes/intra-batch conditions never ran (they're only
+            // reached after the `do` block's `addBatch` chunk loop finishes without throwing), so
+            // there is nothing further to unwind here. If instead the `attachments` loop itself is
+            // what throws (reachable now that it also carries task_refs_v1's `refConditions`/
+            // `addConditions` edges — see that loop's own comment), everything ABOVE it in the `do`
+            // block — new tasks, merges, AND update-field writes — has already committed and stays
+            // committed; only the one failing edge (and any after it in `attachments`) is lost, same
+            // "partial success on this one edge, not a full rollback" behavior this catch already
+            // documented for merges before task_refs_v1 added a second source of a throwing edge.
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
             scheduleRemindersForSavedItems(itemsToSave.map(\.id))
@@ -3954,6 +4467,44 @@ final class AppState {
         return value.value
     }
 
+    /// task_refs_v1: `resolvedValue`'s exact same gate (present, not dismissed, confident-or-
+    /// accepted), scoped to `ConfirmUpdateDraft.Field` instead of `ChipKind` — see that enum's own
+    /// doc comment for why it's a separate small type rather than a `ChipKind` reuse.
+    private func resolvedUpdateValue<T>(
+        _ value: ParsedValue<T>?, field: ConfirmUpdateDraft.Field, draft: ConfirmUpdateDraft
+    ) -> T? {
+        guard let value, !draft.dismissed.contains(field) else { return nil }
+        guard !value.isUncertain || draft.accepted.contains(field) else { return nil }
+        return value.value
+    }
+
+    /// task_refs_v1: pure `TaskItem -> TaskItem` transform for one `ConfirmUpdateDraft`'s surviving
+    /// fields onto its `.existing` target — same "pure transform shared by the store and no-store
+    /// branches" shape `mergeTransform` above already establishes (see that method's own doc
+    /// comment for the precedent). `deadline`/`startTime`/`priority` OVERWRITE (present-and-resolved
+    /// wins outright, same as a brand-new task's own `materialize`); `notesAppend` reuses
+    /// `mergeNotesAppending` VERBATIM — the exact function `mergeTransform`'s own notes handling
+    /// already calls — so this is the SAME append-never-overwrite contract, not a second copy of it
+    /// (task brief: "notesAppend appends to existing notes... never overwrites").
+    private func updatedTaskItem(applying draft: ConfirmUpdateDraft, to existing: TaskItem) -> TaskItem {
+        var updated = existing
+        if let deadline = resolvedUpdateValue(draft.deadline, field: .deadline, draft: draft) {
+            updated.deadline = deadline
+        }
+        if let startTime = resolvedUpdateValue(draft.startTime, field: .startTime, draft: draft) {
+            updated.startTime = startTime
+        }
+        if let priorityRaw = resolvedUpdateValue(draft.priority, field: .priority, draft: draft) {
+            updated.priority = Self.uiPriority(from: priorityRaw)
+        }
+        if let notesValue = resolvedUpdateValue(draft.notesAppend, field: .notesAppend, draft: draft),
+           let combined = Self.mergeNotesAppending(existing: existing.notes, incoming: notesValue) {
+            updated.notes = combined
+            updated.details = combined
+        }
+        return updated
+    }
+
     /// Resolves `task.conditions` into `VolarCore.Condition`s per the contract: `.afterDate`/
     /// `.external` map directly once past the same uncertain-accept gate as scalar attributes;
     /// `.taskDone` only ever comes from `resolvedTaskDone` (confident fuzzy match or explicit
@@ -4024,6 +4575,10 @@ final class AppState {
     private func finishSaveUI(titles: [String]) {
         captureState = .done
         confirmDrafts = []
+        // task_refs_v1: every surviving update draft has already been applied by `confirmSave`
+        // (both its store and no-store branches) by the time this runs — cleared here the same way
+        // `confirmDrafts` itself is, since there is nothing left pending either way.
+        confirmUpdateDrafts = []
         confirmCycle = nil
         runningEngine?.stop()
         voice.speak(titles.count == 1 ? (titles.first ?? "Saved") : "\(titles.count) tasks saved.")

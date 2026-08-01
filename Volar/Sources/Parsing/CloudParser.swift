@@ -244,7 +244,68 @@ struct CloudParser: Sendable {
 
     // MARK: Parse mode
 
+    /// Wire capability the client advertises via `"client_caps": ["task_refs_v1"]` on every parse
+    /// request (anh Khôi, 2026-08-02 task-refs design; server side: `_shared/schema.ts`'s
+    /// `ParseRequest.clientCaps`, `MAX_TASK_REFS`/`MAX_UPDATES`). Additive, two-way handshake —
+    /// NOT a version number (App Store clients fragment across versions while this Edge Function
+    /// redeploys freely; see `ParseRequest.clientCaps`'s own doc comment server-side for the same
+    /// reasoning spelled out in full): a server that does NOT yet recognize this string (not
+    /// redeployed yet, or a rollback) ignores the field entirely and returns today's bare
+    /// `[RawParsedTask]` array; a server that DOES recognize it returns the richer envelope object
+    /// `{ tasks, taskRefs, updates }` instead (`RawParseEnvelope`, `IntentParsing.swift`). BOTH
+    /// response shapes MUST decode without throwing — see `performParse`'s `200` branch below,
+    /// which tries the envelope shape first and falls back to the bare array, so an utterance is
+    /// never lost to a decode failure regardless of which server version answers.
+    static let taskRefsCapability = "task_refs_v1"
+
+    /// task_refs_v1: the full-`ParsedCapture` sibling of `CloudParseOutcome` — identical
+    /// quota/unavailable semantics, but the success case carries the full validated `ParsedCapture`
+    /// (tasks + taskRefs + updates) instead of just `[ParsedTask]`. A SEPARATE type from
+    /// `CloudParseOutcome` (never a payload-type change to that one) so `parseDetailed`'s existing
+    /// `[ParsedTask]`-only contract — and every call site that already depends on it — never has to
+    /// change shape; see `performParse` below for the one shared network/decode path both
+    /// `parseDetailed` and `parseCaptureDetailed` delegate to (never two network round trips for
+    /// what is, on the wire, one request).
+    enum CloudParseCaptureOutcome: Sendable, Equatable {
+        case capture(ParsedCapture)
+        /// Identical meaning to `CloudParseOutcome.quotaExceeded`.
+        case quotaExceeded(resetAt: Date?)
+        /// Identical meaning to `CloudParseOutcome.unavailable`.
+        case unavailable
+    }
+
     func parseDetailed(_ transcript: String, now: Date, openTaskTitles: [String]) async -> CloudParseOutcome {
+        switch await performParse(transcript, now: now, openTaskTitles: openTaskTitles) {
+        case .capture(let capture):
+            return .tasks(capture.tasks)
+        case .quotaExceeded(let resetAt):
+            return .quotaExceeded(resetAt: resetAt)
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    /// task_refs_v1 sibling of `parseDetailed` above — same network call (via the shared
+    /// `performParse` below), but returns the FULL `ParsedCapture` (`taskRefs`/`updates` included)
+    /// instead of discarding them down to `[ParsedTask]`. The one real call site is
+    /// `IntentRouter.parseCapture` (`IntentParsing.swift`).
+    func parseCaptureDetailed(
+        _ transcript: String, now: Date, openTaskTitles: [String]
+    ) async -> CloudParseCaptureOutcome {
+        await performParse(transcript, now: now, openTaskTitles: openTaskTitles)
+    }
+
+    /// Shared network + decode path for `parseDetailed`/`parseCaptureDetailed` (anh Khôi, 2026-08-02
+    /// task-refs design: factored out of what used to be `parseDetailed`'s own body, verbatim, so a
+    /// second public-facing shape could be added without a second round trip). Every pre-existing
+    /// behavior this refactor must NOT disturb: the consent/credential gate, the `timezone`/
+    /// `open_task_titles` payload fields, the 429 quota/`resetAt` handling, the `maxResponseBytes`
+    /// pre-decode size gate, and the 2026-08-01 "`200 []` is a well-formed answer, not
+    /// `.unavailable`" fix (see the inline comment at the `200` case below — unchanged, just now
+    /// reached via an empty `ParsedCapture` instead of an empty `[ParsedTask]` directly).
+    private func performParse(
+        _ transcript: String, now: Date, openTaskTitles: [String]
+    ) async -> CloudParseCaptureOutcome {
         let trimmed = Self.utf16Prefix(transcript, maxTranscriptChars)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .unavailable }
@@ -261,6 +322,11 @@ struct CloudParser: Sendable {
         var payload: [String: Any] = [
             "transcript": trimmed,
             "now": Self.makeRequestFormatter().string(from: now),
+            // task_refs_v1 (anh Khôi, 2026-08-02): advertised on EVERY parse request,
+            // unconditionally — see `taskRefsCapability`'s own doc comment for the additive-
+            // handshake contract this relies on (a server that doesn't recognize this string yet,
+            // or has been rolled back, simply ignores the field and answers exactly as before).
+            "client_caps": [Self.taskRefsCapability],
         ]
         if !openTaskTitles.isEmpty {
             payload["open_task_titles"] = Array(openTaskTitles.prefix(100)).map { Self.utf16Prefix($0, 200) }
@@ -300,17 +366,30 @@ struct CloudParser: Sendable {
             // `validateParsedTaskArray` documents it as such explicitly, returning `200 []` rather
             // than a 502 on purpose. Reporting it as `.unavailable` claimed the Cloud tier had
             // FAILED when it had actually succeeded: `IntentRouter.lastRoute` recorded the wrong
-            // tier, and the router's `case .tasks:` empty branch was unreachable dead code.
+            // tier, and the router's `.cloud` empty branch was unreachable dead code.
             //
             // What the user sees is UNCHANGED (anh Khôi chốt 2026-08-01): the router still falls
             // through to its title-only floor either way, so an utterance never silently vanishes —
             // only the diagnosis of WHY it fell through is now honest.
+            //
+            // task_refs_v1 (anh Khôi, 2026-08-02): the ENVELOPE shape is tried FIRST. A server that
+            // doesn't recognize `client_caps` (not yet redeployed, or a rollback) ignores that field
+            // and returns the OLD bare `[RawParsedTask]` array — decoding THAT as `RawParseEnvelope`
+            // fails outright (a top-level JSON array can never satisfy an object-keyed container),
+            // so this always falls through cleanly to the bare-array branch below on an old server,
+            // never silently misreads array elements as envelope fields. Both branches must decode
+            // without throwing — this is the one thing standing between a server-version mismatch
+            // and losing the user's utterance entirely.
+            if let envelope = try? JSONDecoder().decode(RawParseEnvelope.self, from: data) {
+                let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: transcript)
+                return .capture(capture)
+            }
             guard let raws = try? JSONDecoder().decode([RawParsedTask].self, from: data) else {
                 return .unavailable
             }
             let capped = Array(raws.prefix(IntentRouter.maxTaskCap))
             let validated = ParsedTaskValidation.validateAll(capped, sourceTranscript: transcript)
-            return .tasks(validated)
+            return .capture(ParsedCapture(tasks: validated, taskRefs: [], updates: []))
         case 429:
             let quota = try? JSONDecoder().decode(QuotaResponse.self, from: data)
             let resetAt = quota?.resetAt.flatMap { ParsedTaskValidation.parseISO8601($0) }

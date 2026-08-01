@@ -646,3 +646,153 @@ Deno.test("context: existing_subtasks title over MAX_TASK_TITLE_CHARS is dropped
     assertEquals(result.value.existingSubtasks, [{ title: "A fine title", done: true }]);
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// 16. `client_caps` request validation (task_refs_v1, anh Khôi 2026-08-02 task-refs design). See
+//     `ParseRequest.clientCaps`'s doc comment in `_shared/schema.ts` for the full capability-
+//     handshake rationale. The load-bearing property here: a request with NO `client_caps` at all
+//     must validate/behave exactly as every parse-mode fixture already tested above (spot-checked
+//     in the last test of this section) — this feature must be additive, never a behavior change
+//     for a client that has never heard of it.
+// ---------------------------------------------------------------------------------------------
+
+Deno.test("client_caps: absent entirely -> parse request still validates, clientCaps is undefined", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "parse") {
+    assertEquals(result.value.clientCaps, undefined);
+  }
+});
+
+Deno.test("client_caps: a valid array (including the recognized task_refs_v1 cap) is forwarded verbatim", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: ["task_refs_v1"],
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "parse") {
+    assertEquals(result.value.clientCaps, ["task_refs_v1"]);
+  }
+});
+
+Deno.test("client_caps: an UNKNOWN cap string is accepted (never rejected) — forward compat", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: ["some_future_cap_this_deploy_does_not_know", "task_refs_v1"],
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "parse") {
+    assertEquals(result.value.clientCaps, ["some_future_cap_this_deploy_does_not_know", "task_refs_v1"]);
+  }
+});
+
+Deno.test("client_caps: non-array is rejected", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: "task_refs_v1", // a bare string, not an array
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("client_caps: more than 16 entries is rejected", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: Array.from({ length: 17 }, (_, i) => `cap_${i}`),
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("client_caps: exactly 16 entries passes", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: Array.from({ length: 16 }, (_, i) => `cap_${i}`),
+  });
+  assertEquals(result.ok, true);
+});
+
+Deno.test("client_caps: an empty-string entry is rejected", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: ["task_refs_v1", ""],
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("client_caps: an entry over 64 chars is rejected", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: ["x".repeat(65)],
+  });
+  assertEquals(result.ok, false);
+});
+
+Deno.test("client_caps: an entry of exactly 64 chars passes", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: ["x".repeat(64)],
+  });
+  assertEquals(result.ok, true);
+});
+
+Deno.test("client_caps: a non-string entry (e.g. a number) is rejected", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: [],
+    client_caps: [123],
+  });
+  assertEquals(result.ok, false);
+});
+
+// Back-compat spot-check (task brief requirement): a plain, pre-existing parse fixture with no
+// `client_caps` at all validates to the exact same shape as it always has — every OTHER field on
+// the validated value is untouched by this feature, `clientCaps` is simply `undefined`.
+Deno.test("back-compat: a parse request with no client_caps validates identically to before this feature", () => {
+  const result = validateRequestBody({
+    mode: "parse",
+    transcript: "mua sữa",
+    locale_hint: "vi",
+    now: "2026-07-28T15:00:00+07:00",
+    open_task_titles: ["Nộp báo cáo"],
+    timezone: "Asia/Ho_Chi_Minh",
+  });
+  assertEquals(result.ok, true);
+  if (result.ok && result.value.mode === "parse") {
+    assertEquals(result.value.transcript, "mua sữa");
+    assertEquals(result.value.localeHint, "vi");
+    assertEquals(result.value.now, "2026-07-28T15:00:00+07:00");
+    assertEquals(result.value.openTaskTitles, ["Nộp báo cáo"]);
+    assertEquals(result.value.timezone, "Asia/Ho_Chi_Minh");
+    assertEquals(result.value.clientCaps, undefined);
+  }
+});

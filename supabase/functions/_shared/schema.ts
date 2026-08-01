@@ -76,6 +76,21 @@ export const MAX_CONTEXT_TRANSCRIPT_CHARS = 1000;
  *  inventing a second number. */
 export const MAX_EXISTING_SUBTASKS = 20;
 
+/** `task_refs_v1` capability (anh Khôi, 2026-08-02 task-refs design): "làm task này khi xong task
+ *  kia", "task kia phải xong hôm nay" — the model needs to REFERENCE existing/implied tasks and
+ *  express UPDATES to them, on top of the tasks it already extracts fresh. These three caps mirror
+ *  `MAX_TASKS`/`MAX_TASK_TITLE_CHARS` etc above: defense-in-depth truncation of the model's own
+ *  output, independent of whatever the prompt asked for. */
+export const MAX_TASK_REFS = 10;
+export const MAX_UPDATES = 10;
+/** One year in minutes — the outer bound on `offsetMinutes` for the `taskDone`/`taskStart`
+ *  condition extensions (task_refs_v1). Not a precise product number, just a sanity ceiling: a
+ *  model emitting an offset bigger than this has gone off the rails (misread "2 giờ" as some huge
+ *  number, unit confusion, etc.) rather than expressed a real "sau khi xong X" request, so the
+ *  field is dropped (fail-open, same as every other model-output cap in this file) rather than
+ *  accepted at face value. */
+export const MAX_CONDITION_OFFSET_MINUTES = 525600;
+
 // ---------------------------------------------------------------------------------------------
 // Request (client -> us)
 // ---------------------------------------------------------------------------------------------
@@ -91,6 +106,19 @@ export interface ParseRequest {
   // is extra CONTEXT for the model (DST edge cases, resolving dates further in the future than the
   // single offset in `now` implies), not the primary source of the offset.
   timezone?: string;
+  /** `client_caps` (task_refs_v1, anh Khôi 2026-08-02 task-refs design): a capability handshake,
+   *  NOT a version number. App Store clients fragment across versions while this Edge Function
+   *  redeploys freely, so compat cannot be "if client version >= X" — a client instead lists the
+   *  response-shape capabilities it knows how to consume. Absent entirely -> today's behavior,
+   *  BYTE-IDENTICAL (bare `ParsedTaskOut[]`, `SYSTEM_PREAMBLE`, `buildParseResponseSchema()`,
+   *  `validateParsedTaskArray`). Present -> every recognized cap in it may change the RESPONSE
+   *  shape (see `wantsEnvelope` in `parse/index.ts`); an UNRECOGNIZED cap string is silently
+   *  ignored, never rejected — a client sent from the future naming a cap this deployed version
+   *  doesn't know yet must still get a working response, not a 400. All evolution here is meant to
+   *  be strictly ADDITIVE: new caps unlock more of the response, they never repurpose or remove
+   *  what an older cap (or no cap) already returns. The only recognized cap as of this writing is
+   *  `"task_refs_v1"` (see `TaskRefOut`/`TaskUpdateOut` below). */
+  clientCaps?: string[];
 }
 
 /** Optional "richer context" fields (anh Khôi, 2026-07-29 addendum), shared by `BreakdownRequest`
@@ -361,6 +389,24 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
     openTaskTitles = rawTitles as string[];
   }
 
+  // `client_caps` (task_refs_v1, anh Khôi 2026-08-02): see `ParseRequest.clientCaps`'s doc comment
+  // for the full capability-handshake rationale. This is a SHAPE check only — a wire-level guard
+  // against a malformed/hostile array (wrong type, too many entries, an oversized or empty string
+  // masquerading as a cap name) — it deliberately does NOT check individual cap strings against a
+  // known-caps allowlist: an unrecognized cap is a normal, expected, forward-compatible case (a
+  // future client naming a capability this deployed version doesn't act on yet), never a 400.
+  let clientCaps: string[] | undefined;
+  if (body.client_caps !== undefined) {
+    if (
+      !Array.isArray(body.client_caps) ||
+      body.client_caps.length > 16 ||
+      !body.client_caps.every((c) => typeof c === "string" && c.length > 0 && c.length <= 64)
+    ) {
+      return { ok: false, error: "client_caps must be an array of up to 16 short strings" };
+    }
+    clientCaps = body.client_caps as string[];
+  }
+
   return {
     ok: true,
     value: {
@@ -370,6 +416,7 @@ function validateParseRequest(body: Record<string, unknown>): ValidationResult<P
       now: body.now,
       openTaskTitles,
       timezone,
+      clientCaps,
     },
   };
 }
@@ -458,10 +505,29 @@ export interface ConfidenceValue<T> {
 }
 
 export interface ParsedConditionOut {
-  kind: "taskDone" | "afterDate" | "external";
-  referenceTitle?: string; // kind === taskDone: fuzzy title, client resolves via picker
+  // `"taskStart"` added for task_refs_v1 (anh Khôi, 2026-08-02 task-refs design) — see
+  // `validateCondition`'s doc comment: only ever produced/accepted in ENVELOPE mode, a bare-array
+  // response never carries it, matching how `SYSTEM_PREAMBLE` (not `SYSTEM_PREAMBLE_TASK_REFS`)
+  // never asks for it either.
+  kind: "taskDone" | "afterDate" | "external" | "taskStart";
+  referenceTitle?: string; // kind === taskDone | taskStart: fuzzy title, client resolves via picker
   date?: string; // kind === afterDate: ISO8601
   description?: string; // kind === external
+  /** task_refs_v1: precise pointer complementing the fuzzy `referenceTitle` above — 1-based into
+   *  this response's validated `taskRefs[]` (`referenceTitle` stays REQUIRED regardless, as a
+   *  cross-check + the legacy path for clients that never send `taskRefs` context back). Envelope
+   *  mode only — see `validateCondition`'s doc comment for the back-compat rule. Valid on BOTH
+   *  `taskDone` and `taskStart`. */
+  refIndex?: number;
+  /** task_refs_v1: minutes offset relative to the referenced task's completion (`taskDone`) or
+   *  start (`taskStart`) — "nhắc mỗi 2h sau khi xong task kia" = 120 on a `taskDone` condition;
+   *  "nhắc ít nhất 2h trước khi làm task kia" = -120 on a `taskStart` condition (negative = before
+   *  the reference's start; `taskDone` offsets are always positive, since "before it's done" isn't
+   *  a coherent instant). Envelope mode only. */
+  offsetMinutes?: number;
+  /** task_refs_v1: whether `offsetMinutes` is an exact delay (`"exact"`) or a floor/"at least"
+   *  (`"atLeast"`). Envelope mode only. */
+  offsetKind?: "exact" | "atLeast";
 }
 
 export interface ParsedRecurrenceOut {
@@ -477,6 +543,80 @@ export interface ParsedReminderOverrideOut {
   // Volar/Sources/Model/Recurrence.swift) -- không phải cùng field đổi tên. Client dùng mặc định
   // riêng (nhắc ở 1/2 và 1/3 thời gian còn lại) khi field này vắng mặt.
   remindPeriodMinutes?: number;
+  /** task_refs_v1 (anh Khôi, 2026-08-02 task-refs design): "anchor this reminder to a REFERENCED
+   *  task's own done/start event, instead of to THIS task's own deadline" — e.g. "nhắc tôi 15 phút
+   *  sau khi task kia xong". `refIndex` is 1-based into this response's validated `taskRefs[]`.
+   *  FAIL-OPEN AS A UNIT (see `validateReminderOverride`): a malformed anchor drops only itself,
+   *  never the rest of this override. Envelope mode only — never populated on a bare-array
+   *  response. */
+  anchor?: { refIndex: number; event: "done" | "start" };
+}
+
+/** task_refs_v1 (anh Khôi, 2026-08-02 task-refs design): one existing (or user-implied) task the
+ *  model believes the utterance is pointing at — "làm task này khi xong task kia", "task kia phải
+ *  xong hôm nay". The client resolves IDENTITY locally (fuzzy-matches `titleQuery` against its own
+ *  task store, or treats it as "no such task yet" if nothing matches) and NEVER auto-commits any
+ *  `TaskUpdateOut` off the back of a ref alone — every update is user-confirmed. This server only
+ *  ever validates SHAPE; it holds no task ids and makes no matching decision itself. */
+export interface TaskRefOut {
+  /** The words identifying the referenced task — either an exact copy of one of the request's
+   *  `open_task_titles` entries (the model recognized a real existing task), or the user's own
+   *  spoken words when it can't find a match (so the client can still show "did you mean...", or
+   *  treat it as a forward reference to a task not seen yet). FAIL-CLOSED: an element with no
+   *  words to search by is meaningless to the client's local resolver, so the whole ref element is
+   *  dropped rather than kept with an empty query. */
+  titleQuery: ConfidenceValue<string>;
+  /** The model's HINT that the user referred to an ALREADY-EXISTING task (vs. a brand-new one it
+   *  just extracted, or one it can't find at all). Advisory only — the client's own local
+   *  resolution is the source of truth, this never causes an auto-commit by itself. FAIL-OPEN: a
+   *  wrong-typed value just omits the field, keeping the rest of the ref (see `validateTaskRef`). */
+  assumeExisting?: boolean;
+}
+
+/** task_refs_v1: the fields of an existing task's own edit this update proposes, reusing the SAME
+ *  inner validators as the matching field on `ParsedTaskOut` (see `validateTaskUpdate`) so a
+ *  `deadline`/`priority`/etc value validates identically whether it lands on a brand-new task or as
+ *  an edit to a referenced one. Each field is independently FAIL-OPEN. */
+export interface TaskUpdateSetOut {
+  deadline?: ConfidenceValue<string>;
+  startTime?: ConfidenceValue<string>;
+  /** APPEND semantics, not replace — the client appends this to the referenced task's EXISTING
+   *  notes; named `notesAppend` (not `notes`) specifically so it is never confused with
+   *  `ParsedTaskOut.notes`'s replace-the-whole-field semantics. */
+  notesAppend?: ConfidenceValue<string>;
+  priority?: ConfidenceValue<number>;
+  reminderOverride?: ConfidenceValue<ParsedReminderOverrideOut>;
+}
+
+/** task_refs_v1: one NEW dependency this update proposes adding to the referenced (existing) task.
+ *  `newTaskIndex` points into the SAME response's own freshly-extracted `tasks[]` (1-based,
+ *  post-validation/truncation) — "the referenced existing task must now wait for new task #N" —
+ *  deliberately a DIFFERENT index space from `TaskUpdateOut.refIndex` (which points into
+ *  `taskRefs[]`); do not conflate the two. Per-element FAIL-OPEN (see `validateTaskUpdateCondition`
+ *  — an element that doesn't fully validate carries no information, so it's dropped whole rather
+ *  than partially kept). */
+export type TaskUpdateConditionOut =
+  | { kind: "taskDone"; newTaskIndex: number }
+  | { kind: "afterDate"; date: string };
+
+/** task_refs_v1 (anh Khôi, 2026-08-02 task-refs design): "task kia phải xong hôm nay" — the model
+ *  expresses an UPDATE to an EXISTING task (identified via `taskRefs[refIndex - 1]`) rather than a
+ *  new task. The client NEVER auto-applies this — it is always surfaced for user confirmation
+ *  before touching the referenced task, mirroring the constitutional rule that untrusted model
+ *  output never silently mutates user data (see `validateResolveCompletion`'s own doc comment for
+ *  the same posture on a different route). An utterance that ONLY updates an existing task (e.g.
+ *  "task kia phải xong hôm nay", no new task mentioned at all) legitimately produces an EMPTY
+ *  `tasks[]` alongside a non-empty `updates[]` — that is a valid response, not an error (see
+ *  `validateParseEnvelope`'s doc comment). */
+export interface TaskUpdateOut {
+  /** REQUIRED, 1-based into this response's validated `taskRefs[]` (validated AFTER `taskRefs`
+   *  truncation, i.e. against the truncated/validated count) — same 1-based convention + rationale
+   *  as `validateResolveCompletion`'s `matchIndex`: an update that doesn't point at a real ref is
+   *  meaningless, and worse, dangerous to misapply to the wrong task, so the WHOLE element is
+   *  dropped (FAIL-CLOSED) rather than guessed at. See `validateTaskUpdate`. */
+  refIndex: number;
+  set?: TaskUpdateSetOut;
+  addConditions?: TaskUpdateConditionOut[];
 }
 
 export interface ParsedSubtaskOut {
@@ -519,16 +659,105 @@ function validateConfidenceValue<T>(
   return { value: inner, confidence: v.confidence };
 }
 
-function validateCondition(v: unknown): ParsedConditionOut | undefined {
+/** task_refs_v1 (anh Khôi, 2026-08-02): the context `validateParseEnvelope` threads down through
+ *  `validateParsedTaskArray`'s internals to `validateParsedTask` -> `validateCondition`/
+ *  `validateReminderOverride`, ONLY on the envelope path — the bare-array path never constructs
+ *  one, so every call site below defaults it to `undefined` and treats that as "old behavior,
+ *  exactly as before". `taskRefCount` is the TRUNCATED/validated `taskRefs.length`, i.e. valid
+ *  `refIndex` values are the inclusive range `1...taskRefCount`. */
+interface ParseEnvelopeCtx {
+  taskRefCount: number;
+}
+
+/** Shared by `taskDone` and `taskStart` conditions in envelope mode: validates the OPTIONAL
+ *  `refIndex` field — 1-based into `taskRefs[]`. FAIL-OPEN: a missing/malformed value returns
+ *  `undefined` and the caller simply omits the field, keeping the rest of the condition — this is
+ *  a precise pointer that COMPLEMENTS the fuzzy `referenceTitle`, which stays the required/primary
+ *  signal (see `ParsedConditionOut.refIndex`'s doc comment), so losing it is never fatal to the
+ *  condition as a whole. */
+function validateRefIndex(v: Record<string, unknown>, ctx: ParseEnvelopeCtx): number | undefined {
+  if (
+    isFiniteNumber(v.refIndex) &&
+    Number.isInteger(v.refIndex) &&
+    v.refIndex >= 1 &&
+    v.refIndex <= ctx.taskRefCount
+  ) {
+    return v.refIndex;
+  }
+  return undefined;
+}
+
+/** Shared by `taskDone` and `taskStart` conditions in envelope mode: validates the OPTIONAL
+ *  `offsetMinutes`/`offsetKind` pair. `allowNegative` is the one behavioral difference between the
+ *  two kinds: `taskDone`'s offset is always AFTER the referenced task finishes ("2h sau khi xong
+ *  X" — positive only, "before it's done" isn't a coherent instant), while `taskStart`'s offset may
+ *  be negative — "before the referenced task's start" ("nhắc ít nhất 2h trước khi làm task kia" =
+ *  -120) — as well as positive. Zero is rejected in both directions: an offset of 0 minutes is
+ *  indistinguishable from "at the moment", which needs no offset field at all. FAIL-OPEN, and as
+ *  ONE UNIT: a malformed/missing `offsetMinutes` drops BOTH fields (an `offsetKind` with no
+ *  `offsetMinutes` to modify is meaningless on its own); a malformed `offsetKind` alone drops only
+ *  itself and keeps `offsetMinutes`. */
+function validateOffsetFields(
+  v: Record<string, unknown>,
+  allowNegative: boolean,
+): { offsetMinutes?: number; offsetKind?: "exact" | "atLeast" } {
+  if (v.offsetMinutes === undefined) return {};
+  const n = v.offsetMinutes;
+  const inRange = allowNegative
+    ? isFiniteNumber(n) && Number.isInteger(n) && n !== 0 &&
+      n >= -MAX_CONDITION_OFFSET_MINUTES && n <= MAX_CONDITION_OFFSET_MINUTES
+    : isFiniteNumber(n) && Number.isInteger(n) && n >= 1 && n <= MAX_CONDITION_OFFSET_MINUTES;
+  if (!inRange) return {};
+  const out: { offsetMinutes?: number; offsetKind?: "exact" | "atLeast" } = { offsetMinutes: n as number };
+  if (v.offsetKind === "exact" || v.offsetKind === "atLeast") out.offsetKind = v.offsetKind;
+  return out;
+}
+
+/** Validates a single `conditions[]` element. `ctx` present (envelope mode, task_refs_v1) unlocks:
+ *  (a) the `"taskStart"` kind entirely, and (b) three extra OPTIONAL fields on `"taskDone"`
+ *  (`refIndex`/`offsetMinutes`/`offsetKind`) — see `ParsedConditionOut`'s doc comments for what
+ *  each means. `ctx` ABSENT (the bare-array path every pre-existing caller of
+ *  `validateParsedTaskArray` still uses) validates EXACTLY as before this change: `"taskStart"` is
+ *  an unrecognized kind and the whole element is dropped (same as any other bogus `kind` always
+ *  was), and `taskDone`'s three extra fields are never even inspected, let alone emitted — this is
+ *  the back-compat guarantee the task brief requires (a client that never sent `client_caps` must
+ *  get a byte-identical response to before this feature existed). */
+function validateCondition(v: unknown, ctx?: ParseEnvelopeCtx): ParsedConditionOut | undefined {
   if (!isPlainObject(v)) return undefined;
-  if (v.kind !== "taskDone" && v.kind !== "afterDate" && v.kind !== "external") return undefined;
+  const validKinds: string[] = ctx
+    ? ["taskDone", "afterDate", "external", "taskStart"]
+    : ["taskDone", "afterDate", "external"];
+  if (typeof v.kind !== "string" || !validKinds.includes(v.kind)) return undefined;
+
   if (v.kind === "taskDone") {
+    // Unchanged from before this feature: `referenceTitle` required, no length cap (never had
+    // one) — do not add one here, that would be a behavior change on the bare-array path too.
     if (!isNonEmptyString(v.referenceTitle)) return undefined;
-    return { kind: "taskDone", referenceTitle: v.referenceTitle };
+    const out: ParsedConditionOut = { kind: "taskDone", referenceTitle: v.referenceTitle };
+    if (ctx) {
+      const refIndex = validateRefIndex(v, ctx);
+      if (refIndex !== undefined) out.refIndex = refIndex;
+      Object.assign(out, validateOffsetFields(v, false));
+    }
+    return out;
   }
   if (v.kind === "afterDate") {
     if (!isIso8601(v.date)) return undefined;
     return { kind: "afterDate", date: v.date as string };
+  }
+  if (v.kind === "taskStart") {
+    // Only reachable when ctx is present (`validKinds` excludes "taskStart" otherwise). REQUIRED,
+    // FAIL-CLOSED `referenceTitle` — unlike `taskDone` above, this is a BRAND NEW kind with no
+    // legacy behavior to preserve, so it gets the same cap every other model-emitted title field
+    // in this file carries.
+    if (!isNonEmptyString(v.referenceTitle) || (v.referenceTitle as string).length > MAX_TASK_TITLE_CHARS) {
+      return undefined;
+    }
+    const out: ParsedConditionOut = { kind: "taskStart", referenceTitle: v.referenceTitle as string };
+    const refIndex = validateRefIndex(v, ctx!);
+    if (refIndex !== undefined) out.refIndex = refIndex;
+    Object.assign(out, validateOffsetFields(v, true)); // negative offsets allowed ("before start")
+    return out;
   }
   if (!isNonEmptyString(v.description)) return undefined;
   return { kind: "external", description: v.description };
@@ -546,7 +775,7 @@ function validateRecurrence(v: unknown): ParsedRecurrenceOut | undefined {
   return { type: v.type };
 }
 
-function validateReminderOverride(v: unknown): ParsedReminderOverrideOut | undefined {
+function validateReminderOverride(v: unknown, ctx?: ParseEnvelopeCtx): ParsedReminderOverrideOut | undefined {
   if (!isPlainObject(v)) return undefined;
   if (!Array.isArray(v.offsetsMinutes) || v.offsetsMinutes.length === 0) return undefined;
   if (!v.offsetsMinutes.every((n) => isFiniteNumber(n))) return undefined;
@@ -563,6 +792,26 @@ function validateReminderOverride(v: unknown): ParsedReminderOverrideOut | undef
   if (v.remindPeriodMinutes !== undefined) {
     if (isFiniteNumber(v.remindPeriodMinutes) && v.remindPeriodMinutes > 0) {
       out.remindPeriodMinutes = v.remindPeriodMinutes;
+    }
+  }
+  // `anchor` (task_refs_v1, anh Khôi 2026-08-02): ONLY inspected when `ctx` is present (envelope
+  // mode) — a bare-array caller never passes `ctx`, so this block never runs there and `anchor`
+  // never appears on that path, matching every other task_refs_v1 field's back-compat rule.
+  // FAIL-OPEN AS A UNIT (unlike `repeatEveryMinutes` above, which fails the WHOLE override): a
+  // malformed anchor drops only the anchor object, never `offsetsMinutes`/`repeatEveryMinutes`/
+  // `remindPeriodMinutes` already validated above — an unresolvable anchor still leaves a perfectly
+  // usable deadline-relative reminder behind.
+  if (ctx && isPlainObject(v.anchor)) {
+    const refIndex = v.anchor.refIndex;
+    const event = v.anchor.event;
+    if (
+      isFiniteNumber(refIndex) &&
+      Number.isInteger(refIndex) &&
+      refIndex >= 1 &&
+      refIndex <= ctx.taskRefCount &&
+      (event === "done" || event === "start")
+    ) {
+      out.anchor = { refIndex, event };
     }
   }
   return out;
@@ -602,8 +851,15 @@ function validateSubtask(v: unknown): ParsedSubtaskOut | undefined {
  *
  *  This does NOT relax type/shape checking — a field that fails validation is omitted, never
  *  passed through with an unvalidated/partially-validated value; nothing unchecked ever reaches
- *  `out`. */
-function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
+ *  `out`.
+ *
+ *  `ctx` (task_refs_v1, anh Khôi 2026-08-02): OPTIONAL, threaded down to `validateCondition`/
+ *  `validateReminderOverride` unchanged. Absent (every pre-existing bare-array call site) ->
+ *  those two functions behave EXACTLY as they did before this change. Present (only from
+ *  `validateParseEnvelope` via `validateParsedTaskArray`'s internal helper) -> unlocks the
+ *  `taskStart` condition kind and the `refIndex`/`offsetMinutes`/`offsetKind`/`anchor` extension
+ *  fields, all of which need to resolve against `taskRefs[]`. */
+function validateParsedTask(v: unknown, ctx?: ParseEnvelopeCtx): ParsedTaskOut | undefined {
   if (!isPlainObject(v)) return undefined;
 
   const title = validateConfidenceValue(v.title, (s) =>
@@ -654,7 +910,9 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
   }
 
   if (v.reminderOverride !== undefined) {
-    const reminderOverride = validateConfidenceValue(v.reminderOverride, validateReminderOverride);
+    const reminderOverride = validateConfidenceValue(v.reminderOverride, (inner) =>
+      validateReminderOverride(inner, ctx)
+    );
     if (reminderOverride) out.reminderOverride = reminderOverride;
   }
 
@@ -665,7 +923,7 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
   if (v.conditions !== undefined && Array.isArray(v.conditions)) {
     const conditions: ConfidenceValue<ParsedConditionOut>[] = [];
     for (const c of v.conditions) {
-      const cond = validateConfidenceValue(c, validateCondition);
+      const cond = validateConfidenceValue(c, (inner) => validateCondition(inner, ctx));
       if (cond) conditions.push(cond);
     }
     out.conditions = conditions;
@@ -717,13 +975,23 @@ function validateParsedTask(v: unknown): ParsedTaskOut | undefined {
  *    malformed."
  *  An empty array IS a valid, well-formed response (the model legitimately found no actionable
  *  tasks in the transcript, e.g. small talk) — it must return `200 []`, not a 502; rejecting it
- *  as malformed would burn a full quota slot on a request that produced a perfectly good answer. */
-export function validateParsedTaskArray(v: unknown): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
+ *  as malformed would burn a full quota slot on a request that produced a perfectly good answer.
+ *
+ *  Internal `ctx`-aware implementation (task_refs_v1, anh Khôi 2026-08-02): factored out so
+ *  `validateParseEnvelope` below can reuse the EXACT same truncation/fail-open/502 logic for the
+ *  envelope path (where `tasks[]` validation needs to know `taskRefs.length` to resolve
+ *  `refIndex`/`anchor` fields) without duplicating it. `validateParsedTaskArray`, the pre-existing
+ *  EXPORTED function every bare-array caller already uses, keeps its exact original signature and
+ *  behavior below — it is now a one-line call into this with `ctx` left `undefined`. */
+function validateParsedTaskArrayCtx(
+  v: unknown,
+  ctx?: ParseEnvelopeCtx,
+): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
   if (!Array.isArray(v)) return undefined;
   const tasks: ParsedTaskOut[] = [];
   let invalidCount = 0;
   for (const item of v) {
-    const task = validateParsedTask(item);
+    const task = validateParsedTask(item, ctx);
     if (task) {
       tasks.push(task);
     } else {
@@ -736,6 +1004,227 @@ export function validateParsedTaskArray(v: unknown): { tasks: ParsedTaskOut[]; d
   if (v.length > 0 && tasks.length === 0) return undefined;
   const droppedCount = invalidCount + Math.max(0, tasks.length - MAX_TASKS);
   return { tasks: tasks.slice(0, MAX_TASKS), droppedCount };
+}
+
+export function validateParsedTaskArray(v: unknown): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
+  return validateParsedTaskArrayCtx(v);
+}
+
+// ---------------------------------------------------------------------------------------------
+// task_refs_v1 envelope (anh Khôi, 2026-08-02 task-refs design). See `ParseRequest.clientCaps`,
+// `TaskRefOut`, `TaskUpdateOut` above for the wire contract; `validateParseEnvelope` below is the
+// entry point `parse/index.ts` calls when `wantsEnvelope` is true.
+// ---------------------------------------------------------------------------------------------
+
+/** Validates a single `TaskRefOut` element. FAIL-CLOSED on `titleQuery` (an element with no words
+ *  to search by is meaningless to the client's local resolver — nothing downstream can act on it),
+ *  FAIL-OPEN on `assumeExisting` (a wrong-typed hint just gets dropped; it is advisory only, the
+ *  client's own local resolution is the source of truth and this server never auto-commits
+ *  anything off it). See `TaskRefOut`'s own doc comment for the field semantics. */
+function validateTaskRef(v: unknown): TaskRefOut | undefined {
+  if (!isPlainObject(v)) return undefined;
+  const titleQuery = validateConfidenceValue(v.titleQuery, (s) =>
+    isNonEmptyString(s) && (s as string).length <= MAX_TASK_TITLE_CHARS ? (s as string) : undefined
+  );
+  if (!titleQuery) return undefined;
+  const out: TaskRefOut = { titleQuery };
+  if (typeof v.assumeExisting === "boolean") {
+    out.assumeExisting = v.assumeExisting;
+  }
+  return out;
+}
+
+/** Validates one element of `TaskUpdateOut.addConditions`. Each element is checked as a WHOLE
+ *  (fail-closed per element — an element that doesn't fully validate carries no usable
+ *  information, unlike `ParsedTaskOut`'s independently-fail-open scalar fields) but a bad element
+ *  is simply dropped from the array, not fatal to the array itself (that's the caller's loop).
+ *  `newTaskIndex` is 1-based into THIS RESPONSE's own freshly-extracted, validated, truncated
+ *  `tasks[]` — a DIFFERENT index space from `TaskUpdateOut.refIndex` (which points into
+ *  `taskRefs[]`) — "the referenced existing task must now wait for new task #N", checked against
+ *  `validatedTaskCount`, the count AFTER `MAX_TASKS` truncation, matching every other
+ *  index-bounds check in this file being checked against the post-truncation count, never the
+ *  model's raw claim. */
+function validateTaskUpdateCondition(v: unknown, validatedTaskCount: number): TaskUpdateConditionOut | undefined {
+  if (!isPlainObject(v)) return undefined;
+  if (v.kind === "taskDone") {
+    if (
+      !isFiniteNumber(v.newTaskIndex) ||
+      !Number.isInteger(v.newTaskIndex) ||
+      v.newTaskIndex < 1 ||
+      v.newTaskIndex > validatedTaskCount
+    ) {
+      return undefined;
+    }
+    return { kind: "taskDone", newTaskIndex: v.newTaskIndex };
+  }
+  if (v.kind === "afterDate") {
+    if (!isIso8601(v.date)) return undefined;
+    return { kind: "afterDate", date: v.date as string };
+  }
+  return undefined;
+}
+
+/** Validates a single `TaskUpdateOut` element. `refIndex` is REQUIRED and FAIL-CLOSED — same
+ *  1-based convention + rationale as `validateResolveCompletion`'s `matchIndex` below: an update
+ *  that doesn't point at a real ref is meaningless, and worse, dangerous to misapply to the wrong
+ *  task, so the whole element is dropped rather than guessed at. `refCount` here is already the
+ *  TRUNCATED/validated `taskRefs.length` (`validateParseEnvelope` validates `taskRefs` BEFORE
+ *  `updates`, specifically so this bound is available) — a `refIndex` pointing at a ref that
+ *  itself got dropped (invalid) or truncated past `MAX_TASK_REFS` is therefore correctly
+ *  out-of-range here too, with no separate check needed.
+ *
+ *  `set`/`addConditions` are each independently validated, reusing the SAME inner validators as
+ *  the matching field on `ParsedTaskOut` so a value validates identically whether it lands on a
+ *  brand-new task or as an edit to a referenced one — see `TaskUpdateSetOut`'s doc comment. An
+ *  element whose `set` validated to nothing AND whose `addConditions` validated to nothing carries
+ *  no information at all (a no-op update) and is dropped entirely, counted in the caller's
+ *  `droppedCount`. */
+function validateTaskUpdate(v: unknown, refCount: number, validatedTaskCount: number): TaskUpdateOut | undefined {
+  if (!isPlainObject(v)) return undefined;
+
+  if (
+    !isFiniteNumber(v.refIndex) ||
+    !Number.isInteger(v.refIndex) ||
+    v.refIndex < 1 ||
+    v.refIndex > refCount
+  ) {
+    return undefined;
+  }
+
+  let set: TaskUpdateSetOut | undefined;
+  if (isPlainObject(v.set)) {
+    const raw = v.set;
+    const s: TaskUpdateSetOut = {};
+    if (raw.deadline !== undefined) {
+      const deadline = validateConfidenceValue(raw.deadline, (x) => (isIso8601(x) ? (x as string) : undefined));
+      if (deadline) s.deadline = deadline;
+    }
+    if (raw.startTime !== undefined) {
+      const startTime = validateConfidenceValue(raw.startTime, (x) => (isIso8601(x) ? (x as string) : undefined));
+      if (startTime) s.startTime = startTime;
+    }
+    if (raw.notesAppend !== undefined) {
+      const notesAppend = validateConfidenceValue(raw.notesAppend, (x) =>
+        typeof x === "string" && x.length <= MAX_NOTES_CHARS ? x : undefined
+      );
+      if (notesAppend) s.notesAppend = notesAppend;
+    }
+    if (raw.priority !== undefined) {
+      const priority = validateConfidenceValue(raw.priority, (x) =>
+        isFiniteNumber(x) && Number.isInteger(x) && x >= 1 && x <= 4 ? x : undefined
+      );
+      if (priority) s.priority = priority;
+    }
+    if (raw.reminderOverride !== undefined) {
+      const reminderOverride = validateConfidenceValue(raw.reminderOverride, (x) =>
+        validateReminderOverride(x, { taskRefCount: refCount })
+      );
+      if (reminderOverride) s.reminderOverride = reminderOverride;
+    }
+    if (Object.keys(s).length > 0) set = s;
+  }
+
+  let addConditions: TaskUpdateConditionOut[] | undefined;
+  if (Array.isArray(v.addConditions)) {
+    const conds: TaskUpdateConditionOut[] = [];
+    for (const c of v.addConditions) {
+      const cond = validateTaskUpdateCondition(c, validatedTaskCount);
+      if (cond) conds.push(cond);
+    }
+    if (conds.length > 0) addConditions = conds;
+  }
+
+  // No usable `set` AND no usable `addConditions` -> this element carries zero information; drop
+  // it rather than emit an update that changes nothing.
+  if (!set && !addConditions) return undefined;
+
+  const out: TaskUpdateOut = { refIndex: v.refIndex };
+  if (set) out.set = set;
+  if (addConditions) out.addConditions = addConditions;
+  return out;
+}
+
+/** Validates the model's full envelope-mode response `{ tasks, taskRefs, updates }` — the
+ *  `task_refs_v1` counterpart to `validateParsedTaskArray`, used ONLY when the request carried
+ *  `client_caps: ["task_refs_v1"]` (see `wantsEnvelope` in `parse/index.ts`).
+ *
+ *  ORDER MATTERS and is fixed deliberately: `taskRefs` validates FIRST (nothing downstream needs
+ *  it to validate itself), giving a `refCount` that `tasks` needs (to resolve `refIndex`/`anchor`
+ *  on conditions and reminder overrides); `tasks` validates SECOND, giving a validated/truncated
+ *  count that `updates` needs (to resolve `addConditions[].newTaskIndex`); `updates` validates
+ *  LAST, needing both of the above.
+ *
+ *  Accepts a raw envelope object `{ tasks, taskRefs, updates }` and, DEFENSIVELY, a bare array too
+ *  (treated as `{ tasks: v, taskRefs: [], updates: [] }`) — `buildParseEnvelopeResponseSchema()`'s
+ *  schema-constrained request to Gemini is a strong HINT, never a GUARANTEE (see this file's
+ *  module doc comment): a provider bug/truncation/safety-filter substitution could still hand back
+ *  a bare array even though the envelope shape was asked for, and that's still salvageable as
+ *  "zero refs/updates, just tasks" rather than a hard 502.
+ *
+ *  Same 502 semantics as `validateParsedTaskArray`: returns `undefined` ONLY when `tasks` is not
+ *  an array at all, or is a non-empty array where every task failed validation — i.e. the model
+ *  produced nothing usable. Critically, an EMPTY `tasks: []` alongside non-empty `taskRefs`/
+ *  `updates` is a VALID response, not a 502 — "task kia phải xong hôm nay" is a real, complete
+ *  utterance that creates zero new tasks and only updates an existing one; rejecting that as
+ *  malformed would burn a quota slot on a request that produced a perfectly good answer, the exact
+ *  failure mode `validateParsedTaskArray`'s own doc comment already warns against for the
+ *  bare-array case.
+ *
+ *  `droppedCount` aggregates every kind of silent loss across all three arrays (tasks
+ *  dropped/truncated, refs dropped/truncated, updates dropped/truncated) — `parse/index.ts` also
+ *  logs `taskRefs.length`/`updates.length` alongside it so the aggregate and the per-array shape
+ *  are both visible to operators, mirroring how `validateParsedTaskArray`'s own `droppedCount` is
+ *  logged today. */
+export function validateParseEnvelope(
+  v: unknown,
+): { tasks: ParsedTaskOut[]; taskRefs: TaskRefOut[]; updates: TaskUpdateOut[]; droppedCount: number } | undefined {
+  const envelope: Record<string, unknown> = Array.isArray(v)
+    ? { tasks: v, taskRefs: [], updates: [] }
+    : isPlainObject(v)
+    ? v
+    : {};
+
+  // --- taskRefs FIRST: gives `refCount`, needed by both `tasks` and `updates` below. ---
+  const rawRefs = Array.isArray(envelope.taskRefs) ? envelope.taskRefs : [];
+  let refInvalidCount = 0;
+  const taskRefs: TaskRefOut[] = [];
+  for (const item of rawRefs) {
+    const ref = validateTaskRef(item);
+    if (ref) {
+      taskRefs.push(ref);
+    } else {
+      refInvalidCount++;
+    }
+  }
+  const refDroppedCount = refInvalidCount + Math.max(0, taskRefs.length - MAX_TASK_REFS);
+  const validRefs = taskRefs.slice(0, MAX_TASK_REFS);
+  const ctx: ParseEnvelopeCtx = { taskRefCount: validRefs.length };
+
+  // --- tasks SECOND, threading `ctx` down so refIndex/anchor fields can resolve against `taskRefs`. ---
+  const tasksResult = validateParsedTaskArrayCtx(envelope.tasks, ctx);
+  if (!tasksResult) return undefined;
+
+  // --- updates LAST: needs both `ctx.taskRefCount` and the validated/truncated task count. ---
+  const rawUpdates = Array.isArray(envelope.updates) ? envelope.updates : [];
+  let updateInvalidCount = 0;
+  const updates: TaskUpdateOut[] = [];
+  for (const item of rawUpdates) {
+    const update = validateTaskUpdate(item, ctx.taskRefCount, tasksResult.tasks.length);
+    if (update) {
+      updates.push(update);
+    } else {
+      updateInvalidCount++;
+    }
+  }
+  const updateDroppedCount = updateInvalidCount + Math.max(0, updates.length - MAX_UPDATES);
+  const validUpdates = updates.slice(0, MAX_UPDATES);
+
+  return {
+    tasks: tasksResult.tasks,
+    taskRefs: validRefs,
+    updates: validUpdates,
+    droppedCount: tasksResult.droppedCount + refDroppedCount + updateDroppedCount,
+  };
 }
 
 /** Validates the model's breakdown-mode response `{ steps: [...] }`. Step COUNT outside
