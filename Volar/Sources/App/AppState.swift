@@ -892,8 +892,10 @@ final class AppState {
     /// itself carries no additional gating so previews/tests can drive it directly.
     var showTriage = false
     var reminderBanner: ReminderBanner? = nil
-    /// The task currently shown in the detail sheet, by id — `nil` means the sheet is closed.
+    /// The task currently shown in the detail panel, by id — `nil` means the panel is closed.
     /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
+    /// Was a `.sheet` gate before the panel-refactor pass (specs/005-cursor-retheme/panel-
+    /// refactor.md); the signature and every call site are unchanged, only the presentation is.
     var detailTaskID: UUID?
     /// ⌘K command bar (`Sources/Views/CommandBar.swift`, "Volar Graphite" pass §4.2) — presented as
     /// an overlay over the main window's content in `VolarApp.swift`, not a `.sheet`. Presentation-
@@ -1631,7 +1633,7 @@ final class AppState {
     var openTasks: [TaskItem] { nowTasks + laterTasks }
     var frogTask: TaskItem? { tasks.first { $0.frog && !$0.done } }
 
-    /// The task currently shown in the detail sheet (looked up live so edits/toggles reflect).
+    /// The task currently shown in the detail panel (looked up live so edits/toggles reflect).
     var detailTask: TaskItem? { detailTaskID.flatMap { id in tasks.first { $0.id == id } } }
 
     /// THE integration point with feature 001 (VolarCore nextTask engine): recomputed from the
@@ -2050,9 +2052,18 @@ final class AppState {
         return "Can't add that dependency — it would create a loop: \(path). None of these could ever start."
     }
 
-    // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
+    // MARK: - Detail panel (Phase 1: click a task row to see/hear its full description; panel-
+    // refactor pass, specs/005-cursor-retheme/panel-refactor.md §5 item 1, turned the sheet this
+    // comment used to describe into an inspector panel — same `detailTaskID` signature throughout)
 
-    func openDetail(_ id: UUID) { detailTaskID = id }
+    /// Toggle, not a plain setter (panel-refactor.md §4): tapping the row that is ALREADY open
+    /// closes the panel instead of re-opening it on itself. This is deliberately the panel's only
+    /// non-Esc close gesture besides the Close button (path (c) in `TaskDetailView`'s commit
+    /// mechanism) — Esc is intentionally NOT bound to the panel (§4 of the spec: it already belongs
+    /// to the capture popover's `escCancelButton` and the ⌘K command bar; a third claimant risks
+    /// closing the wrong surface). Every call site (`TaskRow`, NOW spotlight, `NextPeekRow`) keeps
+    /// calling this the same way — a second tap on the same row is the only new behavior.
+    func openDetail(_ id: UUID) { detailTaskID = (detailTaskID == id) ? nil : id }
     func closeDetail() { detailTaskID = nil }
     /// Speaks a task's description (falls back to its title when there's no description).
     func speakDetails(of task: TaskItem) {

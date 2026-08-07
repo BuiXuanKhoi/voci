@@ -1,12 +1,17 @@
-// Sources/Views/TaskDetailView.swift — task detail sheet: edit-in-place + read-aloud + actions.
+// Sources/Views/TaskDetailView.swift — task detail INSPECTOR PANEL: edit-in-place + read-aloud +
+// actions. Panel-refactor (2026-08-07, specs/005-cursor-retheme/panel-refactor.md) moved this from
+// a modal `.sheet` (the `.sheet` used to live in `VolarApp.swift`, gated on
+// `appState.detailTaskID != nil`) to a 300pt column docked in `TodayView.body`'s own `HStack`,
+// alongside `Sidebar`/`mainColumn` — see that file's `detailPanel`. Nothing about the commit
+// mechanism below changed for that move; only the presentation container did.
 // Phase 1 originally shipped this read-only. T-manual-edit (2026-07-29, anh Khôi — see
 // specs/002-workflow-command-center/contracts/manual-edit-contract.md §4) turns it into an
 // edit-in-place surface for all 7 manually-editable fields (title, description, priority, start
-// time, deadline, duration, remind period) instead of adding a separate Edit sheet — the same UI
+// time, deadline, duration, remind period) instead of adding a separate Edit panel — the same UI
 // decision the contract froze for this file. Every edit commits through `AppState.updateTask`
 // (the manual-edit contract's single write path, §1.4, owned by a sibling agent) — this file never
 // touches `TaskStore` directly. Reads the live task off `AppState.detailTask` (rather than taking
-// one as a param) so toggling done / editing elsewhere is reflected immediately while the sheet is
+// one as a param) so toggling done / editing elsewhere is reflected immediately while the panel is
 // open.
 import SwiftUI
 import VolarCore
@@ -17,21 +22,26 @@ struct TaskDetailView: View {
     var body: some View {
         if let task = appState.detailTask {
             // `.id(task.id)` gives `TaskDetailEditor` a fresh identity — and therefore freshly
-            // re-seeded `@State` edit buffers — whenever the sheet switches to a DIFFERENT task.
-            // Re-renders of the SAME task (e.g. `detailTask` recomputing after this view's own
-            // commit, or after some unrelated background change) keep the existing identity, so
-            // in-progress edits in the buffers are never stomped — see `TaskDetailEditor`'s own
-            // header comment for the full argument.
+            // re-seeded `@State` edit buffers — whenever the panel switches to a DIFFERENT task
+            // (clicking a different row while the panel is already open, which is the whole reason
+            // this is a panel now instead of a sheet: a sheet could never be switched without
+            // closing it first). Re-renders of the SAME task (e.g. `detailTask` recomputing after
+            // this view's own commit, or after some unrelated background change) keep the existing
+            // identity, so in-progress edits in the buffers are never stomped — see
+            // `TaskDetailEditor`'s own header comment for the full argument.
             TaskDetailEditor(task: task, appState: appState)
                 .id(task.id)
         } else {
-            // Sheet is mid-dismiss (or detailTaskID got cleared out from under us) — nothing to show.
+            // Panel is closed (or `detailTaskID` got cleared out from under us) — nothing to show.
+            // `TodayView.detailPanel` also wraps this whole view in an `if appState.detailTask !=
+            // nil` at the `HStack` level, so in practice this branch just means "don't reserve any
+            // visual weight" rather than "hide a 300pt empty box."
             EmptyView()
         }
     }
 }
 
-/// Owns the edit-in-place `@State` buffers for exactly one task's detail sheet. A dedicated `View`
+/// Owns the edit-in-place `@State` buffers for exactly one task's detail panel. A dedicated `View`
 /// struct (not a set of private methods on `TaskDetailView` itself) for the same reason
 /// `DeadlineControl`/`NotesEditorControl` in `PopoverView.swift` are: `@State` needs a stable
 /// identity to seed once and hold across re-renders, which a `@ViewBuilder` method sharing its
@@ -97,27 +107,37 @@ private struct TaskDetailEditor: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            header
-            metaRow
-            descriptionSection
-            dependencySection
-            actions
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                header
+                metaRow
+                descriptionSection
+                dependencySection
+                actions
+            }
+            .padding(20)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(20)
-        .frame(minWidth: 480, minHeight: 520)
-        .volarGlass(level: .standard, cornerRadius: 16)
         .onChange(of: focusedField) { oldValue, _ in
             // Mechanism branch (b): fires on every focus transition; only commit when LEAVING a
             // field (oldValue != nil) — landing focus in a field for the first time has nothing to
-            // commit yet, and would otherwise fire a spurious commit on sheet open.
+            // commit yet, and would otherwise fire a spurious commit on panel open.
             if oldValue != nil {
                 commitIfChanged()
             }
         }
         .onDisappear {
             // Mechanism branch (d): safety net for Esc / click-outside, neither of which runs the
-            // Close button's own commit (branch (c), below in `actions`).
+            // Close button's own commit (branch (c), below in `actions`) — STILL load-bearing now
+            // that this is a panel, not a sheet (panel-refactor.md §3). This view disappears twice:
+            // when `detailTask` goes back to `nil` (panel closes), and when `TaskDetailView`'s
+            // `.id(task.id)` changes because the user clicked a DIFFERENT row while this panel was
+            // already open — SwiftUI tears down the old `.id()`-identified view (firing this
+            // `.onDisappear` on it) before building the new one. That second case is the only
+            // reason a panel can lose an in-progress edit that a sheet never could (a sheet has to
+            // close before another task can be opened at all), which is exactly what this branch
+            // protects against. Do not delete this modifier on the theory that "the panel never
+            // disappears" — it does, and this is the safety net for both times it does.
             commitIfChanged()
         }
     }
@@ -178,8 +198,10 @@ private struct TaskDetailEditor: View {
         }
     }
 
-    // MARK: - Meta row (priority · deadline · duration · start time · remind period · status) —
-    // labels mirror `TaskRow` where a field also appears there.
+    // MARK: - Meta row — vertical inspector field list (priority / deadline / duration /
+    // start time / remind period / status), one label+value row per field. See `metaRow`'s own
+    // doc comment for why this is a `VStack` of rows rather than the single `HStack` it used to
+    // be. Field labels mirror `TaskRow` where a field also appears there.
 
     private var priorityColor: Color {
         switch priorityBuffer {
@@ -197,26 +219,51 @@ private struct TaskDetailEditor: View {
         }
     }
 
-    private var bullet: some View {
-        Text("\u{00B7}").opacity(0.4)
-    }
-
+    /// Vertical inspector field list — one label/value row per field, the standard inspector
+    /// idiom (Xcode's and Cursor's inspectors both lay out this way). The original `metaRow` was
+    /// a single `HStack` of six controls plus five `·` separators, sized for the old 480pt
+    /// `.sheet` presentation; that needs roughly 450pt and does not fit this view's current
+    /// 340pt panel / ~300pt content width, and `HStack` doesn't wrap, so trailing controls got
+    /// clipped. A vertical list has no width ceiling of its own — each row only needs to fit
+    /// label + value on one line, which it does at any panel width this app uses.
+    ///
+    /// The label style (10pt medium, 0.7 tracking, uppercase, `textMut`) matches
+    /// `SectionHeader` (`Components.swift`) and `DiffRow` (`DiffRow.swift`), the two other places
+    /// this app already renders an uppercase field label — not invented fresh here. The row VALUE
+    /// font/color (12pt medium `textSec`) is `metaRow`'s original styling, applied to the
+    /// container so each control still renders exactly as it did before; each label's own
+    /// explicit `.font`/`.foregroundStyle` below is more specific and wins over that container
+    /// styling, so labels render at 10pt `textMut`, not the 12pt `textSec` value style.
     private var metaRow: some View {
-        HStack(spacing: 8) {
-            priorityMenu
-            bullet
-            deadlineControl
-            bullet
-            durationMenu
-            bullet
-            startTimeControl
-            bullet
-            remindPeriodMenu
-            bullet
-            Text(task.done ? "Done" : "Open")
+        VStack(alignment: .leading, spacing: 7) {
+            metaFieldRow("PRIORITY") { priorityMenu }
+            metaFieldRow("DEADLINE") { deadlineControl }
+            metaFieldRow("DURATION") { durationMenu }
+            metaFieldRow("START") { startTimeControl }
+            metaFieldRow("REMIND") { remindPeriodMenu }
+            metaFieldRow("STATUS") { Text(task.done ? "Done" : "Open") }
         }
         .font(.system(size: 12, weight: .medium))
         .foregroundStyle(VolarColor.textSec)
+    }
+
+    /// One `metaRow` line: uppercase muted label at the leading edge, the field's existing
+    /// control at the trailing edge, a flexible `Spacer` between them doing the right-alignment
+    /// work so a control's own `.fixedSize()` (kept as-is on every menu below) never has to
+    /// fight the row for space.
+    private func metaFieldRow<Value: View>(
+        _ label: String,
+        @ViewBuilder value: () -> Value
+    ) -> some View {
+        HStack(spacing: 0) {
+            Text(label)
+                .font(.system(size: 10, weight: .medium))
+                .tracking(0.7) // 0.07em at 10pt — matches `SectionHeader`/`DiffRow`'s field label
+                .textCase(.uppercase)
+                .foregroundStyle(VolarColor.textMut)
+            Spacer(minLength: 12)
+            value()
+        }
     }
 
     /// Mechanism branch (a): a `Menu` selection commits in the same step it mutates the buffer —
@@ -510,49 +557,16 @@ private struct TaskDetailEditor: View {
 
     // MARK: - Actions
 
+    /// Two rows, not the single `HStack` this used to be. The original row packed Close, Delete,
+    /// a `Spacer`, and the Mark done/not done toggle side by side, sized for the old 480pt
+    /// `.sheet` presentation; "Mark not done" (the longer of the two toggle labels) alone needs
+    /// roughly 304pt next to Close and Delete, which does not fit this view's current 340pt panel
+    /// / ~300pt content width — the row would clip or spill. Splitting into a primary row (the
+    /// toggle, full width) over a secondary row (Close/Delete, spread) is both the inspector idiom
+    /// and gives the primary action — the one anh Khôi reaches for most, done/not-done — its own
+    /// full-width weight instead of competing for space with two secondary buttons.
     private var actions: some View {
-        HStack(spacing: 8) {
-            Button {
-                // Mechanism branch (c): commit before dismissing, so a click on Close itself
-                // (which does not trigger `.onChange(of: focusedField)` if the click lands
-                // somewhere that never took focus) never drops a pending edit. `.onDisappear`
-                // below would also catch it, but this avoids relying on dismiss-animation timing.
-                commitIfChanged()
-                appState.closeDetail()
-            } label: {
-                Text("Close")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VolarColor.textPri)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-            }
-            .buttonStyle(.plain)
-            .background(VolarColor.veil(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .volarHairline(cornerRadius: 6)
-
-            Button(role: .destructive) {
-                appState.deleteTask(task.id)
-                appState.closeDetail()
-            } label: {
-                // `destruct` (not `high`) — this is the token for irreversible actions; `high` is
-                // priority-only and reads almost identically to `destruct` on the graphite ground.
-                Text("Delete")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VolarColor.destruct)
-                    .padding(.horizontal, 14)
-                    .frame(height: 34)
-            }
-            .buttonStyle(.plain)
-            .background(VolarColor.destruct.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .stroke(VolarColor.destruct.opacity(0.25), lineWidth: 0.5)
-            )
-
-            Spacer(minLength: 0)
-
+        VStack(alignment: .leading, spacing: 8) {
             Button {
                 appState.toggleDone(task.id)
             } label: {
@@ -560,12 +574,58 @@ private struct TaskDetailEditor: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16)
+                    .frame(maxWidth: .infinity)
                     .frame(height: 34)
             }
             .buttonStyle(.plain)
             .background(accentColors.solid)
             .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .shadow(color: accentColors.glow, radius: 12, y: 4)
+
+            HStack(spacing: 8) {
+                Button {
+                    // Mechanism branch (c): commit before dismissing, so a click on Close itself
+                    // (which does not trigger `.onChange(of: focusedField)` if the click lands
+                    // somewhere that never took focus) never drops a pending edit. `.onDisappear`
+                    // below would also catch it, but this avoids relying on dismiss-animation
+                    // timing.
+                    commitIfChanged()
+                    appState.closeDetail()
+                } label: {
+                    Text("Close")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(VolarColor.textPri)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VolarColor.veil(0.06))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .volarHairline(cornerRadius: 6)
+
+                Spacer(minLength: 0)
+
+                Button(role: .destructive) {
+                    appState.deleteTask(task.id)
+                    appState.closeDetail()
+                } label: {
+                    // `destruct` (not `high`) — this is the token for irreversible actions; `high`
+                    // is priority-only and reads almost identically to `destruct` on the graphite
+                    // ground.
+                    Text("Delete")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(VolarColor.destruct)
+                        .padding(.horizontal, 14)
+                        .frame(height: 34)
+                }
+                .buttonStyle(.plain)
+                .background(VolarColor.destruct.opacity(0.12))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(VolarColor.destruct.opacity(0.25), lineWidth: 0.5)
+                )
+            }
         }
     }
 }

@@ -317,4 +317,94 @@ final class ManualEditDraftTests: XCTestCase {
         XCTAssertEqual(state.tasks.count, 1)
         XCTAssertEqual(state.tasks.first?.title, "Untouched")
     }
+
+    // MARK: - Case 6: panel-refactor (specs/005-cursor-retheme/panel-refactor.md §3/§5 item 5) —
+    // `openDetail`/`detailTaskID`/`updateTask` regression coverage for the switch-task-mid-edit
+    // risk.
+    //
+    // WHAT THIS DOES **NOT** PROVE: the actual data-loss risk lives inside
+    // `TaskDetailView.swift`'s `TaskDetailEditor` — private, view-internal `@State` edit buffers,
+    // seeded fresh whenever `.id(task.id)` changes, committed via `commitIfChanged()` from
+    // `.onDisappear` (mechanism branch (d)). None of that is reachable from XCTest: there is no
+    // seam to construct a `TaskDetailEditor`, type into its `TextField`s, and force a `.id()`
+    // teardown from outside SwiftUI's own view-diffing — `@State` has no public accessor and this
+    // is a `private struct`. So this suite cannot drive a real "edit the buffer, switch tasks,
+    // switch back, assert the buffer's content survived" test end-to-end.
+    //
+    // WHAT IS reachable and IS tested below: `AppState`'s half of the mechanism — the data model
+    // `TaskDetailEditor` reads from and writes through. `testDetailTaskIDSwitchPreservesAnEdit...`
+    // simulates the sequence the view is documented to perform (commit via `updateTask` — standing
+    // in for `.onDisappear` -> `commitIfChanged()` — THEN switch `detailTaskID` to a different
+    // task, THEN switch back) and asserts the edit is still there. If `TaskDetailEditor.onDisappear`
+    // fires as documented and calls `commitIfChanged()` before SwiftUI discards its old `@State`
+    // (which is the load-bearing assumption panel-refactor.md §3 flags as UNVERIFIED off a Mac),
+    // this is the guarantee on the `AppState` side that catches that commit and keeps it through
+    // the switch. It does NOT prove the view-side commit itself actually fires — only that nothing
+    // on the `AppState` side would lose the edit if it does.
+    //
+    // The other two cases below cover `openDetail`'s new toggle behavior (panel-refactor.md §5
+    // item 1 / §4): a second tap on the SAME open task closes the panel; a tap on a DIFFERENT task
+    // switches directly rather than requiring a close first (the whole reason a panel can hit the
+    // switch-mid-edit risk that a sheet never could).
+
+    func testDetailTaskIDSwitchPreservesAnEditCommittedBeforeTheSwitch() {
+        let taskA = TaskItem(title: "Task A", details: "", priority: .medium, when: .now)
+        let taskB = TaskItem(title: "Task B", details: "", priority: .medium, when: .now)
+        let state = AppState()
+        state.tasks = [taskA, taskB]
+
+        state.openDetail(taskA.id)
+        XCTAssertEqual(state.detailTaskID, taskA.id)
+
+        // Stands in for `TaskDetailEditor`'s commit path firing (branches (a)/(b)/(d)) on Task A's
+        // editor BEFORE the panel switches to a different task — the step
+        // `TaskDetailEditor.onDisappear` is responsible for triggering when `.id(task.id)` changes.
+        state.updateTask(
+            taskA.id,
+            title: "Task A — edited mid-switch",
+            details: "",
+            priority: .medium,
+            startTime: nil,
+            deadline: nil,
+            durationMinutes: nil,
+            remindPeriod: nil
+        )
+
+        // Switch straight to Task B — a panel can do this in one tap; a sheet never could (it would
+        // have to close first, which is exactly why panel-refactor.md §3 calls this the one new risk).
+        state.openDetail(taskB.id)
+        XCTAssertEqual(state.detailTaskID, taskB.id)
+        XCTAssertEqual(state.detailTask?.title, "Task B")
+
+        // Switch back to Task A.
+        state.openDetail(taskA.id)
+        XCTAssertEqual(state.detailTaskID, taskA.id)
+        XCTAssertEqual(
+            state.detailTask?.title, "Task A — edited mid-switch",
+            "the edit committed before switching away must still be there after switching back"
+        )
+    }
+
+    func testOpenDetailTogglesClosedOnASecondTapOfTheSameRow() {
+        let task = TaskItem(title: "Toggle task", details: "", priority: .medium, when: .now)
+        let state = AppState()
+        state.tasks = [task]
+
+        state.openDetail(task.id)
+        XCTAssertEqual(state.detailTaskID, task.id)
+
+        state.openDetail(task.id) // second tap on the SAME row
+        XCTAssertNil(state.detailTaskID, "tapping the already-open row must close the panel (panel-refactor.md §4/§5 item 1)")
+    }
+
+    func testOpenDetailOnADifferentTaskSwitchesDirectlyWithoutClosingFirst() {
+        let taskA = TaskItem(title: "Task A", details: "", priority: .medium, when: .now)
+        let taskB = TaskItem(title: "Task B", details: "", priority: .medium, when: .now)
+        let state = AppState()
+        state.tasks = [taskA, taskB]
+
+        state.openDetail(taskA.id)
+        state.openDetail(taskB.id) // different row — must switch, not toggle closed
+        XCTAssertEqual(state.detailTaskID, taskB.id, "a tap on a DIFFERENT task must switch the panel directly, not close it")
+    }
 }

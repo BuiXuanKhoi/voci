@@ -78,8 +78,9 @@ struct TaskRow: View {
         .contentShape(Rectangle())
         .scaleEffect(isPressed ? 0.985 : 1)
         .onHover { isHovering = $0 }
-        // Row tap opens the detail sheet (Phase 1); the checkbox above is its own `Button` and
-        // consumes its own tap first, so toggling done never also opens the sheet. A plain nested
+        // Row tap opens the detail inspector panel (panel-refactor.md); the checkbox above is its
+        // own `Button` and consumes its own tap first, so toggling done never also opens the
+        // panel. A plain nested
         // `Button` (row-as-Button wrapping the checkbox Button) was considered for press feedback,
         // but macOS's AppKit-backed hit-testing for nested buttons is unreliable, so press feedback
         // is layered on separately via a `simultaneousGesture` instead — it doesn't compete with

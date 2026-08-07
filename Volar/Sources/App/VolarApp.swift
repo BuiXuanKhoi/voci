@@ -80,7 +80,7 @@ struct VolarApp: App {
         Window("Volar", id: "main") {
             TodayView()
                 .environment(appState)
-                .frame(minWidth: 820, minHeight: 560)
+                .frame(minWidth: 920, minHeight: 560)
                 .task {
                     // Starts the global ⌃⌥M toggle-capture hotkey (degrades gracefully without
                     // Accessibility permission — see AppState.activateServices).
@@ -201,14 +201,10 @@ struct VolarApp: App {
                     .environment(appState)
                     .frame(minWidth: 480, minHeight: 560)
                 }
-                .sheet(isPresented: Binding(
-                    get: { appState.detailTaskID != nil },
-                    set: { presented in if !presented { appState.detailTaskID = nil } }
-                )) {
-                    TaskDetailView()
-                        .environment(appState)
-                        .frame(minWidth: 480, minHeight: 520)
-                }
+                // Panel-refactor (specs/005-cursor-retheme/panel-refactor.md §5 item 2): the detail
+                // `.sheet` that used to live here is GONE — `TaskDetailView` is now rendered as a
+                // 300pt inspector column inside `TodayView.body`'s own `HStack`, not a modal. Do not
+                // re-add it; `detailTaskID != nil` now only drives that in-window panel.
                 .sheet(isPresented: Binding(
                     get: { appState.showTriage },
                     set: { presented in if !presented { appState.showTriage = false } }

@@ -47,10 +47,19 @@ struct TodayView: View {
                     .ignoresSafeArea()
             }
 
+            // Panel-refactor (specs/005-cursor-retheme/panel-refactor.md §5 item 3): `detailPanel`
+            // is a third CHILD of this `HStack`, not an overlay — it does not participate in, and
+            // must not disturb, the tour-overlay-must-be-last ordering the big comment below (on
+            // `.overlayPreferenceValue`) locks in. `FocusOverlay()` below is a sibling of this whole
+            // `HStack` inside the outer `ZStack`, so it already paints over all three columns
+            // (Sidebar/mainColumn/detailPanel) when focus mode is active — the panel never sits
+            // beside it.
             HStack(spacing: 0) {
                 Sidebar()
                 mainColumn
+                detailPanel
             }
+            .animation(VolarMotion.state, value: appState.detailTaskID)
 
             if appState.focusActive {
                 FocusOverlay()
@@ -141,6 +150,38 @@ struct TodayView: View {
         }
         .sheet(isPresented: $showSignInSheet) {
             SignInSheet()
+        }
+    }
+
+    // MARK: - Detail panel
+
+    /// Task-detail inspector column (panel-refactor.md §5 item 3) — replaces the old `.sheet`
+    /// (`VolarApp.swift` used to present `TaskDetailView` modally; that `.sheet` is gone). `@ViewBuilder`
+    /// `if` (not a ternary/`opacity`) so the column is fully absent from the `HStack`'s layout when
+    /// `detailTask` is `nil`, rather than reserving 340pt of empty space — and so the
+    /// `.transition`/`.animation(VolarMotion.state, value: appState.detailTaskID)` pair on the
+    /// `HStack` above actually has an insertion/removal edge to animate.
+    ///
+    /// Fixed 340pt width, `VolarColor.surface` background, 0.5pt `VolarColor.border` hairline on the
+    /// LEADING edge — same "`Rectangle().fill(VolarColor.border).frame(width: 0.5)` via
+    /// `.overlay(alignment:)`" idiom `Sidebar.swift` already uses for its own trailing hairline
+    /// against `mainColumn`, just mirrored to the opposite edge since this column sits on the other
+    /// side of the window.
+    ///
+    /// `TaskDetailView` itself renders `EmptyView()` when `appState.detailTask` is `nil` (its own
+    /// `body` already guards that) — the `if` here is what makes the outer 340pt frame disappear
+    /// too, not just its content.
+    @ViewBuilder
+    private var detailPanel: some View {
+        if appState.detailTask != nil {
+            TaskDetailView()
+                .frame(width: 340)
+                .frame(maxHeight: .infinity)
+                .background(VolarColor.surface)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(VolarColor.border).frame(width: 0.5)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
         }
     }
 
