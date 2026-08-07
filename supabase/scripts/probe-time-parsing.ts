@@ -50,8 +50,19 @@ interface Case {
   timezone: string;
   /** Exact ISO string the deadline MUST equal — offset included, deliberately. Omit only when
    *  the case sets `expectDeadlineAbsent` instead (mutually exclusive with this field's normal use
-   *  in the pre-existing 12 cases, which always set it). */
+   *  in the pre-existing 12 cases, which always set it). When `expectDateOnly` is also set, only
+   *  the DATE portion (first 10 chars) of this value is asserted — see that field's doc comment. */
   expected?: string;
+  /** Set on a case where the transcript names a DAY but no time-of-day at all (e.g. "thứ sáu tuần
+   *  sau" — a bare weekday, nothing spoken about morning/afternoon/an hour), so the hour the model
+   *  picks is genuinely open and asserting a specific one would be testing something the case never
+   *  claims to test. When true, the `expected` check above compares ONLY the date (`expected`'s
+   *  first 10 chars against `gotDeadline`'s first 10 chars) and never fails on the hour — the hour
+   *  is still logged, as an informational note on the PASS line, so a real regression in the
+   *  model's hour choice stays visible without being able to fail the case. Do NOT set this on a
+   *  case that DOES speak a specific hour or period-of-day (e.g. cases 07/15/17 below) — those must
+   *  keep asserting the full timestamp exactly as before. */
+  expectDateOnly?: boolean;
   /** Urgency-rule cases only: when set, asserts NO `deadline` is returned at all (the task brief's
    *  "khẩn cấp KHÔNG có nghĩa là hạn chót ngay lập tức" rule) rather than comparing against
    *  `expected`. Mutually exclusive with `expected`. */
@@ -196,9 +207,10 @@ const CASES: Case[] = [
     now: NOW_VN,
     timezone: TZ_VN,
     expected: "2026-08-07T12:00:00+07:00",
+    expectDateOnly: true,
     why: "Friday of the week AFTER the one containing now (not 2026-07-31). NOTE: no time-of-day "
-      + "was spoken, so the hour here is genuinely open — treat an hour mismatch on THIS case as "
-      + "informational, the DATE is what is being tested",
+      + "was spoken, so the hour here is genuinely open — an hour mismatch on THIS case is "
+      + "informational only (expectDateOnly), the DATE is what is being tested",
   },
 
   // --- English, same rules. --------------------------------------------------------------------
@@ -405,10 +417,31 @@ async function main() {
       // instead of stopping at the first, so a single failing case still reports everything wrong
       // with it in one shot rather than requiring a re-run per assertion.
       const problems: string[] = [];
+      // Informational-only notes (never fail the case) — currently just the `expectDateOnly` hour,
+      // surfaced on the PASS line so a real regression in the model's hour choice stays visible.
+      const info: string[] = [];
 
       if (c.expectDeadlineAbsent) {
         if (gotDeadline !== undefined) {
           problems.push(`deadline: expected ABSENT, got ${gotDeadline}`);
+        }
+      } else if (c.expected !== undefined && c.expectDateOnly) {
+        // DATE-ONLY comparison (see `expectDateOnly`'s doc comment): this case's transcript names a
+        // day but no time-of-day at all, so the hour is genuinely open — only the calendar date
+        // (first 10 chars, `YYYY-MM-DD`) is asserted; the hour is logged as informational only.
+        if (!gotDeadline) {
+          problems.push(`deadline date: expected ${c.expected.slice(0, 10)}, got none`);
+        } else {
+          const gotDate = gotDeadline.trim().slice(0, 10);
+          const wantDate = c.expected.slice(0, 10);
+          if (gotDate !== wantDate) {
+            problems.push(`deadline date: got ${gotDate}, want ${wantDate} (date-only case)`);
+          } else if (normalizeIso(gotDeadline) !== normalizeIso(c.expected)) {
+            info.push(
+              `deadline hour ${gotDeadline.trim().slice(11, 19)} (not asserted -- no time-of-day ` +
+                "was spoken for this case)",
+            );
+          }
         }
       } else if (c.expected !== undefined) {
         if (!gotDeadline) {
@@ -533,6 +566,7 @@ async function main() {
           gotPriority !== undefined ? `priority=${gotPriority}` : undefined,
           gotRemindPeriod !== undefined ? `remindPeriodMinutes=${gotRemindPeriod}` : undefined,
           gotOffsets ? `offsetsMinutes=${JSON.stringify(gotOffsets)}` : undefined,
+          ...info.map((note) => `info: ${note}`),
         ].filter(Boolean);
         console.log(`PASS ${label}  ->  ${parts.join(", ")}`);
       } else {

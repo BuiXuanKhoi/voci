@@ -51,5 +51,25 @@ Package.resolved
 # Supabase CLI link state (project ref + local temp), never committed
 supabase/.temp/
 
+# Secrets — API keys and private keys, never committed.
+#
+# There is a concrete, documented path into this trap: the probe scripts
+# (supabase/scripts/probe-time-parsing.ts, probe-task-refs.ts) read GEMINI_API_KEY from the
+# environment, and on Windows the supply route is a `supabase/.env` file read via
+# `deno run --env-file=supabase/.env ...` — PowerShell has no inline `VAR=x cmd` form, so the
+# bash one-liner those scripts' own comments suggest does not work here. Running edge functions
+# locally (`supabase functions serve`) wants the same file. Without these lines, one `git add .`
+# after creating it puts a live Gemini key on GitHub.
+#
+# Nothing of the sort has ever been committed (verified against `git ls-files`, 2026-08-07) —
+# this is the safety net, not a cleanup. Note gitignore never untracks: if a secret DOES get
+# committed, adding a pattern here hides it from `git status` while leaving it in history, so
+# the key must be rotated, not just removed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
 # MSYS/Git-Bash crash dumps
 sh.exe.stackdump

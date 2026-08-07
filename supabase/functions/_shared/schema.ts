@@ -536,7 +536,11 @@ export interface ParsedRecurrenceOut {
 }
 
 export interface ParsedReminderOverrideOut {
-  offsetsMinutes: number[]; // relative to deadline, negative = before
+  // Relative to deadline, negative = before. NON-OPTIONAL on the wire (matches the client's
+  // non-optional `[Double]` decode target) — when the model emits only `remindPeriodMinutes`
+  // (e.g. "nhắc tôi mỗi 15 phút"), `validateReminderOverride` SYNTHESIZES a single entry here
+  // rather than omitting the field; see that function's doc comment.
+  offsetsMinutes: number[];
   repeatEveryMinutes?: number;
   // Chu kỳ nhắc TRƯỚC deadline (phút) khi user nói rõ, VD "nhắc tôi mỗi 15 phút" -> 15. Khác
   // `repeatEveryMinutes` ở trên (lặp SAU deadline, xem ReminderPolicy.repeatEvery trong
@@ -775,11 +779,53 @@ function validateRecurrence(v: unknown): ParsedRecurrenceOut | undefined {
   return { type: v.type };
 }
 
+/** `offsetsMinutes` synthesis from a bare `remindPeriodMinutes` (2026-08-07): why this is done by
+ *  SYNTHESIZING a value rather than making `offsetsMinutes` optional on the wire.
+ *
+ *  The Swift client (`Volar/Sources/Parsing/IntentParsing.swift`) declares
+ *  `var offsetsMinutes: [Double]` — NON-OPTIONAL. A shipped App Store client decoding a
+ *  `reminderOverride` that omits `offsetsMinutes` throws, and per the hardening rule this repo
+ *  adopted on 2026-08-01 (after `RawParsedReminderOverride` was found missing this same field
+ *  client-side), a decode throw doesn't just drop the one field — it loses the WHOLE task batch.
+ *  So relaxing this field to optional here would trade "reminder silently dropped" for "entire
+ *  response silently dropped," which is strictly worse. The wire shape must stay exactly as it is
+ *  today; only the SERVER's willingness to fill it in changes.
+ *
+ *  Before this fix: a model response of `{remindPeriodMinutes: 15}` alone (the correct shape for
+ *  "nhắc tôi mỗi 15 phút" — a repeating cadence, no single moment to name) hit the
+ *  `offsetsMinutes` empty-array check above and discarded the ENTIRE override, silently, with
+ *  nothing logged. The feature was dead on arrival. Do not "simplify" this back to a bare
+ *  emptiness check on `offsetsMinutes` without re-reading this comment — that reintroduces the
+ *  2026-08-07 bug, and making the field optional instead reintroduces the 2026-08-01 bug.
+ *
+ *  The synthesized single entry is `[-remindPeriodMinutes]`: one reminder one period before the
+ *  deadline — the first tick of the very cadence the user asked for. */
 function validateReminderOverride(v: unknown, ctx?: ParseEnvelopeCtx): ParsedReminderOverrideOut | undefined {
   if (!isPlainObject(v)) return undefined;
-  if (!Array.isArray(v.offsetsMinutes) || v.offsetsMinutes.length === 0) return undefined;
-  if (!v.offsetsMinutes.every((n) => isFiniteNumber(n))) return undefined;
-  const out: ParsedReminderOverrideOut = { offsetsMinutes: v.offsetsMinutes as number[] };
+
+  const hasValidOffsets = Array.isArray(v.offsetsMinutes) && v.offsetsMinutes.length > 0 &&
+    v.offsetsMinutes.every((n) => isFiniteNumber(n));
+
+  // Eligibility for SYNTHESIS only (separate from the existing `remindPeriodMinutes` output check
+  // below, which must stay byte-identical to preserve today's behavior when `offsetsMinutes` is
+  // already present and valid). Same magnitude ceiling every other offset-in-minutes field in this
+  // file uses (`MAX_CONDITION_OFFSET_MINUTES`, see its doc comment) — a `remindPeriodMinutes` this
+  // large has gone off the rails the same way an oversized `offsetMinutes` would, so it must not be
+  // trusted to synthesize a reminder from either.
+  const periodUsableForSynthesis = isFiniteNumber(v.remindPeriodMinutes) &&
+    (v.remindPeriodMinutes as number) > 0 &&
+    (v.remindPeriodMinutes as number) <= MAX_CONDITION_OFFSET_MINUTES;
+
+  let offsetsMinutes: number[];
+  if (hasValidOffsets) {
+    offsetsMinutes = v.offsetsMinutes as number[];
+  } else if (periodUsableForSynthesis) {
+    offsetsMinutes = [-(v.remindPeriodMinutes as number)];
+  } else {
+    return undefined;
+  }
+
+  const out: ParsedReminderOverrideOut = { offsetsMinutes };
   if (v.repeatEveryMinutes !== undefined) {
     if (!isFiniteNumber(v.repeatEveryMinutes) || v.repeatEveryMinutes <= 0) return undefined;
     out.repeatEveryMinutes = v.repeatEveryMinutes;

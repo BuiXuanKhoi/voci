@@ -291,6 +291,105 @@ Deno.test("regression: broken remindPeriodMinutes only drops remindPeriodMinutes
 });
 
 // ---------------------------------------------------------------------------------------------
+// 11b. reminderOverride: `offsetsMinutes` synthesis from a bare `remindPeriodMinutes` (2026-08-07
+//      fix — see `validateReminderOverride`'s doc comment in schema.ts). Before this fix, a model
+//      response of `{remindPeriodMinutes: 15}` alone (no `offsetsMinutes`) silently discarded the
+//      ENTIRE override, because `offsetsMinutes`'s empty-array check ran before
+//      `remindPeriodMinutes` was even read. The wire shape (`offsetsMinutes: number[]`,
+//      non-optional) must not change, so the server now synthesizes a single entry instead.
+// ---------------------------------------------------------------------------------------------
+Deno.test("reminderOverride: bare remindPeriodMinutes synthesizes a single-entry offsetsMinutes", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: { remindPeriodMinutes: 15 }, // no offsetsMinutes at all
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  const override = result.tasks[0].reminderOverride;
+  assertExists(override, "reminderOverride must survive, not be discarded");
+  assertEquals(override!.value.remindPeriodMinutes, 15);
+  assertEquals(override!.value.offsetsMinutes, [-15]);
+});
+
+Deno.test("reminderOverride: offsetsMinutes AND remindPeriodMinutes both present -> unchanged", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: { offsetsMinutes: [-10, -5], remindPeriodMinutes: 15 },
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  const override = result.tasks[0].reminderOverride;
+  assertExists(override);
+  assertEquals(override!.value.offsetsMinutes, [-10, -5]);
+  assertEquals(override!.value.remindPeriodMinutes, 15);
+});
+
+Deno.test("reminderOverride: offsetsMinutes only (no remindPeriodMinutes) -> unchanged", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: { offsetsMinutes: [-30] },
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  const override = result.tasks[0].reminderOverride;
+  assertExists(override);
+  assertEquals(override!.value.offsetsMinutes, [-30]);
+  assertEquals(override!.value.remindPeriodMinutes, undefined);
+});
+
+Deno.test("reminderOverride: neither offsetsMinutes nor remindPeriodMinutes usable -> undefined", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: {},
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  assertEquals(result.tasks[0].reminderOverride, undefined);
+});
+
+Deno.test("reminderOverride: malformed remindPeriodMinutes (zero) and no offsetsMinutes -> undefined, no synthesis", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: { remindPeriodMinutes: 0 },
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  assertEquals(result.tasks[0].reminderOverride, undefined);
+});
+
+Deno.test("reminderOverride: malformed remindPeriodMinutes (negative) and no offsetsMinutes -> undefined, no synthesis", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: { remindPeriodMinutes: -15 },
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  assertEquals(result.tasks[0].reminderOverride, undefined);
+});
+
+Deno.test("reminderOverride: malformed remindPeriodMinutes (non-numeric) and no offsetsMinutes -> undefined, no synthesis", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    value: { remindPeriodMinutes: "15" },
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  assertEquals(result.tasks[0].reminderOverride, undefined);
+});
+
+Deno.test("reminderOverride: absurdly large remindPeriodMinutes and no offsetsMinutes -> undefined, no synthesis", () => {
+  const raw = validRawTask();
+  raw.reminderOverride = {
+    // Well beyond MAX_CONDITION_OFFSET_MINUTES (525600, one year in minutes) -- the same
+    // magnitude ceiling every other offset-in-minutes field in this file uses.
+    value: { remindPeriodMinutes: 999_999_999 },
+    confidence: 0.6,
+  };
+  const result = expectOk([raw]);
+  assertEquals(result.tasks[0].reminderOverride, undefined);
+});
+
+// ---------------------------------------------------------------------------------------------
 // 12. "stuck" mode request validation (Change: anh Khôi's "Stuck?" feature, 2026-07-29).
 // ---------------------------------------------------------------------------------------------
 
