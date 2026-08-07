@@ -53,11 +53,12 @@ struct FocusOverlay: View {
 
     private func overlayContent(task: TaskItem, openTasks: [TaskItem], index: Int) -> some View {
         ZStack {
-            // Heavy dark glass: `.ultraThinMaterial` + a dark tint layered on top, matching the
-            // prototype's `rgba(9,10,15,0.78)` over `backdrop-filter: blur(28px)`.
+            // Heavy dark glass: `.ultraThinMaterial` + a dark tint layered on top. Tint uses the
+            // `bg` token (not a hardcoded literal) so it tracks the palette automatically; see
+            // `FullScreenTakeoverWindow.swift` for the matching treatment.
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .overlay(Color(red: 9.0 / 255, green: 10.0 / 255, blue: 15.0 / 255).opacity(0.78))
+                .overlay(VolarColor.bg.opacity(0.78))
 
             VStack(spacing: 0) {
                 Text(appState.focusPaused ? "Paused" : "Focus")
@@ -68,7 +69,7 @@ struct FocusOverlay: View {
                     .padding(.bottom, 10)
 
                 Text(formattedTime(appState.focusSecondsLeft))
-                    .font(.system(size: 76, weight: .semibold, design: .monospaced))
+                    .font(Font.volarMono(size: 76, weight: .semibold))
                     .monospacedDigit()
                     .foregroundStyle(timerColor)
                     .opacity(appState.focusPaused ? 0.45 : 1)
@@ -153,10 +154,14 @@ struct FocusOverlay: View {
                 if let dur = task.durationLabel {
                     Text("·").opacity(0.4)
                     Text(dur)
+                        .font(Font.volarMono(size: 12))
+                        .monospacedDigit()
                 }
                 if let badge = task.timeBadge {
                     Text("·").opacity(0.4)
                     Text(badge)
+                        .font(Font.volarMono(size: 12))
+                        .monospacedDigit()
                 }
             }
             .font(.system(size: 12))
@@ -174,8 +179,12 @@ struct FocusOverlay: View {
             // behind a "was this specifically switched away" flag — there is no such flag to gate on
             // without new state, and showing real context is harmless on a first visit too.
             if let progress = stepProgress(for: task) {
-                Text("\(progress.done) of \(progress.total) steps done")
-                    .font(.system(size: 11.5))
+                (
+                    Text("\(progress.done)").font(Font.volarMono(size: 11.5).monospacedDigit())
+                    + Text(" of ").font(.system(size: 11.5))
+                    + Text("\(progress.total)").font(Font.volarMono(size: 11.5).monospacedDigit())
+                    + Text(" steps done").font(.system(size: 11.5))
+                )
                     .foregroundStyle(VolarColor.textMut)
             }
             if let resumeNote = task.resumeNote, !resumeNote.isEmpty {
@@ -234,7 +243,7 @@ struct FocusOverlay: View {
             .padding(.horizontal, 20)
             .padding(.vertical, 9)
             .background(accent.solid)
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .shadow(color: accent.glow.opacity(0.25), radius: 24, y: 4)
         }
         .buttonStyle(.plain)
@@ -258,8 +267,8 @@ struct FocusOverlay: View {
         }
         .buttonStyle(.plain)
         .background(VolarColor.card)
-        .overlay(Capsule().stroke(VolarColor.border, lineWidth: 0.5))
-        .clipShape(Capsule())
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(VolarColor.border, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .opacity(appState.canSwitchFocusTask ? 1 : 0.4)
         .disabled(!appState.canSwitchFocusTask)
         .help("Move on to something else — this task isn't done, it just steps out for now.")
@@ -285,8 +294,8 @@ struct FocusOverlay: View {
         }
         .buttonStyle(.plain)
         .background(VolarColor.card)
-        .overlay(Capsule().stroke(VolarColor.border, lineWidth: 0.5))
-        .clipShape(Capsule())
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(VolarColor.border, lineWidth: 0.5))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .popover(isPresented: Binding(
             get: { appState.stuckPickerTask?.id == task.id },
             set: { presented in if !presented { appState.dismissStuckPicker() } }
@@ -317,7 +326,7 @@ struct FocusOverlay: View {
                     goToPrevious()
                 }
                 Text("\(index + 1) of \(openTasks.count)")
-                    .font(.system(size: 12))
+                    .font(Font.volarMono(size: 12))
                     .monospacedDigit()
                     .foregroundStyle(VolarColor.textSec)
                     .frame(minWidth: 52)
@@ -325,8 +334,10 @@ struct FocusOverlay: View {
                     goToNext()
                 }
             }
-            Text("\(openTasks.count) task\(openTasks.count == 1 ? "" : "s") left today")
-                .font(.system(size: 11))
+            (
+                Text("\(openTasks.count)").font(Font.volarMono(size: 11).monospacedDigit())
+                + Text(" task\(openTasks.count == 1 ? "" : "s") left today").font(.system(size: 11))
+            )
                 .foregroundStyle(VolarColor.textMut)
         }
     }
@@ -707,7 +718,7 @@ struct StuckTimerBanner: View {
         stuckCard {
             HStack(spacing: 10) {
                 Text(formattedTime(appState.stuckTimerSecondsLeft))
-                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .font(Font.volarMono(size: 13, weight: .medium))
                     .monospacedDigit()
                     .foregroundStyle(VolarColor.textPri)
                 Text("Two minutes. Anything counts.")

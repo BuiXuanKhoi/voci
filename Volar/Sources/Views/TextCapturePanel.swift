@@ -172,10 +172,10 @@ struct TextCaptureView: View {
         .frame(height: 36)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(VolarColor.border, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onSubmit {
             appState.submitTextCapture()
         }
@@ -206,10 +206,10 @@ struct TextCaptureView: View {
         .buttonStyle(.plain)
         .background(isBusy ? accent.surface : accent.solid)
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(isBusy ? accent.surface : VolarColor.veil(0.18), lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .shadow(color: isBusy ? .clear : accent.glow, radius: 10, x: 0, y: 4)
         // Disabled while empty (nothing typed yet) OR while a save is already in flight — matches
         // the task brief exactly ("Disabled while the field is empty or while a save is in flight").

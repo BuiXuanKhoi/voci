@@ -307,14 +307,14 @@ struct SettingsView: View {
                         set: { appState.setDefaultTaskDurationMinutes($0) }
                     ),
                     options: [
-                        .init(id: 15, label: "15"), .init(id: 30, label: "30"),
-                        .init(id: 45, label: "45"), .init(id: 60, label: "60 min"),
+                        .init(id: 15, label: "15", mono: true), .init(id: 30, label: "30", mono: true),
+                        .init(id: 45, label: "45", mono: true), .init(id: 60, label: "60 min", mono: true),
                     ]
                 )
             }
             SettingsRow(label: "Hyperfocus interrupt after", hint: "Volar checks in if you've been deep on one task this long.") {
                 Segmented(value: $hyperfocusInterrupt, options: [
-                    .init(id: 60, label: "60"), .init(id: 90, label: "90"), .init(id: 120, label: "120 min"),
+                    .init(id: 60, label: "60", mono: true), .init(id: 90, label: "90", mono: true), .init(id: 120, label: "120 min", mono: true),
                 ])
             }
             SettingsRow(label: "Show morning frog prompt", hint: "A daily question at first launch: what's the ONE task that matters most?") {
@@ -336,8 +336,8 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 26)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .volarHairline(cornerRadius: 7)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .volarHairline(cornerRadius: 5)
             }
             SettingsRow(label: "Capture foreground app context", hint: "Tags new tasks with the app you were in when you captured them.") {
                 VolarToggle(isOn: $captureAppContext)
@@ -476,8 +476,8 @@ struct SettingsView: View {
             .padding(.horizontal, 12)
             .frame(height: 26)
             .background(VolarColor.veil(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .volarHairline(cornerRadius: 7)
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .volarHairline(cornerRadius: 5)
 
         case .granted:
             HStack(spacing: 10) {
@@ -496,8 +496,8 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 26)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .volarHairline(cornerRadius: 7)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .volarHairline(cornerRadius: 5)
             }
 
         case .denied, .restricted:
@@ -516,8 +516,8 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 26)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .volarHairline(cornerRadius: 7)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .volarHairline(cornerRadius: 5)
             }
 
         case .unavailable:
@@ -908,8 +908,8 @@ struct SettingsView: View {
                             .padding(.horizontal, 12)
                             .frame(height: 28)
                             .background(VolarColor.card)
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .volarHairline(cornerRadius: 7)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .volarHairline(cornerRadius: 5)
 
                         if appState.customImageURL != nil {
                             Button("Remove") {
@@ -1318,11 +1318,13 @@ struct SettingsView: View {
 
             if let status = appState.subscriptionStatus {
                 Text("Parse: \(status.parseUsedToday)/\(status.parseLimit) lượt AI hôm nay")
-                    .font(.system(size: 11.5))
+                    .font(Font.volarMono(size: 11.5))
+                    .monospacedDigit()
                     .foregroundStyle(VolarColor.textSec)
                 if appState.accountTier == .pro {
                     Text("Speech: \(status.speechUsedToday)/\(status.speechLimit) lượt hôm nay")
-                        .font(.system(size: 11.5))
+                        .font(Font.volarMono(size: 11.5))
+                        .monospacedDigit()
                         .foregroundStyle(VolarColor.textSec)
                 }
             }
@@ -1366,7 +1368,7 @@ struct SettingsView: View {
     /// same card rather than disabled placeholders — same-page precedent, not a new pattern.
     ///
     /// Styled identically to the email-OTP field/button pair directly above in
-    /// `signedOutAccountBody` (same `Color.black.opacity(0.25)` field background, `volarHairline`,
+    /// `signedOutAccountBody` (same `VolarColor.surfaceHi` field background, `volarHairline`,
     /// monospaced font matching the 6-digit code field, `settingsPillButton`) — deliberately no new
     /// visual treatment introduced for this row.
     private var redeemCodeRow: some View {
@@ -1381,9 +1383,9 @@ struct SettingsView: View {
                     .foregroundStyle(VolarColor.textPri)
                     .padding(.horizontal, 10)
                     .frame(height: 30)
-                    .background(Color.black.opacity(0.25))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .volarHairline(cornerRadius: 7)
+                    .background(VolarColor.surfaceHi)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .volarHairline(cornerRadius: 5)
                     // Live-uppercase as the user types — cosmetic only (Task 1's
                     // `AccountService.redeemPromoCode` is the ONE place that actually normalizes
                     // what goes on the wire; this just keeps what's on screen matching what will be
@@ -1420,7 +1422,7 @@ struct SettingsView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background((appState.accountTier == .pro ? VolarColor.done : Color.white).opacity(0.14))
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 
     /// Single entry point into `PaywallView` (the one purchase surface in the app — see that file's
@@ -1442,7 +1444,7 @@ struct SettingsView: View {
         }
         .buttonStyle(.plain)
         .background(accentColors.solid)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .padding(.top, 4)
     }
 
@@ -1493,7 +1495,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(accentColors.surface)
-                    .clipShape(Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
 
                 Text("Acknowledgements")
                     .font(.system(size: 11, weight: .medium))
@@ -1501,7 +1503,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(VolarColor.veil(0.06))
-                    .clipShape(Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .padding(.top, 4)
         }
@@ -1552,7 +1554,7 @@ private struct VolarToggle: View {
     private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(isOn ? accentColors.solid : VolarColor.veil(0.12))
             .frame(width: 38, height: 22)
             .overlay(alignment: isOn ? .trailing : .leading) {
@@ -1572,6 +1574,11 @@ private struct SegmentOption<T: Hashable> {
     let id: T
     let label: String
     var disabled: Bool = false
+    /// Set `true` only for options whose label is a measurement a user reads/compares as a number
+    /// (minute values in duration pickers) — design-spec.md §2's mono-numerals rule. Defaults
+    /// `false` so every other `Segmented` row in this file (Density, Theme, Ambient, reminder
+    /// policy, voice delivery — all prose labels) keeps its ordinary system font untouched.
+    var mono: Bool = false
 }
 
 /// Segmented control. Ported from the prototype's `Segmented`.
@@ -1591,7 +1598,8 @@ private struct Segmented<T: Hashable>: View {
                     value = option.id
                 } label: {
                     Text(option.label)
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(option.mono ? Font.volarMono(size: 11.5, weight: .medium) : .system(size: 11.5, weight: .medium))
+                        .monospacedDigit()
                         .foregroundStyle(option.disabled ? VolarColor.textMut : (selected ? accentColors.solid : VolarColor.textSec))
                         .opacity(option.disabled ? 0.5 : 1)
                         .padding(.horizontal, 12)
@@ -1603,9 +1611,9 @@ private struct Segmented<T: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Color.black.opacity(0.25))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .volarHairline(cornerRadius: 8)
+        .background(VolarColor.surfaceHi)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .volarHairline(cornerRadius: 5)
     }
 }
 

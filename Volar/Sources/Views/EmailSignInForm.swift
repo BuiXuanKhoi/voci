@@ -41,9 +41,9 @@ struct EmailSignInForm: View {
                     .foregroundStyle(VolarColor.textPri)
                     .padding(.horizontal, 10)
                     .frame(height: 30)
-                    .background(Color.black.opacity(0.25))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .volarHairline(cornerRadius: 7)
+                    .background(VolarColor.surfaceHi)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .volarHairline(cornerRadius: 5)
                 pillButton("Send code") {
                     // Optimistic flip, same as the form this was extracted from: the second field
                     // appears immediately on tap rather than waiting for the network round trip —
@@ -63,9 +63,9 @@ struct EmailSignInForm: View {
                         .padding(.horizontal, 10)
                         .frame(height: 30)
                         .frame(width: 120)
-                        .background(Color.black.opacity(0.25))
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .volarHairline(cornerRadius: 7)
+                        .background(VolarColor.surfaceHi)
+                        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                        .volarHairline(cornerRadius: 5)
                     pillButton("Verify", solid: true) {
                         appState.verifyEmailOTP(email: emailInput, code: codeInput)
                     }

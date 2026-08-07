@@ -106,7 +106,7 @@ private struct TaskDetailEditor: View {
         }
         .padding(20)
         .frame(minWidth: 480, minHeight: 520)
-        .volarGlass(level: .heavy, cornerRadius: 16)
+        .volarGlass(level: .standard, cornerRadius: 16)
         .onChange(of: focusedField) { oldValue, _ in
             // Mechanism branch (b): fires on every focus transition; only commit when LEAVING a
             // field (oldValue != nil) — landing focus in a field for the first time has nothing to
@@ -288,6 +288,8 @@ private struct TaskDetailEditor: View {
             }
         } label: {
             Text(durationBufferLabel)
+                .font(Font.volarMono(size: 12, weight: .medium))
+                .monospacedDigit()
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -359,8 +361,8 @@ private struct TaskDetailEditor: View {
             }
             .frame(maxHeight: .infinity)
             .background(VolarColor.card)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .volarHairline(cornerRadius: 12)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .volarHairline(cornerRadius: 8)
 
             readButton
         }
@@ -526,25 +528,27 @@ private struct TaskDetailEditor: View {
             }
             .buttonStyle(.plain)
             .background(VolarColor.veil(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-            .volarHairline(cornerRadius: 9)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .volarHairline(cornerRadius: 6)
 
             Button(role: .destructive) {
                 appState.deleteTask(task.id)
                 appState.closeDetail()
             } label: {
+                // `destruct` (not `high`) — this is the token for irreversible actions; `high` is
+                // priority-only and reads almost identically to `destruct` on the graphite ground.
                 Text("Delete")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VolarColor.high)
+                    .foregroundStyle(VolarColor.destruct)
                     .padding(.horizontal, 14)
                     .frame(height: 34)
             }
             .buttonStyle(.plain)
-            .background(VolarColor.high.opacity(0.12))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .background(VolarColor.destruct.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(VolarColor.high.opacity(0.25), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .stroke(VolarColor.destruct.opacity(0.25), lineWidth: 0.5)
             )
 
             Spacer(minLength: 0)
@@ -560,7 +564,7 @@ private struct TaskDetailEditor: View {
             }
             .buttonStyle(.plain)
             .background(accentColors.solid)
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .shadow(color: accentColors.glow, radius: 12, y: 4)
         }
     }

@@ -329,10 +329,10 @@ struct PopoverView: View {
         .overlay(
             // NOW focus ring — this card is the one thing about to be saved (Enter), so its border
             // takes the reserved amber ring instead of the neutral hairline.
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.nowRing, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .padding(.top, 6)
     }
 
@@ -590,12 +590,12 @@ struct PopoverView: View {
                 .frame(height: 22)
                 .background(isSelected ? VolarColor.instrumentDim.opacity(0.28) : Color.clear)
                 .overlay(
-                    Capsule().strokeBorder(
+                    RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(
                         isSelected ? VolarColor.instrument : VolarColor.border,
                         lineWidth: isSelected ? 1 : 0.5
                     )
                 )
-                .clipShape(Capsule())
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         }
         .buttonStyle(.plain)
     }
@@ -623,9 +623,12 @@ struct PopoverView: View {
             ReminderControl(draft: draft, appState: appState)
             if let recurrence = draft.task.recurrence, !draft.dismissed.contains(.recurrence) {
                 Chip(
+                    // Retheme §2: a recurrence cadence ("Every 3d") is a measurement readout, same
+                    // family as the estimate/reminder chips right below — mono, not prose.
                     label: recurrenceLabel(recurrence.value),
                     uncertain: recurrence.isUncertain,
                     accepted: draft.accepted.contains(.recurrence),
+                    mono: true,
                     onAccept: { appState.acceptUncertainAttribute(.recurrence, forDraft: draft.id) },
                     onDismiss: { appState.dismissAttribute(.recurrence, forDraft: draft.id) }
                 )
@@ -832,7 +835,7 @@ struct PopoverView: View {
                 .padding(.horizontal, 9)
                 .frame(height: 22)
                 .overlay(
-                    Capsule().strokeBorder(VolarColor.instrumentDim, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+                    RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(VolarColor.instrumentDim, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
                 )
             }
             .menuStyle(.borderlessButton)
@@ -907,29 +910,21 @@ struct PopoverView: View {
 
     /// One `ConfirmUpdateDraft` card: header names the resolved target (`.existing`) or shows the
     /// picker (`.unresolved`/the unreachable-in-practice `.sibling` fallback — see
-    /// `ConfirmUpdateDraft`'s own doc comment); body (field chips + `addConditions` rows) only
-    /// renders once there IS a resolved target to show them against.
+    /// `ConfirmUpdateDraft`'s own doc comment); body (diff rows + `addConditions` rows + the
+    /// Accept/Reject action row) only renders once there IS a resolved target to show them against.
+    ///
+    /// Cursor pass (design-spec.md §4.1): this used to pair `updateHeaderContent` with a tiny
+    /// header-corner "x" as the card's ONLY reject affordance (`AppState.
+    /// dismissConfirmUpdateDraft`). That "x" is now `updateActionRow`'s full "Reject ⎋" button,
+    /// wired to the exact same call — no `HStack`/`Spacer` needed here anymore since there's
+    /// nothing left to sit beside the header.
     private func confirmUpdateCard(_ draft: ConfirmUpdateDraft) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .top, spacing: 8) {
-                updateHeaderContent(draft)
-                Spacer(minLength: 4)
-                // The `.unresolved` picker already offers "Skip" inline (mirroring
-                // `dependencyPicker`'s own "Skip — no dependency" row) — a second, redundant
-                // dismiss "x" next to it would be visual noise for no extra capability, so this
-                // only appears once there's a resolved header to sit beside.
-                if case .existing = draft.resolution {
-                    Button {
-                        appState.dismissConfirmUpdateDraft(draft.id)
-                    } label: {
-                        VolarIcon(.x, size: 9, color: VolarColor.textMut)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
+            updateHeaderContent(draft)
             if case .existing = draft.resolution {
                 updateFieldChips(draft)
                 updateConditionRows(draft)
+                updateActionRow(draft)
             }
         }
     }
@@ -985,52 +980,60 @@ struct PopoverView: View {
             .padding(.horizontal, 9)
             .frame(height: 22)
             .overlay(
-                Capsule().strokeBorder(VolarColor.instrumentDim, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+                RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(VolarColor.instrumentDim, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
             )
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
     }
 
-    /// One chip per PRESENT, non-dismissed field on an `.existing`-target `ConfirmUpdateDraft` —
-    /// "old → new" for deadline/startTime (current task value, looked up live off `appState.tasks`,
-    /// -> the proposed value), plain labels for priority/notesAppend. Same `Chip` component/accept-
-    /// dismiss wiring `attributeChips` already uses for a brand-new task's own chips — every field
-    /// here goes through `AppState.resolvedUpdateValue`'s identical uncertain-accept gate (via
-    /// `dismissed`/`accepted`), so a `?`-prefixed dashed chip behaves exactly the same way here as
-    /// it does on a new-task draft.
+    /// Cursor pass (design-spec.md §4.1): one `DiffRow` per PRESENT, non-dismissed value-replacing
+    /// field on an `.existing`-target `ConfirmUpdateDraft` — current task value (looked up live off
+    /// `appState.tasks`, the SAME lookup the old "old → new" chip label used) struck through, above
+    /// the proposed value highlighted sage. `notesAppend` is deliberately NOT a `DiffRow`: it
+    /// APPENDS to the existing task's notes (`AppState.mergeNotesAppending`, see that field's own
+    /// doc comment on `ConfirmUpdateDraft`) rather than replacing a value, so there is no "old"
+    /// half to diff against — it keeps the plain additive `Chip` every other "+ …" attribute in this
+    /// file already uses, unchanged from before this pass.
     @ViewBuilder
     private func updateFieldChips(_ draft: ConfirmUpdateDraft) -> some View {
         if case .existing(let existingID) = draft.resolution {
             let existing = appState.tasks.first { $0.id == existingID }
-            FlowLayout(spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
                 if let deadline = draft.deadline, !draft.dismissed.contains(.deadline) {
-                    Chip(
-                        label: Self.updateOldToNewLabel(old: existing?.deadline, new: deadline.value),
+                    updateDiffField(
+                        label: "Deadline",
+                        old: existing?.deadline.map(Self.formattedDateTime),
+                        new: Self.formattedDateTime(deadline.value),
+                        mono: true,
                         uncertain: deadline.isUncertain,
                         accepted: draft.accepted.contains(.deadline),
-                        mono: true,
-                        onAccept: { appState.acceptUpdateField(.deadline, forDraft: draft.id) },
-                        onDismiss: { appState.dismissUpdateField(.deadline, forDraft: draft.id) }
+                        field: .deadline,
+                        draft: draft
                     )
                 }
                 if let startTime = draft.startTime, !draft.dismissed.contains(.startTime) {
-                    Chip(
-                        label: Self.updateOldToNewLabel(old: existing?.startTime, new: startTime.value),
+                    updateDiffField(
+                        label: "Start",
+                        old: existing?.startTime.map(Self.formattedDateTime),
+                        new: Self.formattedDateTime(startTime.value),
+                        mono: true,
                         uncertain: startTime.isUncertain,
                         accepted: draft.accepted.contains(.startTime),
-                        mono: true,
-                        onAccept: { appState.acceptUpdateField(.startTime, forDraft: draft.id) },
-                        onDismiss: { appState.dismissUpdateField(.startTime, forDraft: draft.id) }
+                        field: .startTime,
+                        draft: draft
                     )
                 }
                 if let priority = draft.priority, !draft.dismissed.contains(.priority) {
-                    Chip(
-                        label: Self.priorityLabel(priority.value),
+                    updateDiffField(
+                        label: "Priority",
+                        old: existing.map { Self.priorityLabel($0.priority.rawValue) },
+                        new: Self.priorityLabel(priority.value),
+                        mono: false,
                         uncertain: priority.isUncertain,
                         accepted: draft.accepted.contains(.priority),
-                        onAccept: { appState.acceptUpdateField(.priority, forDraft: draft.id) },
-                        onDismiss: { appState.dismissUpdateField(.priority, forDraft: draft.id) }
+                        field: .priority,
+                        draft: draft
                     )
                 }
                 if let notes = draft.notesAppend, !draft.dismissed.contains(.notesAppend) {
@@ -1046,14 +1049,121 @@ struct PopoverView: View {
         }
     }
 
-    /// "current task deadline → proposed" (task brief) — `old == nil` (the existing task has no
-    /// deadline/startTime yet) just shows the proposed value alone, same "no dash arrow to nothing"
-    /// convention `DeadlineControl`'s own "Add time" state uses elsewhere in this file.
-    private static func updateOldToNewLabel(old: Date?, new: Date) -> String {
-        let newText = new.formatted(.dateTime.month().day().hour().minute())
-        guard let old else { return newText }
-        let oldText = old.formatted(.dateTime.month().day().hour().minute())
-        return "\(oldText) \u{2192} \(newText)"
+    /// Reuses this file's existing `.dateTime.month().day().hour().minute()` specifier — the SAME
+    /// format the pre-`DiffRow` "old → new" chip label used — just applied once per side instead of
+    /// once for a combined string, since `DiffRow` needs the two halves separately. Not a new
+    /// formatter: same call, same output text, one Date at a time.
+    private static func formattedDateTime(_ date: Date) -> String {
+        date.formatted(.dateTime.month().day().hour().minute())
+    }
+
+    /// One `DiffRow` PLUS this card's own uncertain-accept / dismiss affordances — kept OUTSIDE
+    /// `DiffRow` itself (that view stays a dumb, model-unaware label+old+new component per its own
+    /// doc comment, with no `AppState` knowledge and no tap handling) so the `AppState` calls live
+    /// here, with the rest of this card's wiring. `DiffRow`'s own `pending` flag (dashed border +
+    /// "?", vs. the solid sage fill) is driven by the exact same `isUncertain`/`accepted` gate
+    /// `resolvedUpdateValue` reads at Save time, so a still-pending row LOOKS pending; tapping it
+    /// (while pending) or the bottom `updateActionRow`'s "Accept" both call the identical
+    /// `AppState.acceptUpdateField` this chip already called before this pass — no new accept path,
+    /// just a new look for the existing one. The trailing "x" is the same per-field
+    /// `AppState.dismissUpdateField` the old `Chip` already exposed, preserved here so a user can
+    /// still drop ONE changed field without rejecting the whole card (`updateActionRow`'s "Reject"
+    /// is the coarser, whole-card version of that same dismiss).
+    private func updateDiffField(
+        label: String, old: String?, new: String, mono: Bool,
+        uncertain: Bool, accepted: Bool, field: ConfirmUpdateDraft.Field, draft: ConfirmUpdateDraft
+    ) -> some View {
+        let pending = uncertain && !accepted
+        return HStack(alignment: .top, spacing: 6) {
+            DiffRow(label: label, oldValue: old, newValue: new, mono: mono, pending: pending)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    if pending { appState.acceptUpdateField(field, forDraft: draft.id) }
+                }
+            Spacer(minLength: 4)
+            Button {
+                appState.dismissUpdateField(field, forDraft: draft.id)
+            } label: {
+                VolarIcon(.x, size: 8, color: VolarColor.textMut)
+            }
+            .buttonStyle(.plain)
+            .padding(.top, 1)
+        }
+    }
+
+    /// Cursor-borrowed Accept/Reject action row (design-spec.md §4.1) for one `.existing`-target
+    /// update card. "Reject ⎋" (ghost) is `AppState.dismissConfirmUpdateDraft` — the exact call
+    /// this card's old header "x" already made, just a real labeled button now. "Accept ⏎" (primary,
+    /// `appState.accent.accent` fill — NEVER mint; the diff card is not the single NOW task) bulk-
+    /// marks every still-`pending` field on this card accepted in one tap, via the SAME
+    /// `AppState.acceptUpdateField` each `updateDiffField` above already calls one at a time when
+    /// tapped — a convenience on top of that identical per-field action, not a new one. If every
+    /// field is already confident, Accept has nothing to do and is a harmless no-op.
+    ///
+    /// Neither button calls `AppState.confirmSave()` — that stays the ONE unmodified save path (the
+    /// popover's own global Save button/Enter, `actionsRow`, unchanged by this pass), so nothing
+    /// here can itself write a task to the store. No auto-commit (task_refs_v1 decision (b),
+    /// frozen): this row only ever changes which fields WOULD be applied the next time the user
+    /// hits the real Save button.
+    private func updateActionRow(_ draft: ConfirmUpdateDraft) -> some View {
+        HStack(spacing: 8) {
+            Button {
+                appState.dismissConfirmUpdateDraft(draft.id)
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Reject").font(.system(size: 12, weight: .medium))
+                    Kbd("⎋")
+                }
+                .foregroundStyle(VolarColor.textPri)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+            }
+            .buttonStyle(.plain)
+            .background(VolarColor.card)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(VolarColor.border, lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+
+            Button {
+                acceptAllPendingUpdateFields(draft)
+            } label: {
+                HStack(spacing: 6) {
+                    Text("Accept").font(.system(size: 12, weight: .medium))
+                    Kbd("⏎")
+                }
+                .foregroundStyle(.white)
+                .padding(.horizontal, 10)
+                .frame(height: 26)
+            }
+            .buttonStyle(.plain)
+            .background(appState.accent.accent.solid)
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        }
+        .padding(.top, 2)
+    }
+
+    /// Loops the SAME per-field `AppState.acceptUpdateField` `updateDiffField`'s own tap-to-accept
+    /// already calls, once per PRESENT field that is both uncertain and not yet accepted — the
+    /// bulk half of `updateActionRow`'s "Accept ⏎". No new `AppState` method, no save-path call.
+    private func acceptAllPendingUpdateFields(_ draft: ConfirmUpdateDraft) {
+        if let deadline = draft.deadline, deadline.isUncertain, !draft.accepted.contains(.deadline) {
+            appState.acceptUpdateField(.deadline, forDraft: draft.id)
+        }
+        if let startTime = draft.startTime, startTime.isUncertain, !draft.accepted.contains(.startTime) {
+            appState.acceptUpdateField(.startTime, forDraft: draft.id)
+        }
+        if let priority = draft.priority, priority.isUncertain, !draft.accepted.contains(.priority) {
+            appState.acceptUpdateField(.priority, forDraft: draft.id)
+        }
+        if let notes = draft.notesAppend, notes.isUncertain, !draft.accepted.contains(.notesAppend) {
+            appState.acceptUpdateField(.notesAppend, forDraft: draft.id)
+        }
     }
 
     /// `ConfirmUpdateDraft.addConditions`, same visual shape as `conditionRow`'s `.taskDone`/
@@ -1111,10 +1221,10 @@ struct PopoverView: View {
         .padding(12)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.nowRing, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .padding(.top, 6)
     }
 
@@ -1154,10 +1264,10 @@ struct PopoverView: View {
                     .buttonStyle(.plain)
                     .background(VolarColor.card)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
                             .stroke(VolarColor.border, lineWidth: 0.5)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
             }
             .padding(.top, 2)
@@ -1225,10 +1335,10 @@ struct PopoverView: View {
         .buttonStyle(.plain)
         .background(accent.solid)
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .shadow(color: accent.glow, radius: 10, x: 0, y: 4)
         .keyboardShortcut(.defaultAction)
     }
@@ -1247,10 +1357,10 @@ struct PopoverView: View {
         .buttonStyle(.plain)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(VolarColor.border, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .keyboardShortcut(.cancelAction)
     }
 
@@ -1392,10 +1502,10 @@ struct PopoverView: View {
         .padding(10)
         .background(VolarColor.high.opacity(0.12))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(VolarColor.high.opacity(0.4), lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .padding(.top, 10)
     }
 
@@ -1415,10 +1525,10 @@ struct PopoverView: View {
             .buttonStyle(.plain)
             .background(VolarColor.card)
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(VolarColor.border, lineWidth: 0.5)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .keyboardShortcut(.cancelAction)
 
             Button {
@@ -1442,13 +1552,13 @@ struct PopoverView: View {
             .buttonStyle(.plain)
             .background(appState.captureState == .saving ? accent.surface : accent.solid)
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(
                         appState.captureState == .saving ? accent.surface : VolarColor.veil(0.18),
                         lineWidth: 0.5
                     )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .shadow(color: appState.captureState == .saving ? .clear : accent.glow, radius: 10, x: 0, y: 4)
             // 2026-07-28 (Việc 1): nothing to save once every draft is unticked — same disabled
             // treatment `.saving` already gets, so Enter can't fire a no-op save either.
@@ -1511,10 +1621,10 @@ struct PopoverView: View {
                 .buttonStyle(.plain)
                 .background(VolarColor.card)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .stroke(VolarColor.border, lineWidth: 0.5)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .keyboardShortcut(.cancelAction)
 
                 Button {
@@ -1529,10 +1639,10 @@ struct PopoverView: View {
                 .buttonStyle(.plain)
                 .background(accent.solid)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
                 )
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .keyboardShortcut(.defaultAction)
             }
             .padding(.top, 10)
@@ -1558,10 +1668,10 @@ struct PopoverView: View {
             .buttonStyle(.plain)
             .background(accent.solid)
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .keyboardShortcut(.defaultAction)
 
             Button {
@@ -1578,10 +1688,10 @@ struct PopoverView: View {
             .buttonStyle(.plain)
             .background(VolarColor.card)
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(VolarColor.border, lineWidth: 0.5)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .padding(.top, 10)
     }
@@ -1606,10 +1716,10 @@ struct PopoverView: View {
             .buttonStyle(.plain)
             .background(accent.solid)
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(VolarColor.veil(0.18), lineWidth: 0.5)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .keyboardShortcut(.defaultAction)
 
             Button {
@@ -1626,10 +1736,10 @@ struct PopoverView: View {
             .buttonStyle(.plain)
             .background(VolarColor.card)
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .stroke(VolarColor.border, lineWidth: 0.5)
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         }
         .padding(.top, 10)
     }
@@ -1712,13 +1822,13 @@ private struct Chip: View {
         .frame(height: 22)
         .background(showsDashed ? Color.clear : (mono ? VolarColor.instrumentDim.opacity(0.16) : VolarColor.card))
         .overlay(
-            Capsule().strokeBorder(
+            RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(
                 showsDashed ? VolarColor.textMut : (mono ? VolarColor.instrumentDim : VolarColor.border),
                 style: StrokeStyle(lineWidth: 0.5, dash: showsDashed ? [3, 2] : [])
             )
         )
-        .clipShape(Capsule())
-        .contentShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .contentShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .onTapGesture {
             if showsDashed {
                 onAccept?()
@@ -1786,7 +1896,7 @@ private struct DeadlineControl: View {
                     .padding(.horizontal, 8)
                     .frame(height: 22)
                     .overlay(
-                        Capsule().strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+                        RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
                     )
                 }
                 .buttonStyle(.plain)
@@ -2013,7 +2123,7 @@ private struct PriorityControl: View {
         .padding(.horizontal, 9)
         .frame(height: 22)
         .overlay(
-            Capsule().strokeBorder(
+            RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(
                 dashed ? VolarColor.textMut : VolarColor.border,
                 style: StrokeStyle(lineWidth: 0.5, dash: dashed ? [3, 2] : [])
             )
@@ -2029,7 +2139,7 @@ private struct PriorityControl: View {
         .padding(.horizontal, 8)
         .frame(height: 22)
         .overlay(
-            Capsule().strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+            RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
         )
     }
 }
@@ -2056,9 +2166,13 @@ private struct ReminderControl: View {
         Group {
             if let reminder = draft.effectiveReminderOverride, !draft.dismissed.contains(.reminder) {
                 Chip(
+                    // Retheme §2: reminder cadence ("Every 30m") is a measurement readout — same
+                    // mono treatment `DeadlineControl`/`EstimateControl`/`StartTimeControl` already
+                    // give their own chips; this one was the one gap.
                     label: PopoverView.reminderLabel(reminder.value),
                     uncertain: reminder.isUncertain,
                     accepted: draft.accepted.contains(.reminder),
+                    mono: true,
                     onAccept: { appState.acceptUncertainAttribute(.reminder, forDraft: draft.id) },
                     onDismiss: { appState.dismissAttribute(.reminder, forDraft: draft.id) },
                     onTap: { showingPicker = true }
@@ -2167,7 +2281,7 @@ private func addPill(label: String, icon: VolarIconName, action: @escaping () ->
         .padding(.horizontal, 8)
         .frame(height: 22)
         .overlay(
-            Capsule().strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
+            RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(VolarColor.border, style: StrokeStyle(lineWidth: 0.5, dash: [3, 2]))
         )
     }
     .buttonStyle(.plain)
@@ -2331,7 +2445,7 @@ private struct MicBreathingGlow: View {
     var body: some View {
         Group {
             if isActive {
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(color)
                     .opacity(reduceMotion ? 0.6 : (breathing ? 1 : 0.5))
                     .blur(radius: 18)

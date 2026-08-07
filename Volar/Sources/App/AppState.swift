@@ -895,6 +895,14 @@ final class AppState {
     /// The task currently shown in the detail sheet, by id — `nil` means the sheet is closed.
     /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
     var detailTaskID: UUID?
+    /// ⌘K command bar (`Sources/Views/CommandBar.swift`, "Volar Graphite" pass §4.2) — presented as
+    /// an overlay over the main window's content in `VolarApp.swift`, not a `.sheet`. Presentation-
+    /// only, same shape as `detailTaskID`'s bare-flag convention: `CommandBar` keeps its own local
+    /// draft text and reuses the EXISTING `textCaptureInput`/`submitTextCapture()` typed-capture
+    /// pipeline (`Sources/Views/TextCapturePanel.swift`'s ⌃⌥T popup uses the same two) to actually
+    /// parse/save — this flag never forks that pipeline, it only controls whether the ⌘K overlay
+    /// itself is on screen. See `openCommandBar()`/`closeCommandBar()` below.
+    var showCommandBar = false
 
     // MARK: - Switch ("đổi gió") state — read/written by both `Sources/Views/FocusOverlay.swift`'s
     // "Switch" button and `Sources/Views/TodayView.swift`'s hero-card "Switch" button (see the
@@ -2380,6 +2388,37 @@ final class AppState {
         textCaptureSession += 1
         textCapture = .closed
         textCaptureInput = ""
+    }
+
+    // MARK: - ⌘K command bar (`Sources/Views/CommandBar.swift`) — a second, in-window entry point
+    // into the SAME typed-capture pipeline as ⌃⌥T above; see that file's header comment for the
+    // full reuse chain. `showCommandBar` (declared above, near `detailTaskID`) is presentation-only.
+
+    /// Opens the ⌘K overlay. Applies the same "whichever surface the user reaches for wins" mutual-
+    /// exclusion rule `openTextCapture()` above already applies between ⌃⌥M and ⌃⌥T: tears down an
+    /// in-progress voice capture or an already-open ⌃⌥T popup first, so ⌘K never has to share the
+    /// screen with a stray floating panel/confirm card it didn't ask for. In practice this is rarely
+    /// live — `CommandBar` closes itself the instant it submits (see that file) — but it's the same
+    /// defensive guard `openTextCapture()` takes for the identical reason, not new behavior invented
+    /// for this flag.
+    func openCommandBar() {
+        if captureState != .idle {
+            cancelCapture()
+        }
+        if textCapture != .closed {
+            cancelTextCapture()
+        }
+        showCommandBar = true
+    }
+
+    /// Esc, or a submit that just fired (`CommandBar.submit()`) — closes the ⌘K overlay. Deliberately
+    /// does NOT touch `textCaptureInput`/`textCapture`: `CommandBar` keeps its own local draft text
+    /// and only ever writes into `textCaptureInput` right before calling `submitTextCapture()` — see
+    /// that view's header comment for why closing this flag first (rather than lingering to show its
+    /// own Saving/Saved/Failed state) is what keeps ⌘K from fighting the existing floating ⌃⌥T panel
+    /// over the same `textCapture` transitions.
+    func closeCommandBar() {
+        showCommandBar = false
     }
 
     /// Parses `textCaptureInput` and saves it — the typed equivalent of the voice flow's

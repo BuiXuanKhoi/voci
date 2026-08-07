@@ -59,9 +59,9 @@ struct TaskRow: View {
         .padding(.horizontal, 12)
         .padding(.vertical, appState.density.rowPadY)
         .background(rowBackground)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(rowBorderColor, lineWidth: 0.5)
         )
         .overlay(
@@ -69,7 +69,7 @@ struct TaskRow: View {
             // `boxShadow: inset 0 0 0 0.5px accent30` treatment.
             Group {
                 if isActive {
-                    RoundedRectangle(cornerRadius: 9, style: .continuous)
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
                         .stroke(accentColors.solid.opacity(0.19), lineWidth: 0.5)
                         .padding(0.5)
                 }
@@ -144,6 +144,8 @@ struct TaskRow: View {
                 if let durationLabel = task.durationLabel, !task.done {
                     Text("·").opacity(0.4)
                     Text(durationLabel)
+                        .font(Font.volarMono(size: 11))
+                        .monospacedDigit()
                 }
                 if task.frog && !task.done {
                     Text("·").opacity(0.4)
@@ -164,7 +166,7 @@ struct TaskRow: View {
             TimeBadge(timeBadge, filled: isActive)
         } else if task.done, let rawTimeLabel {
             Text(rawTimeLabel)
-                .font(.system(size: 11))
+                .font(Font.volarMono(size: 11))
                 .monospacedDigit()
                 .foregroundStyle(VolarColor.textMut)
         }

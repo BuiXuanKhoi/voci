@@ -82,7 +82,7 @@ struct Sidebar: View {
                 .padding(.horizontal, 10)
         }
         .padding(.bottom, 12)
-        .frame(width: 160)
+        .frame(width: 172)
         .frame(maxHeight: .infinity)
         .background(sidebarBackground)
         .overlay(alignment: .trailing) {
@@ -204,9 +204,9 @@ struct Sidebar: View {
         }
         .padding(10)
         .background(VolarColor.veil(0.03))
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .stroke(VolarColor.border, lineWidth: 0.5)
         )
     }
@@ -221,9 +221,9 @@ private struct CaptureButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(accentColor.opacity(0.15))
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .stroke(accentColor.opacity(configuration.isPressed ? 0.9 : 0.27), lineWidth: configuration.isPressed ? 1 : 0.5)
             )
             .animation(VolarMotion.press, value: configuration.isPressed)
@@ -256,17 +256,17 @@ private struct SidebarItem: View {
                 Spacer(minLength: 0)
                 if let count {
                     Text("\(count)")
-                        .font(.system(size: 11))
+                        .font(Font.volarMono(size: 11))
                         .monospacedDigit()
                         .foregroundStyle(active ? accentColors.solid : VolarColor.textMut)
                 }
             }
             .padding(.horizontal, 10)
-            .padding(.vertical, 6)
+            .padding(.vertical, 5)
         }
         .buttonStyle(.plain)
         .background(active ? accentColors.surface : (isHovering ? VolarColor.veil(0.04) : .clear))
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
     }
@@ -329,9 +329,9 @@ private struct ProSidebarRow: View {
                     endPoint: .bottomTrailing
                 )
             )
-            .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .stroke(accentColors.solid.opacity(isHovering ? 0.75 : 0.45), lineWidth: isHovering ? 1 : 0.75)
             )
             .onHover { isHovering = $0 }

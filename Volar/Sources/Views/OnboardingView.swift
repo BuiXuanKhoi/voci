@@ -315,8 +315,8 @@ struct OnboardingView: View {
             .padding(14)
             .frame(maxWidth: 460, alignment: .leading)
             .background(VolarColor.veil(0.04))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .volarHairline(cornerRadius: 12)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .volarHairline(cornerRadius: 8)
             .padding(.bottom, 30)
 
             Button {
@@ -393,8 +393,8 @@ struct OnboardingView: View {
             .padding(.vertical, 12)
             .frame(maxWidth: 460, alignment: .leading)
             .background(VolarColor.veil(0.04))
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .volarHairline(cornerRadius: 12)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .volarHairline(cornerRadius: 8)
             .padding(.bottom, 22)
 
             Button {

@@ -411,7 +411,7 @@ struct TodayView: View {
                                 endPoint: .bottom
                             )
                         )
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         // Guided tour, stop 3 primary anchor (`Sources/Views/Tour/*`): only ever
                         // rendered while `!appState.focusActive` (this whole `Button` sits inside
                         // that guard, immediately above), i.e. only while there's an eligible NOW
@@ -431,9 +431,9 @@ struct TodayView: View {
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.surfaceHi)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(VolarColor.borderHi, lineWidth: 0.5)
                     )
 
@@ -460,9 +460,9 @@ struct TodayView: View {
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.surfaceHi)
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(VolarColor.borderHi, lineWidth: 0.5)
                         )
                         .opacity(appState.canSwitchDashboardActiveTask ? 1 : 0.4)
@@ -487,9 +487,9 @@ struct TodayView: View {
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.surfaceHi)
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(VolarColor.borderHi, lineWidth: 0.5)
                         )
                         .popover(isPresented: Binding(
@@ -521,9 +521,9 @@ struct TodayView: View {
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.instrumentDim.opacity(0.18))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
                         )
                     }
@@ -628,6 +628,8 @@ struct TodayView: View {
                     // split into separate `Text` fragments so the numbers can take `Font.volarMono`.
                     HStack(spacing: 4) {
                         Text(todayDateLabel)
+                            .font(Font.volarMono(size: 12.5))
+                            .monospacedDigit()
                         Text("·").foregroundStyle(VolarColor.textMut)
                         Text("\(appState.openTasks.count)")
                             .font(Font.volarMono(size: 12, weight: .medium))
@@ -759,9 +761,10 @@ struct TodayView: View {
         .padding(.trailing, 6)
         .padding(.vertical, 5)
         .background(accentColors.surface)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            Capsule().stroke(accentColors.solid.opacity(0.27), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(accentColors.solid.opacity(0.27), lineWidth: 0.5)
         )
         .shadow(color: accentColors.glow.opacity(0.25), radius: 22)
     }
@@ -792,7 +795,7 @@ struct TodayView: View {
             }
             .buttonStyle(.plain)
             .background(accentColors.solid)
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             // Guided tour, stop 3 fallback anchor: `frogPill` (unlike `nowSpotlight`'s "Start
             // focus" button above) has no `appState.activeTask`/`focusActive` guard, so this
             // "Focus" button is always on screen whenever the running-focus pill isn't — including
@@ -810,9 +813,10 @@ struct TodayView: View {
         // which is also what the frog dot above already uses. Deliberately NOT `nowAccent` — amber
         // is reserved for the NOW spotlight alone, and this pill isn't it.
         .background(VolarColor.high.opacity(0.10))
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            Capsule().stroke(VolarColor.high.opacity(0.20), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(VolarColor.high.opacity(0.20), lineWidth: 0.5)
         )
     }
 
@@ -848,7 +852,7 @@ struct TodayView: View {
 }
 
 /// Gear entry point into Settings from the main window's toolbar. Visually matches
-/// `Components.swift`'s `ToolButton` (28x28 hit target, 7pt-rounded hover tint, subtle press
+/// `Components.swift`'s `ToolButton` (28x28 hit target, 5pt-rounded hover tint, subtle press
 /// scale) so it reads as one more tool alongside ambient/read-aloud/search/capture — but it wraps
 /// `SettingsLink` (macOS 14+, opens the app's `Settings` scene) instead of a plain `Button`, for
 /// two reasons: `SettingsLink` owns its action outright and has no `action:` closure parameter to
@@ -871,8 +875,8 @@ private struct SettingsToolButton: View {
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(SettingsToolButtonStyle())
-        .background(isHovering ? VolarColor.veil(0.08) : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(isHovering ? VolarColor.veil(0.06) : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
         .accessibilityLabel("Settings")
@@ -890,12 +894,18 @@ private struct SettingsToolButtonStyle: ButtonStyle {
 }
 
 /// Toolbar "Sign in" pill — the new main-window entry point into `SignInSheet` (see this file's
-/// `.toolbar` block above; visible only while `appState.accountEmail == nil`). A capsule with
-/// visible TEXT rather than a bare icon: `VolarIconName` has no person/account glyph (same gap
-/// `SettingsView`'s Account tab works around), and a brand-new user wouldn't recognize one yet even
-/// if it existed — "Sign in" reads on its own. Styled as an accent-filled capsule so it stands out
-/// from the plain icon `ToolButton`s beside it (this is the one action in the toolbar a signed-out
-/// user is actually meant to notice and take).
+/// `.toolbar` block above; visible only while `appState.accountEmail == nil`). Text rather than a
+/// bare icon: `VolarIconName` has no person/account glyph (same gap `SettingsView`'s Account tab
+/// works around), and a brand-new user wouldn't recognize one yet even if it existed — "Sign in"
+/// reads on its own.
+///
+/// RETHEME (Graphite, spec §3.2, revised by design-owner follow-up): was an always-filled accent
+/// capsule; a first pass flattened it to no fill at all, matching the icon-only `ToolButton`s
+/// beside it — but that went too far. Before this pill existed, sign-in was only reachable through
+/// Settings and was effectively undiscoverable, which is the whole reason the fill was added in the
+/// first place. So this stays deliberately the one toolbar item carrying a fill at rest: a subtle
+/// ~15% accent tint (`accent.surface`) with a soft accent-tinted border, not the solid capsule of
+/// the old design and not the flat/borderless treatment of its `SettingsToolButton` sibling.
 private struct SignInToolPill: View {
     let action: () -> Void
 
@@ -908,13 +918,17 @@ private struct SignInToolPill: View {
         Button(action: action) {
             Text("Sign in")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white)
+                .foregroundStyle(accentColors.solid)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
         }
         .buttonStyle(SettingsToolButtonStyle())
-        .background(isHovering ? accentColors.hover : accentColors.solid)
-        .clipShape(Capsule())
+        .background(accentColors.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(accentColors.solid.opacity(isHovering ? 0.5 : 0.3), lineWidth: 0.5)
+        )
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
         .accessibilityLabel("Sign in")
@@ -988,9 +1002,9 @@ private struct SpotlightChip: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
         .background(VolarColor.surface)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            Capsule()
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .stroke(
                     borderColor,
                     style: style == .dependency ? StrokeStyle(lineWidth: 0.5, dash: [3, 2]) : StrokeStyle(lineWidth: 0.5)
@@ -1175,9 +1189,9 @@ private struct CollapsibleTaskSection: View {
             }
             .buttonStyle(.plain)
             .background(VolarColor.surfaceHi)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .stroke(VolarColor.borderHi, lineWidth: 0.5)
             )
         }
@@ -1232,8 +1246,11 @@ private struct DelegationAmbientSection: View {
     private var softLimitHint: some View {
         HStack(spacing: 10) {
             VolarIcon(.bolt, size: 12, color: VolarColor.instrument, weight: .semibold)
-            Text("\(wipCount) tasks are out with Claude right now — review before delegating more?")
-                .font(.system(size: 12.5))
+            (
+                Text("\(wipCount)").font(Font.volarMono(size: 12.5).monospacedDigit())
+                + Text(" tasks are out with Claude right now — review before delegating more?")
+                    .font(.system(size: 12.5))
+            )
                 .foregroundStyle(VolarColor.textSec)
                 .lineLimit(2)
             Spacer(minLength: 8)
@@ -1247,9 +1264,9 @@ private struct DelegationAmbientSection: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(VolarColor.instrumentDim.opacity(0.14))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
         )
     }
@@ -1278,10 +1295,10 @@ private struct DelegationAmbientSection: View {
                     .buttonStyle(.plain)
                     .background(VolarColor.card)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
                             .stroke(VolarColor.border, lineWidth: 0.5)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
             }
             Button("None of these") {
@@ -1294,10 +1311,10 @@ private struct DelegationAmbientSection: View {
         .padding(12)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     // MARK: - Needs-review card ([Done] / [Still waiting] / [Check later])
@@ -1321,10 +1338,10 @@ private struct DelegationAmbientSection: View {
         .padding(12)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.border, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func ambientButton(_ title: String, solid: Bool = false, action: @escaping () -> Void) -> some View {

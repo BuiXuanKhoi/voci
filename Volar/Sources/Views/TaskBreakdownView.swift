@@ -49,7 +49,7 @@ struct TaskBreakdownView: View {
         }
         .padding(16)
         .frame(width: 480, height: 540)
-        .volarGlass(level: .heavy, cornerRadius: 16)
+        .volarGlass(level: .standard, cornerRadius: 16)
         // Covers EVERY dismissal path — Cancel, Edit-as-cancel, Esc, the system sheet-close
         // control — not just the two buttons below that call `onClose()`. `VolarApp.swift` (out
         // of this change's allowed files) only flips the bare `showBreakdown` Bool on dismiss and
@@ -85,9 +85,10 @@ struct TaskBreakdownView: View {
             .padding(.horizontal, 9)
             .padding(.vertical, 3)
             .background(accentColors.surface)
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
-                Capsule().stroke(accentColors.solid.opacity(0.2), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .stroke(accentColors.solid.opacity(0.2), lineWidth: 0.5)
             )
         }
     }
@@ -114,8 +115,8 @@ struct TaskBreakdownView: View {
             }
             .padding(6)
             .background(VolarColor.card)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-            .volarHairline(cornerRadius: 12)
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .volarHairline(cornerRadius: 8)
         case .loaded:
             // Defensive only — `fetchBreakdown` maps an empty result to `.failed`, never
             // `.loaded([])`, but this view still degrades honestly if that guarantee ever slips.
@@ -156,8 +157,8 @@ struct TaskBreakdownView: View {
         .frame(maxWidth: .infinity, minHeight: 160)
         .padding(16)
         .background(VolarColor.card)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .volarHairline(cornerRadius: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .volarHairline(cornerRadius: 8)
     }
 
     private func stepRow(_ step: BreakdownStep) -> some View {
@@ -170,7 +171,7 @@ struct TaskBreakdownView: View {
             .opacity(0.35)
 
             Text("\(step.id + 1)")
-                .font(.system(size: 11, weight: .medium))
+                .font(.volarMono(size: 11, weight: .medium))
                 .monospacedDigit()
                 .foregroundStyle(accentColors.solid)
                 .frame(width: 22, height: 22)
@@ -200,7 +201,8 @@ struct TaskBreakdownView: View {
     private var summary: some View {
         HStack {
             Text(summaryLabel)
-                .font(.system(size: 12))
+                .font(.volarMono(size: 12))
+                .monospacedDigit()
                 .foregroundStyle(VolarColor.textSec)
             Spacer()
             if isSaveEnabled {
@@ -239,8 +241,8 @@ struct TaskBreakdownView: View {
                 }
                 .buttonStyle(.plain)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .volarHairline(cornerRadius: 9)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .volarHairline(cornerRadius: 6)
 
                 Button {
                     onClose()
@@ -253,8 +255,8 @@ struct TaskBreakdownView: View {
                 }
                 .buttonStyle(.plain)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
-                .volarHairline(cornerRadius: 9)
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .volarHairline(cornerRadius: 6)
 
                 // Enabled ONLY once `breakdownFetchState == .loaded([...])` with real, non-empty
                 // steps (`isSaveEnabled`) — never on `.idle`/`.loading`/`.unavailable`/`.failed`.
@@ -274,7 +276,7 @@ struct TaskBreakdownView: View {
                 }
                 .buttonStyle(.plain)
                 .background(accentColors.solid)
-                .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                 .shadow(color: accentColors.glow, radius: 12, y: 4)
                 .disabled(!isSaveEnabled)
             }

@@ -32,6 +32,42 @@ struct VolarApp: App {
         appDelegate.appState = state
     }
 
+    /// ⌘K — in-app-only shortcut for `CommandBar` (`Sources/Views/CommandBar.swift`). Deliberately
+    /// NOT registered in `HotkeyManager` (`Sources/Speech/HotkeyManager.swift`) — that file owns the
+    /// two GLOBAL Carbon hotkeys (⌃⌥M/⌃⌥T), untouched by this task; this is an ordinary in-app
+    /// SwiftUI shortcut that only fires while Volar's own window has focus. Carried by an invisible
+    /// `.keyboardShortcut`-bound `Button`, the same "zero-size button carries the shortcut" trick
+    /// `TextCaptureView.escCancelButton` (`TextCapturePanel.swift`) already uses elsewhere in this
+    /// codebase — grepped every `keyboardShortcut(` call site under `Sources/` before wiring this
+    /// (self-review point 3 of this task's brief): ⌘K was unclaimed.
+    private var commandBarShortcut: some View {
+        Button("") { appState.openCommandBar() }
+            .keyboardShortcut("k", modifiers: .command)
+            .opacity(0)
+            .frame(width: 0, height: 0)
+            .accessibilityHidden(true)
+    }
+
+    /// The ⌘K bar itself, presented as an OVERLAY on the main window's content — not a `.sheet`
+    /// (design-spec §4.2: "floats over the content without dimming it into a modal", unlike every
+    /// other presentation in this file's `.sheet` chain below). `GeometryReader` places it in the
+    /// window's upper third, horizontally centered, per the same spec note ("Cursor puts ⌘K high,
+    /// not dead center") — `CommandBar` itself owns width/appearance, this only owns position.
+    /// `CommandBar`'s own Esc-bound hidden button closes it; `submit()` closes it too (see that
+    /// file). `.transition`'s matching `.animation(value: appState.showCommandBar)` is on the
+    /// `.overlay` call site below.
+    @ViewBuilder
+    private var commandBarOverlay: some View {
+        if appState.showCommandBar {
+            GeometryReader { geo in
+                CommandBar()
+                    .environment(appState)
+                    .position(x: geo.size.width / 2, y: geo.size.height * 0.28)
+            }
+            .transition(.opacity.combined(with: .scale(scale: 0.97, anchor: .top)))
+        }
+    }
+
     var body: some Scene {
         // SCENE ORDER IS LOAD-BEARING (changed 2026-07-26 together with dropping LSUIElement from
         // Info.plist): `Window` is declared FIRST so SwiftUI treats it as the primary scene and
@@ -200,6 +236,14 @@ struct VolarApp: App {
                     .environment(appState)
                     .frame(minWidth: 560, minHeight: 480)
                 }
+                // ⌘K command bar (design-spec §4.2) — invisible shortcut-carrying button + overlay,
+                // added last in the chain so the overlay paints above the sheets' own content when
+                // a sheet happens to be up (sheets themselves are a separate system layer above
+                // this whole view regardless, so ordering here only matters for the in-window
+                // overlay/background pieces, not the `.sheet`s above).
+                .background(commandBarShortcut)
+                .overlay { commandBarOverlay }
+                .animation(VolarMotion.state, value: appState.showCommandBar)
         }
 
         // Declared AFTER `Window` on purpose — see the scene-order note at the top of `body`.

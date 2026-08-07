@@ -80,7 +80,11 @@ struct PaywallView: View {
                 if let accountError = appState.accountError {
                     Text(accountError)
                         .font(.system(size: 11.5))
-                        .foregroundStyle(VolarColor.destruct)
+                        // Was `VolarColor.destruct` (red) — a purchase/quota error is a warning
+                        // state, not an irreversible destructive action, so it follows the same
+                        // "no red for status" rule `SettingsView.accountCard` already applies to
+                        // this exact `appState.accountError` value (see that file's identical row).
+                        .foregroundStyle(VolarColor.reschedule)
                         .lineLimit(4)
                 }
                 restoreButton
@@ -159,8 +163,8 @@ struct PaywallView: View {
         }
         .padding(14)
         .background(VolarColor.card)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .volarHairline(cornerRadius: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .volarHairline(cornerRadius: 8)
     }
 
     private func featureRow(_ icon: VolarIconName, _ text: String) -> some View {
@@ -220,17 +224,19 @@ struct PaywallView: View {
                     Spacer(minLength: 4)
                     if which == .yearly, let percent = yearlySavingsPercent {
                         Text("Save \(percent)%")
-                            .font(.system(size: 10, weight: .semibold))
+                            .font(Font.volarMono(size: 10, weight: .semibold))
+                            .monospacedDigit()
                             .foregroundStyle(VolarColor.done)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(VolarColor.done.opacity(0.16))
-                            .clipShape(Capsule())
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                     }
                 }
                 if let product {
                     Text(product.displayPrice)
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(Font.volarMono(size: 17, weight: .semibold))
+                        .monospacedDigit()
                         .foregroundStyle(VolarColor.textPri)
                     Text(which == .monthly ? "per month" : "per year")
                         .font(.system(size: 11))
@@ -245,9 +251,9 @@ struct PaywallView: View {
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(isSelected ? accentColors.surface : VolarColor.card)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .stroke(isSelected ? accentColors.solid : VolarColor.border, lineWidth: isSelected ? 1.5 : 0.5)
             )
         }

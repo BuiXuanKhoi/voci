@@ -159,10 +159,11 @@ private struct TakeoverContentView: View {
         ZStack {
             // Same heavy dark glass treatment `FocusOverlay.swift` already uses for its own
             // fullscreen one-task surface, so this reads as the same family of "the whole screen
-            // is now about one thing" moment rather than a novel visual language.
+            // is now about one thing" moment rather than a novel visual language. Tint uses the
+            // `bg` token (not a hardcoded literal) so it tracks the palette automatically.
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .overlay(Color(red: 9.0 / 255, green: 10.0 / 255, blue: 15.0 / 255).opacity(0.82))
+                .overlay(VolarColor.bg.opacity(0.82))
                 .ignoresSafeArea()
 
             VStack(spacing: 22) {
@@ -193,7 +194,7 @@ private struct TakeoverContentView: View {
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.done)
-                    .clipShape(Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
 
                     Button(action: onSnooze) {
                         Text("Tôi thấy rồi — 10 phút nữa")
@@ -204,8 +205,8 @@ private struct TakeoverContentView: View {
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.veil(0.10))
-                    .clipShape(Capsule())
-                    .overlay(Capsule().stroke(VolarColor.veil(0.14), lineWidth: 0.5))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(VolarColor.veil(0.14), lineWidth: 0.5))
                     // Esc == snooze 10 (contract §C, explicit — "không có đường nào khiến user
                     // kẹt"). `.keyboardShortcut(.cancelAction)` on the real, visible button —
                     // NOT a separate invisible button/`.onExitCommand` — matching this repo's own
