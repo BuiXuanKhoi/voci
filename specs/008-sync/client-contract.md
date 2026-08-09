@@ -223,6 +223,15 @@ Body — **tên tham số phải đúng từng ký tự**:
 **`hasMore == true` ⇒ gọi lại NGAY với cursor mới**, đừng đợi chu kỳ sau. Giới hạn số vòng lặp
 liên tiếp ở **20** để một server hỏng không quay vòng vô hạn.
 
+🔴 **`payload` mang `isSensitive`, và nó KHÔNG đến từ `TaskItem`** (bổ sung 2026-08-10, design §3.1).
+`isSensitive` chỉ sống trên `VolarTask` — `TaskItem` không mang nó, cố ý. Nên `PendingTask` và
+`RemoteTask` (§2) chở cờ này **song song với `item`**, và `TaskPayload` phải có nó như một field
+riêng. Quên chỗ nào trong chuỗi đó là task "đừng đọc to" sang máy khác bị **đọc to tiêu đề thật**.
+
+**Decode thiếu key `isSensitive` ⇒ `true`** (`decodeIfPresent(...) ?? true`), ngược hẳn với
+`TaskStore.isSensitive(_:)` dùng `?? false` cho đường local. Hai hướng mặc định **cố ý lệch nhau** —
+bảng lý do đầy đủ ở design §3.1. Đừng thống nhất chúng.
+
 ### 3.2 Ba RPC còn lại
 
 | RPC | Body | Trả về |

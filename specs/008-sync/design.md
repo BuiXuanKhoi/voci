@@ -121,7 +121,7 @@ LWW + tombstone + `sync_rejects` (§4, §5) là hàng rào thứ hai và thứ b
 
 | Dữ liệu | Quyết định | Lý do |
 |---|---|---|
-| `VolarTask` | **Hai chiều** | Lõi. `TaskCue`, `Recurrence`, `ReminderPolicy`, `DelegationMeta`, `conditions` là field của nó nên đi kèm miễn phí. |
+| `VolarTask` | **Hai chiều** | Lõi. `TaskCue`, `Recurrence`, `ReminderPolicy`, `DelegationMeta`, `conditions` là field của nó nên đi kèm miễn phí. ⚠️ `isSensitive` thì **KHÔNG** đi kèm miễn phí — xem ngay dưới bảng. |
 | `CompletionEvent` | **Hai chiều, chỉ-thêm** | Bất biến từ lúc tạo (`CompletionLog.swift:11`). Không bao giờ update/delete ⇒ **không thể xung đột**: `on conflict do nothing`. Watch bấm xong thì phải đẻ được event, nên vẫn cần chiều lên. |
 | `ReminderRecord` | **KHÔNG** | Suy ra được — §0(4). Mỗi máy tự `derive` từ task đã sync. Sync nó vừa thừa vừa sai: budget notification khác nhau từng máy, và state `delivered/satisfied` là bài toán khác (chống nổ chuông), xem §11. |
 | `ParseCorrection` | **KHÔNG — và cần anh Khôi gật riêng nếu muốn đổi** | §0(5). Đẩy nó lên = biến "transcript nguyên văn" từ *dữ liệu tạm để parse một câu* thành *dataset huấn luyện nằm trên server*. Lời hứa khác hẳn. |
@@ -129,6 +129,38 @@ LWW + tombstone + `sync_rejects` (§4, §5) là hàng rào thứ hai và thứ b
 | Global `ReminderPolicy`, `VoiceDeliveryMode` | **KHÔNG (đợt này)** | Là preference cấp user thật, đáng sync — nhưng là domain sync thứ hai. §11. |
 | Focus session | **KHÔNG (đợt này)** | Hiện **không persist chút nào** (chỉ sống trong `AppState`). Muốn sync phải persist trước. §11. |
 | Frog của ngày | **Đi kèm `VolarTask.frog`** | ⚠️ Bất biến "chỉ một frog" là bất biến TOÀN CỤC, LWW theo từng hàng không giữ được nó: hai máy offline set hai frog khác nhau ⇒ merge xong có hai frog. Cách chữa rẻ: đọc ra thì chọn frog có `updatedAt` mới nhất, `AppState` tự dọn. Ghi ở đây để khỏi tưởng là bug. |
+| `VolarTask.isSensitive` | **Hai chiều, nhưng phải THÊM TAY vào payload** | Xem §3.1 ngay dưới. |
+
+### 3.1 `isSensitive` — trường duy nhất không tự đi theo `TaskItem` (bổ sung 2026-08-10)
+
+Phát hiện khi Opus review bản implement đầu tiên. `isSensitive` nghĩa là *"đừng đọc to tiêu đề task
+này"* (`VoiceReminderChannel.speakReminder`). Nó **chỉ sống trên `VolarTask`**, cố ý không xỏ qua
+`TaskItem` (`VolarTask.swift:120` + `TaskStore.swift` giải thích seam đó, và `ReminderScheduler`
+đang dựa vào nó). Nhưng `SyncPayload` dựng từ `TaskItem` ⇒ **cờ này lặng lẽ không đi qua sync**.
+
+Hậu quả cụ thể: task đánh dấu nhạy cảm ở máy A, sang máy B mất cờ, máy B **đọc to tiêu đề thật**.
+Một dòng kiểu *"đi khám lại kết quả sinh thiết"* bị đọc giữa phòng họp là loại sự cố người dùng gỡ
+app ngay và không quay lại. Đây không phải lỗi thẩm mỹ.
+
+**Chốt: đưa `isSensitive` thẳng vào payload sync (đọc từ `VolarTask` lúc dựng, ghi lại lúc apply),
+KHÔNG kéo nó lên `TaskItem`** — seam kia có lý do và kéo lên sẽ lan ra nhiều file.
+
+🔴 **Hướng an toàn khi thiếu dữ liệu TRÊN DÂY là `true`, không phải `false`.** Payload không có key
+`isSensitive` (client phiên bản khác — bản .NET Windows là ca thật) ⇒ decode ra **`true`**, coi như
+nhạy cảm. Thà im lặng nhầm còn hơn đọc to nhầm.
+
+**Bất đối xứng ba chiều, cố ý — đừng "sửa cho nhất quán":**
+
+| Chỗ | Mặc định | Vì sao |
+|---|---|---|
+| Cột local (`VolarTask.isSensitive`) | `false` | Đổi thành `true` sẽ biến **mọi task đang có** của user thành nhạy cảm lúc nâng cấp, hỏng mọi lời nhắc đang chạy — để bảo vệ đúng 0 task, vì chưa từng có đường nào set `true`. |
+| Đọc local (`TaskStore.isSensitive(_:)`) | `?? false` | `nil` ở đây nghĩa là **"không tìm thấy task"**, không phải "thiếu dữ liệu". |
+| Decode trên dây (`TaskPayload`) | `?? true` | Ở đây thiếu key thật sự nghĩa là **"một client khác không nói được điều này"**, và đoán sai theo hướng đọc-to là hướng gây hại. |
+
+**Hệ quả cần biết trước:** bản .NET Windows hiện chưa có trường này. Chừng nào nó chưa gửi
+`isSensitive`, **mọi task tạo trên Windows sẽ thành "nhạy cảm" trên máy Apple** ⇒ lời nhắc đọc câu
+chung chung thay vì tiêu đề. Đó là suy giảm nhìn thấy được, nhưng là hướng lệch AN TOÀN — và cách
+chữa là bản .NET implement trường đó, không phải đảo mặc định.
 
 ---
 

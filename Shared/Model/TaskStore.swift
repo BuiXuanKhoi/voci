@@ -474,8 +474,34 @@ final class TaskStore {
     /// needs to read it directly off the persisted model instead. Defaults to `false` (never
     /// sensitive) for an unknown/deleted id, matching every other "task not found" fallback in
     /// this file.
+    ///
+    /// 🔴 Do NOT change this fallback to `true` to "match" `TaskPayload.isSensitive`'s wire-decode
+    /// fallback (also `?? true`, `Shared/Sync/SyncPayload.swift`) — the two `nil`s mean different
+    /// things. Here, `nil` (from `fetchModel` returning nil) means "no task with this id exists at
+    /// all" — there is no title to protect, so `false` costs nothing. There, a missing wire key
+    /// means "a real task exists somewhere and a client just didn't say whether it's sensitive" —
+    /// an entirely different kind of unknown, where guessing wrong is expensive. Same symbol
+    /// (`isSensitive`), same shape of fallback (`?? Bool`), opposite direction, both correct for
+    /// what `nil` means at that specific call site.
     func isSensitive(_ id: UUID) -> Bool {
         fetchModel(id)?.isSensitive ?? false
+    }
+
+    /// The only mutator that can ever set `isSensitive` (see `VolarTask.swift`'s doc comment on
+    /// the field: as of that writing there was no path that ever set it to `true`). Exists so a
+    /// future UI toggle — and `applyRemote` under sync, which now threads the flag across devices
+    /// (specs/008-sync/client-contract.md, this field's own task) — have somewhere real to land a
+    /// LOCAL edit. Returns `false` (no-op, no save) for an unknown id, and also when `isSensitive`
+    /// already equals the requested value — same "don't churn the store" discipline as every other
+    /// mutator in this file (`setFrog`/`setRecurrence`/...): a save that changes nothing would
+    /// still stamp `updatedAt` and push a no-op edit to every other device.
+    @discardableResult
+    func setSensitive(_ isSensitive: Bool, on id: UUID) -> Bool {
+        guard let model = fetchModel(id) else { return false }
+        guard model.isSensitive != isSensitive else { return false }
+        model.isSensitive = isSensitive
+        save()
+        return true
     }
 
     // MARK: - Completion internals
@@ -757,7 +783,12 @@ extension TaskStore: SyncTaskStoring {
             .filter(\.isPendingSync)
             .sorted { $0.updatedAt < $1.updatedAt }
             .prefix(limit)
-            .map { PendingTask(item: $0.asTaskItem, updatedAt: $0.updatedAt, deletedAt: $0.deletedAt) }
+            .map {
+                PendingTask(
+                    item: $0.asTaskItem, updatedAt: $0.updatedAt, deletedAt: $0.deletedAt,
+                    isSensitive: $0.isSensitive
+                )
+            }
     }
 
     /// Sets `syncedAt = confirmedUpdatedAt` for each id. MUST run inside `withoutStamping` — this
@@ -815,6 +846,13 @@ extension TaskStore: SyncTaskStoring {
                     local.updatedAt = entry.updatedAt
                     local.deletedAt = entry.deletedAt
                     local.syncedAt = entry.updatedAt
+                    // `VolarTask.apply(_:)` deliberately does NOT touch `isSensitive` (that field
+                    // is not part of `TaskItem`), so it must be written here explicitly or a
+                    // remote update would silently leave whatever the flag already was — which
+                    // happens to look harmless (the flag doesn't flip on its own) but would mean
+                    // a device that flips it locally never sees the flip lost. Writing it
+                    // unconditionally, same as every other synced field on this line.
+                    local.isSensitive = entry.isSensitive
                     written.append(entry.id)
                 } else {
                     // Never seen locally — insert even when `item == nil` (a bare tombstone for a
@@ -840,6 +878,7 @@ extension TaskStore: SyncTaskStoring {
                     model.updatedAt = entry.updatedAt
                     model.deletedAt = entry.deletedAt
                     model.syncedAt = entry.updatedAt
+                    model.isSensitive = entry.isSensitive
                     context.insert(model)
                     written.append(entry.id)
                 }

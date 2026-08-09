@@ -92,8 +92,29 @@ struct TaskPayload: Sendable, Equatable {
     var parentId: UUID?
     var delegation: DelegationMeta?
     var schemaVersion: Int
+    /// Mirrors `VolarTask.isSensitive` (specs/008-sync/client-contract.md — this field's own task).
+    /// NOT part of `TaskItem`/`asTaskItem` round-trip below — it never was and stays that way; it
+    /// travels alongside the payload the same way `PendingTask.isSensitive`/`RemoteTask.isSensitive`
+    /// carry it alongside `item` in `SyncContracts.swift`, for the identical reason (`TaskItem`
+    /// deliberately does not carry this flag).
+    ///
+    /// THREE-WAY ASYMMETRY, deliberate — do not "fix" for consistency, it would reopen the exact
+    /// privacy hole this field exists to close:
+    ///  - The persisted column (`VolarTask.isSensitive`) defaults to `false`. Flipping that default
+    ///    to `true` would retroactively mark every task on every existing install as sensitive on
+    ///    upgrade — breaking every reminder currently working — to protect a local-row count that
+    ///    has always been zero (no UI path sets `true` today).
+    ///  - `TaskStore.isSensitive(_:)` (the LOCAL read) falls back to `false` for an unknown id —
+    ///    `nil` there means "no such task", not "missing data", so there is nothing to hide.
+    ///  - THIS field, decoded off the wire below, falls back to `true` when the key is absent or
+    ///    the payload is otherwise unreadable. Here `nil`/missing means "a client that wrote this
+    ///    payload didn't say" (older build, a platform — e.g. .NET Windows — that hasn't implemented
+    ///    the flag yet), and the safe assumption under that uncertainty is the OPPOSITE of the
+    ///    local-read case: guess quiet, never guess loud. A wrongly-hidden title is an inconvenience;
+    ///    a wrongly-spoken one is the kind of incident that gets the app deleted.
+    var isSensitive: Bool
 
-    init(_ item: TaskItem) {
+    init(_ item: TaskItem, isSensitive: Bool = true) {
         id = item.id
         title = item.title
         details = item.details
@@ -118,6 +139,7 @@ struct TaskPayload: Sendable, Equatable {
         parentId = item.parentId
         delegation = item.delegation
         schemaVersion = Self.currentSchemaVersion
+        self.isSensitive = isSensitive
     }
 
     /// Reconstructs a `TaskItem`. Declared as a plain (non-failable) computed property rather than
@@ -159,7 +181,7 @@ extension TaskPayload: Codable {
         case id, title, details, priority, status, deadline, startTime, conditions, createdAt,
              when, durationMinutes, frog, notes, sourceTranscript, kind, recurrence,
              reminderOverride, resumeNote, cue, switchAwayCount, completedAt, parentId,
-             delegation, schemaVersion
+             delegation, schemaVersion, isSensitive
     }
 
     /// EVERY field goes through `decodeIfPresent` with an explicit fallback — see file header.
@@ -197,6 +219,11 @@ extension TaskPayload: Codable {
         parentId = try container.decodeIfPresent(UUID.self, forKey: .parentId)
         delegation = try container.decodeIfPresent(DelegationMeta.self, forKey: .delegation)
         schemaVersion = try container.decodeIfPresent(Int.self, forKey: .schemaVersion) ?? 1
+        // 🔴 Safe-default direction is INVERTED from every other field on this struct: `?? true`,
+        // not `?? false`. A missing key here means another client (older build, or a platform that
+        // hasn't implemented this flag yet) didn't say — see this property's doc comment above for
+        // why guessing "sensitive" is the only safe guess.
+        isSensitive = try container.decodeIfPresent(Bool.self, forKey: .isSensitive) ?? true
     }
 
     func encode(to encoder: Encoder) throws {
@@ -225,6 +252,7 @@ extension TaskPayload: Codable {
         try container.encodeIfPresent(parentId, forKey: .parentId)
         try container.encodeIfPresent(delegation, forKey: .delegation)
         try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(isSensitive, forKey: .isSensitive)
     }
 
     /// `VolarCore.TaskStatus` isn't `Codable` (frozen engine contract) — mapped to/from the same
@@ -304,7 +332,7 @@ struct SyncTaskOutbound: Sendable, Encodable {
         id = pending.item.id
         updatedAt = pending.updatedAt
         deletedAt = pending.deletedAt
-        payload = TaskPayload(pending.item)
+        payload = TaskPayload(pending.item, isSensitive: pending.isSensitive)
         schemaVersion = TaskPayload.currentSchemaVersion
     }
 }
@@ -333,8 +361,16 @@ struct SyncTaskInbound: Sendable {
 
     /// Builds the `RemoteTask` `SyncEngine` hands to `TaskStore.applyRemote(_:)`. `item` mirrors
     /// `payload`'s own optionality exactly — see that field's doc comment.
+    ///
+    /// `isSensitive` falls back to `true` when `payload` itself is `nil` (unparseable) — same `??
+    /// true` direction `TaskPayload.init(from:)` already applies for a merely-missing key; this
+    /// covers the strictly worse case of the whole payload being unreadable, which must land on
+    /// the same safe side.
     var asRemoteTask: RemoteTask {
-        RemoteTask(id: id, updatedAt: updatedAt, deletedAt: deletedAt, item: payload?.asTaskItem)
+        RemoteTask(
+            id: id, updatedAt: updatedAt, deletedAt: deletedAt, item: payload?.asTaskItem,
+            isSensitive: payload?.isSensitive ?? true
+        )
     }
 }
 

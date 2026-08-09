@@ -117,7 +117,14 @@
   · mất mạng → **im lặng**, không hiện gì. Gộp cả ba là cách chắc chắn nhất để user tắt toggle ở máy
   khác rồi ngồi debug wifi. `SyncEngine` phải gọi `volar_sync_state()` sau **mọi** 403.
 
-- [ ] **🔴 SYNC LÀM MẤT CỜ `isSensitive` — LỖ RIÊNG TƯ THẬT, PHÁT HIỆN KHI REVIEW 2026-08-10.**
+- [x] **🔴 SYNC LÀM MẤT CỜ `isSensitive` — ĐÃ VÁ 2026-08-10** (anh Khôi duyệt làm nốt ngay sau khi
+  review phát hiện). Cách vá: đưa cờ **thẳng vào payload sync**, KHÔNG kéo lên `TaskItem` (seam
+  "chỉ sống trên model đã persist" là cố ý và `ReminderScheduler` đang dựa vào nó). `PendingTask`/
+  `RemoteTask` chở cờ **song song với `item`**; `applyRemote` ghi nó trong `withoutStamping`; thêm
+  mutator `TaskStore.setSensitive(_:on:)` — trước đó **không có đường nào set `true`**, nên "đổi cờ
+  làm hàng bẩn" mới chỉ là lý thuyết. Decode thiếu key ⇒ **`true`** (thà im lặng nhầm còn hơn đọc
+  to nhầm). Bất đối xứng ba chiều cố ý, bảng lý do ở `design.md` §3.1 — **đừng "sửa cho nhất
+  quán"**. 11 test mới trong `SharedTests/SyncSensitiveTests.swift`. Mô tả gốc:
   `VolarTask.isSensitive` (nghĩa: "đừng đọc to tiêu đề task này") **không nằm trong `TaskItem`** —
   đó là seam cố ý có từ Phase 4, `TaskItem.swift` không mang field này. Nhưng `SyncPayload` dựng từ
   `TaskItem`, nên **cờ đó không đi qua sync**. Hệ quả cụ thể: task đánh dấu nhạy cảm trên Mac, sync
@@ -127,6 +134,12 @@
   `TaskPayload`), tức đụng file của cả nhóm A lẫn nhóm B giữa lúc bốn agent chạy song song — churn
   vào một commit vốn đã chưa compile lần nào. **Phải sửa trước khi bật sync cho người dùng thật**,
   và sửa cùng lúc với việc thêm `isSensitive` vào `TaskItem` (việc đáng làm độc lập).
+- [ ] **BẢN .NET (nhánh `window`) PHẢI GỬI `isSensitive` TRONG PAYLOAD SYNC** (2026-08-10, hệ quả
+  trực tiếp của bản vá ngay trên). Wire decode mặc định thiếu key ⇒ `true`, nên **chừng nào client
+  Windows chưa gửi trường này thì MỌI task tạo trên Windows sẽ thành "nhạy cảm" trên máy Apple** —
+  lời nhắc đọc câu chung chung ("You have a reminder") thay vì tiêu đề. Đó là suy giảm nhìn thấy
+  được nhưng là hướng lệch AN TOÀN; **cách chữa là bản .NET implement trường đó, KHÔNG phải đảo mặc
+  định trên máy Apple**. Shape wire: `payload.isSensitive: bool`. Xem `design.md` §3.1.
 - [ ] **WCSession pair-code cho watch — HOÃN CÓ CHỦ Ý sang đợt watch** (2026-08-10, design §10).
   KHÔNG viết dòng nào trong đợt này, và đó là quyết định chứ không phải sót. Ba thứ nó phụ thuộc đều
   **chưa tồn tại**: (1) không có target watchOS nào trong repo (`VolarWatch/` mới chỉ là một dòng

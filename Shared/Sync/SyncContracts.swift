@@ -16,6 +16,13 @@ struct PendingTask: Sendable {
     var updatedAt: Date
     /// Non-nil = tombstone. The payload is still sent in full (design §6: a later edit may revive it).
     var deletedAt: Date?
+    /// Mirrors `VolarTask.isSensitive` (see that field's doc comment) — carried alongside `item`,
+    /// not inside it, because `TaskItem` deliberately does not carry this flag (the
+    /// `ReminderScheduler` seam VolarTask.swift documents). `TaskStore.pendingForSync` is the only
+    /// producer; it always fills this from the real column. The default here exists only so a
+    /// call site that predates this field (test fixtures) still compiles — every real producer
+    /// passes an explicit value.
+    var isSensitive: Bool = true
 }
 
 /// One remote task the server says we should apply. Produced by `SyncEngine` after decoding the
@@ -27,6 +34,13 @@ struct RemoteTask: Sendable {
     /// `nil` only when the payload was unreadable (schema skew, corrupt row). A `nil` item with a
     /// non-nil `deletedAt` is still applicable — a tombstone needs no content.
     var item: TaskItem?
+    /// Mirrors `VolarTask.isSensitive`, carried alongside (not inside) `item` for the same reason
+    /// as `PendingTask.isSensitive` above. Produced by `SyncTaskInbound.asRemoteTask`, which
+    /// defaults an absent/unparseable wire value to `true` — see `TaskPayload.isSensitive`'s doc
+    /// comment for the full three-way asymmetry this is one leg of. The default here (also `true`)
+    /// exists only so pre-existing call sites (test fixtures built before this field existed)
+    /// still compile; `TaskStore.applyRemote` always receives an explicit value from the producer.
+    var isSensitive: Bool = true
 }
 
 /// One local completion event waiting to be pushed. `CompletionEvent` is append-only, so there is
