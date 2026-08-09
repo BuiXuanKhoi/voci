@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!--
+	  plan.md §8 R5: App Store Connect REJECTS the upload outright if required-reason API usage
+	  exists in the binary without a matching PrivacyInfo.xcprivacy declaration. This is the same
+	  gap flagged for the macOS app (Volar/ has no such file yet — tracked separately in
+	  backlog.md per plan §8 R5, "Bản Mac cũng thiếu").
+
+	  NSPrivacyTracking / NSPrivacyTrackingDomains: Volar does not track users across apps/
+	  websites owned by other companies — no ad SDK, no IDFA, no cross-app identifier sharing.
+	  Consistent with docs/app-store-privacy.md §1 "What is explicitly NOT collected" /
+	  "Tracking across apps/websites owned by other companies: No" (that doc is written for the
+	  macOS app but the underlying code — Shared/ — is the same, so the same answer holds here).
+	-->
+	<key>NSPrivacyTracking</key>
+	<false/>
+	<key>NSPrivacyTrackingDomains</key>
+	<array/>
+	<!--
+	  NSPrivacyCollectedDataTypes: mirrors docs/app-store-privacy.md, which is the source-of-truth
+	  worksheet for this app's actual data behavior (cited there against account-auth.md /
+	  parse-proxy.md / the Speech and Account sources, now living under Shared/ for this target).
+	  Everything here is optional/opt-in — the core capture → task → reminder → focus loop never
+	  requires an account or touches the network.
+	-->
+	<key>NSPrivacyCollectedDataTypes</key>
+	<array>
+		<!-- Email address: collected only if the user creates an account (Sign in with Apple or
+		     email OTP). docs/app-store-privacy.md §1 "Contact Info › Email Address". -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeEmailAddress</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Supabase auth.users UUID, once an account exists. docs/app-store-privacy.md §1
+		     "Identifiers › User ID". -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeUserID</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Subscription tier/status (free/pro, expiresAt, productId). docs/app-store-privacy.md
+		     §1 "Purchases". -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypePurchaseHistory</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Audio: cloud speech (Groq proxy) is Pro-tier, opt-in only; on-device paths
+		     (SFSpeechRecognizer .appleOnDevice default per plan §0.1.D, WhisperKit) never leave
+		     the phone. docs/app-store-privacy.md §1 "Audio Data (User Content)" treats the cloud
+		     path as linked-to-identity (bearer-token-authenticated request) even though not
+		     persisted — same conservative call carried over here. -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeAudioData</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+		<!-- Task text sent to the optional cloud-parse route (text only, never audio), only when
+		     the user has configured cloud parse. docs/app-store-privacy.md §1 "User Content
+		     (transcripts / text)". -->
+		<dict>
+			<key>NSPrivacyCollectedDataType</key>
+			<string>NSPrivacyCollectedDataTypeOtherUserContent</string>
+			<key>NSPrivacyCollectedDataTypeLinked</key>
+			<true/>
+			<key>NSPrivacyCollectedDataTypeTracking</key>
+			<false/>
+			<key>NSPrivacyCollectedDataTypePurposes</key>
+			<array>
+				<string>NSPrivacyCollectedDataTypePurposeAppFunctionality</string>
+			</array>
+		</dict>
+	</array>
+	<!--
+	  NSPrivacyAccessedAPITypes: T4 instructions required grepping Shared/ rather than guessing.
+	  Findings (grep run 2026-07-27 against Shared/**/*.swift):
+	    - `UserDefaults` — 9 hits (App/AppState.swift, Account/KeychainStore.swift,
+	      Model/Entitlements.swift, Orchestrator/DelegationTracker.swift,
+	      Parsing/ConfigParseCredentialProvider.swift, Parsing/DeviceCheckProvider.swift,
+	      Reminders/ReminderScheduler.swift, Speech/GroqEngine.swift,
+	      Speech/GroqTranscriptionClient.swift) → category
+	      NSPrivacyAccessedAPICategoryUserDefaults, reason CA92.1 ("Access info from same app,
+	      per user, via App Group" is NOT what's happening here — this app has no App Group in
+	      v1 — the applicable reason is declaring/reading user's own app preferences).
+	    - File timestamp APIs (fileModificationDate / creationDate / contentModificationDate /
+	      attributesOfItem) — NO hits. Not declared.
+	    - Disk space APIs (volumeAvailableCapacity*) — NO hits. Not declared.
+	    - System boot time (systemUptime) — NO hits (only unrelated
+	      `ProcessInfo.processInfo.environment` in GroqTranscriptionClient.swift, which is not a
+	      required-reason API). Not declared.
+	  Only UserDefaults is declared below. NOTE: this grep covers `Shared/` and `VolarIOS/Sources`
+	  only (VolarIOS/Sources doesn't exist yet as of this task, A1) — it does NOT cover the
+	  WhisperKit or VolarCore SPM package dependencies pulled in by VolarIOS/project.yml.
+	  WhisperKit ships its own privacy manifest as part of its package resources per Apple's SPM
+	  privacy-manifest aggregation rules, so its declarations merge in independently at archive
+	  time; VolarCore is this repo's own first-party code and was not grepped as part of this task
+	  (out of scope: A1 owns only VolarIOS/Resources/*) — flagging for Phase 2/3 review to confirm
+	  VolarCore has no required-reason API usage of its own.
+	-->
+	<key>NSPrivacyAccessedAPITypes</key>
+	<array>
+		<dict>
+			<key>NSPrivacyAccessedAPIType</key>
+			<string>NSPrivacyAccessedAPICategoryUserDefaults</string>
+			<key>NSPrivacyAccessedAPITypeReasons</key>
+			<array>
+				<string>CA92.1</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

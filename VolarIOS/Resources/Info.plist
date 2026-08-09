@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>tech.kioh.Volar.ios</string>
+	<key>CFBundleName</key>
+	<string>Volar</string>
+	<key>CFBundleDisplayName</key>
+	<string>Volar</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleExecutable</key>
+	<string>Volar</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<!--
+	  plan.md §7.1: without this key present (even empty) the app launches letterboxed — pinned to
+	  a legacy-iPhone-sized rect in the middle of the screen instead of filling the display. An
+	  empty dict opts into the modern (SwiftUI-native) launch-screen behavior.
+	-->
+	<key>UILaunchScreen</key>
+	<dict/>
+	<!--
+	  v1 scope per plan §2/§7.1: portrait only, no landscape. Upside-down included since it's the
+	  same orientation class as portrait and costs nothing to support.
+	-->
+	<key>UISupportedInterfaceOrientations</key>
+	<array>
+		<string>UIInterfaceOrientationPortrait</string>
+		<string>UIInterfaceOrientationPortraitUpsideDown</string>
+	</array>
+	<!--
+	  Volar Twilight is dark-only (plan §4, Theme.swift header: mint = NOW, ice blue = info, no
+	  light mode). Locking UIUserInterfaceStyle here is belt-and-suspenders alongside
+	  `.preferredColorScheme(.dark)` at the root scene (VolarIOSApp, plan §6 Phase 1 A2) — this key
+	  keeps system chrome (keyboard, alerts, status bar) dark too, not just SwiftUI content.
+	-->
+	<key>UIUserInterfaceStyle</key>
+	<string>Dark</string>
+	<!--
+	  CRITICAL (plan §7.1): missing either usage-description string below does not just get the
+	  permission denied — it CRASHES the app the instant it calls the corresponding permission API
+	  (AVAudioSession/AVCaptureDevice for mic, SFSpeechRecognizer for speech), because iOS refuses
+	  to show the permission prompt at all without a description string and the process is killed.
+	  Copy is iPhone-appropriate ("this iPhone") — do NOT reuse the macOS strings verbatim, which
+	  say "this Mac" (see Volar/Resources/Info.plist for the macOS originals).
+	-->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Volar listens while you speak so it can turn what you say into a task. Audio is transcribed on this iPhone and never leaves your device.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Volar uses on-device speech recognition to turn what you say into a task title, due date, priority, and duration. Nothing is sent to a server unless you turn on cloud speech in Settings.</string>
+	<!--
+	  CRITICAL, same failure mode as the mic/speech strings above: `Shared/Integrations/
+	  CalendarAccess.swift` calls `EKEventStore.requestFullAccessToEvents()` (the guided-tour
+	  "Enable Calendar" step + Settings toggle for one-way task -> Calendar mirroring). A missing
+	  usage-description string crashes the app the instant that call fires, it does not just deny
+	  the permission. Only the full-access key is needed — this code path never calls
+	  `requestWriteOnlyAccessToEvents()`. `NSCalendarsUsageDescription` (pre-iOS-17 key) is included
+	  too even though the app's deployment floor is iOS 17: it costs nothing and is the documented
+	  fallback string on the off chance any system component still consults the legacy key.
+	-->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>Volar can add the tasks you give a due date to into their own "Volar" calendar on this iPhone, so you can see them alongside your other events. This is off until you turn it on in Settings, and Volar never reads or changes any other calendar.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>Volar can add the tasks you give a due date to into their own "Volar" calendar on this iPhone, so you can see them alongside your other events. This is off until you turn it on in Settings, and Volar never reads or changes any other calendar.</string>
+	<!--
+	  Registers the `volar://` scheme, same shape as Volar/Resources/Info.plist (feature 002
+	  contracts/app-links.md). On iOS this is the seam App Intents/Siri Shortcuts and the future
+	  widget/Control Center control (plan §2, Phase 2/5) will use to open straight into capture via
+	  `.onOpenURL`. `CFBundleURLName` here uses the iOS bundle id (reverse-DNS convention: must be
+	  unique per scheme owner, doesn't need to match the Mac app's).
+	-->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>tech.kioh.Volar.ios</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>volar</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

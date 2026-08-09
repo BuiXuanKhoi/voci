@@ -1,0 +1,114 @@
+# VolarIOS — iOS app, feature 004 (specs/004-ios-port/plan.md).
+#
+# This project deliberately compiles `../Shared` (the platform-neutral source tree copied out of
+# `Volar/Sources` on 2026-07-27, plan §0.1.A / §6 Phase 0). `Volar/project.yml` compiles
+# `Volar/Sources` instead and does NOT reference `../Shared` — the two source trees are a
+# DELIBERATE DUPLICATE during this phase (plan §6 Phase 0 "ĐỔI CÁCH LÀM 2026-07-27"), so that two
+# other agents working on the macOS app in parallel never hit a race or a duplicate-symbol build
+# break. Do NOT add `- path: ../Shared` to `Volar/project.yml` — that combination (both targets
+# compiling the same files) is exactly the duplicate-symbol failure this split avoids. The two
+# trees get reconciled (old copy deleted) only after anh Khôi explicitly instructs it, once
+# `Shared/` is confirmed stable (plan §6 Phase 0, step 4).
+#
+# Conventions below mirror `Volar/project.yml` on purpose (same structure, same comment style) so
+# the two files stay easy to diff against each other; see inline notes for the handful of
+# necessary differences (iOS platform/deployment target, bundle id, entitlements file, extra
+# `../Shared` sources entry, TARGETED_DEVICE_FAMILY).
+name: VolarIOS
+options:
+  bundleIdPrefix: tech.kioh
+  deploymentTarget:
+    iOS: "17.0"
+  createIntermediateGroups: true
+configs:
+  Debug: debug
+  Release: release
+packages:
+  VolarCore:
+    path: ../VolarCore
+  # Same WhisperKit dependency as `Volar/project.yml`. WhisperKit is off by DEFAULT on iOS (plan
+  # §0.1.D — SFSpeechRecognizer `.appleOnDevice` is the free-tier engine on iPhone; WhisperKit is
+  # opt-in, Wi-Fi-gated model download, per plan §8 risk R3). The package dependency is still
+  # required here because `Shared/Speech/WhisperKitEngine.swift` is compiled by this target
+  # (it's under `../Shared`, which every source in this file's `sources:` list pulls in) even
+  # though the engine is never selected by default.
+  WhisperKit:
+    url: https://github.com/argmaxinc/WhisperKit
+    from: "0.9.0"
+targets:
+  VolarIOS:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    # `path: Sources` is a whole-tree reference (xcodegen recursively picks up every subfolder
+    # under it), same convention as `Volar/project.yml`'s `Sources` entry. `../Shared` is a
+    # second whole-tree reference — the platform-neutral code shared with the macOS app (plan §5).
+    # Folders under `Sources` that don't exist yet as of this task (e.g. `Intents/`, Phase 2) are
+    # simply not picked up until they're created; no placeholder needed for absent directories.
+    sources:
+      - path: ../Shared
+      - path: Sources
+      - path: Resources
+        excludes:
+          - Info.plist
+          - VolarIOS.entitlements
+          # Carved out into its own `sources` entry below, same way Info.plist/entitlements are
+          # excluded here and wired up through their own dedicated mechanism instead
+          # (INFOPLIST_FILE / `entitlements:`) — mirrors `Volar/project.yml` exactly.
+          - Assets.xcassets
+      - path: Resources/Assets.xcassets
+    entitlements:
+      path: Resources/VolarIOS.entitlements
+    settings:
+      base:
+        INFOPLIST_FILE: Resources/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: tech.kioh.Volar.ios
+        PRODUCT_NAME: Volar
+        IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        TARGETED_DEVICE_FAMILY: "1"
+        # NOTE (mirrors `Volar/project.yml`'s own note): GENERATE_INFOPLIST_FILE stays NO — the
+        # `volar://` CFBundleURLTypes registration and the two usage-description strings are
+        # declared directly in the physical Resources/Info.plist instead of xcodegen's
+        # `target.info.properties` merge mechanism, since that mechanism only applies when
+        # xcodegen itself generates the Info.plist.
+        GENERATE_INFOPLIST_FILE: NO
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS: NO
+    dependencies:
+      - package: VolarCore
+        product: VolarCore
+      - package: WhisperKit
+        product: WhisperKit
+  # Mirrors `Volar/project.yml`'s `VolarTests` convention: a placeholder file keeps the target
+  # non-empty until Phase 2 (plan §6) adds real tests under `VolarIOS/Tests/`.
+  # UNVERIFIED (feature 004, T1): written on Windows with no Xcode/xcodegen toolchain to verify
+  # against — confirm on Mac that `xcodegen generate` produces a working `VolarIOSTests` bundle
+  # target/scheme and that it actually builds & runs (`xcodebuild test`).
+  VolarIOSTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Tests
+    settings:
+      base:
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+    dependencies:
+      - target: VolarIOS
+      - package: VolarCore
+        product: VolarCore
+schemes:
+  VolarIOS:
+    build:
+      targets:
+        VolarIOS: all
+        VolarIOSTests: [test]
+    run:
+      config: Debug
+    test:
+      config: Debug
+      targets:
+        - VolarIOSTests
