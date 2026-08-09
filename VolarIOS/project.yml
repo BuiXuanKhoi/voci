@@ -1,14 +1,19 @@
 # VolarIOS — iOS app, feature 004 (specs/004-ios-port/plan.md).
 #
-# This project deliberately compiles `../Shared` (the platform-neutral source tree copied out of
-# `Volar/Sources` on 2026-07-27, plan §0.1.A / §6 Phase 0). `Volar/project.yml` compiles
-# `Volar/Sources` instead and does NOT reference `../Shared` — the two source trees are a
-# DELIBERATE DUPLICATE during this phase (plan §6 Phase 0 "ĐỔI CÁCH LÀM 2026-07-27"), so that two
-# other agents working on the macOS app in parallel never hit a race or a duplicate-symbol build
-# break. Do NOT add `- path: ../Shared` to `Volar/project.yml` — that combination (both targets
-# compiling the same files) is exactly the duplicate-symbol failure this split avoids. The two
-# trees get reconciled (old copy deleted) only after anh Khôi explicitly instructs it, once
-# `Shared/` is confirmed stable (plan §6 Phase 0, step 4).
+# This project compiles `../Shared` — the platform-neutral source tree, now the ONLY copy of that
+# code (specs/007-apple-three-platforms/plan.md §4, 2026-08-09).
+#
+# SUPERSEDED WARNING, kept so nobody restores it: until 2026-08-09 this header said "Do NOT add
+# `- path: ../Shared` to `Volar/project.yml`". That was correct while `Shared/` was a temporary
+# *duplicate* of `Volar/Sources`, made so parallel agents could not race each other — with two
+# copies of every type in the tree, compiling both really would have been a duplicate-symbol
+# failure. The duplicate is gone: the 52 shared files were `git mv`d out of `Volar/Sources` into
+# `Shared/`, and `Volar/project.yml` now compiles `../Shared` **and** `Sources` on purpose. Both
+# app targets compiling `../Shared` is the intended end state, not a bug — each target links its
+# own copy into its own binary, which is how a shared source tree works.
+#
+# The rule that replaces it: a type may exist in `Shared/` or in `Volar/Sources`, never in both.
+# Adding a file to `Shared/` adds it to every Apple platform at once.
 #
 # Conventions below mirror `Volar/project.yml` on purpose (same structure, same comment style) so
 # the two files stay easy to diff against each other; see inline notes for the handful of
@@ -97,6 +102,13 @@ targets:
     platform: iOS
     deploymentTarget: "17.0"
     sources:
+      # The same 25 test files the macOS target runs, exercising the same `Shared/` sources. This
+      # is the point of the move — shared code gets tested on both platforms from one copy of the
+      # tests, so an iOS-only regression in shared logic cannot hide.
+      # UNVERIFIED: these 25 have only ever been compiled for macOS. If they fail to build for iOS
+      # on the first Mac run, the cheap triage is to drop this one line, get the app target green
+      # first, then re-add it and fix the tests — the app target does not depend on it.
+      - path: ../SharedTests
       - path: Tests
     settings:
       base:

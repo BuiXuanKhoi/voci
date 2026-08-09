@@ -76,6 +76,13 @@ final class VolarTask {
     var priorityRaw: Int
     var statusRaw: String
     var deadline: Date?
+    /// Mirrors `TaskItem.startTime` (see that file for full semantics: when the user said they'd
+    /// start an urgent task — does NOT drive ordering/eligibility/reminders). No explicit `= nil`
+    /// default, matching this file's existing convention for every other `Optional`-typed stored
+    /// attribute (`deadline`/`durationMinutes`/`notes`/`parentId`/... above and below) — SwiftData
+    /// lightweight migration only requires an explicit default for NON-optional attributes;
+    /// `Optional` already defaults to `nil` for a row written before this column existed.
+    var startTime: Date?
     /// DEPRECATED — superseded by `conditions`. Kept only so pre-v2 rows still decode; folded and
     /// cleared by `foldLegacyDependsOn()` on first load (see migration note at the top of this
     /// file). Never written to by any v2 code path.
@@ -120,6 +127,16 @@ final class VolarTask {
     private var recurrenceData: Data?
     private var reminderOverrideData: Data?
     private var delegationData: Data?
+    /// `TaskItem.cue` (specs/006-cues-and-waiting/design.md §2) — same JSON-blob-behind-computed-
+    /// accessor convention as `recurrenceData`/`reminderOverrideData`/`delegationData` immediately
+    /// above: `Data?` is optional, so SwiftData lightweight migration handles rows written before
+    /// this column existed with no explicit default needed (see file header migration note).
+    /// // UNVERIFIED: confirm on Mac that adding this new optional `Data?` attribute to the
+    /// existing `@Model` performs the expected lightweight migration in-place, same caveat as the
+    /// `conditionsData` note above (that one is non-optional and needs its own separate
+    /// verification; this one follows the already-established optional-attribute pattern that
+    /// `recurrenceData` et al. already rely on, so risk here is materially lower).
+    private var cueData: Data?
 
     init(
         id: UUID = UUID(),
@@ -128,6 +145,7 @@ final class VolarTask {
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
+        startTime: Date? = nil,
         createdAt: Date = Date(),
         when: When,
         durationMinutes: Int? = nil,
@@ -139,6 +157,7 @@ final class VolarTask {
         self.priorityRaw = priority.rawValue
         self.statusRaw = Self.rawValue(for: status)
         self.deadline = deadline
+        self.startTime = startTime
         self.createdAt = createdAt
         self.whenRaw = Self.rawValue(for: when)
         self.durationMinutes = durationMinutes
@@ -194,6 +213,16 @@ final class VolarTask {
         set { delegationData = newValue.flatMap { try? JSONEncoder().encode($0) } }
     }
 
+    /// `try?` both directions, exactly like `recurrence`/`reminderOverride`/`delegation` above —
+    /// a malformed/foreign blob (hostile store edit, partial write, cross-version skew) fails
+    /// CLOSED to `nil` rather than throwing (file header trust-boundary note). Losing a cue this
+    /// way is safe by design: cue is surfacing-only (design.md §1), never eligibility, so a `nil`
+    /// here never hides or blocks a task — worst case the task just stops carrying its cue text.
+    var cue: TaskCue? {
+        get { cueData.flatMap { try? JSONDecoder().decode(TaskCue.self, from: $0) } }
+        set { cueData = newValue.flatMap { try? JSONEncoder().encode($0) } }
+    }
+
     // MARK: - Migration (see file header)
 
     /// Folds any legacy `dependsOn` ids into `.taskDone` conditions and clears `dependsOn`.
@@ -234,6 +263,7 @@ final class VolarTask {
             priority: Priority(rawValue: priorityRaw) ?? .medium,
             status: status,
             deadline: deadline,
+            startTime: startTime,
             conditions: conditions,
             createdAt: createdAt,
             when: Self.when(from: whenRaw),
@@ -248,7 +278,8 @@ final class VolarTask {
             switchAwayCount: switchAwayCount,
             completedAt: completedAt,
             parentId: parentId,
-            delegation: delegation
+            delegation: delegation,
+            cue: cue
         )
     }
 
@@ -262,6 +293,7 @@ final class VolarTask {
         priorityRaw = item.priority.rawValue
         status = item.status
         deadline = item.deadline
+        startTime = item.startTime
         conditions = item.conditions
         createdAt = item.createdAt
         whenRaw = Self.rawValue(for: item.when)
@@ -277,6 +309,7 @@ final class VolarTask {
         completedAt = item.completedAt
         parentId = item.parentId
         delegation = item.delegation
+        cue = item.cue
     }
 
     private static let emptyJSONArray = Data("[]".utf8)

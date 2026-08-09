@@ -20,7 +20,7 @@ struct NotificationView: View {
     var body: some View {
         VStack(spacing: 8) {
             HStack(spacing: 10) {
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
                     .fill(LinearGradient(colors: [accentColors.solid, accentColors.hover], startPoint: .topLeading, endPoint: .bottomTrailing))
                     .frame(width: 38, height: 38)
                     .overlay { VolarIcon(.mic, size: 20, color: .white, weight: .regular) }
@@ -39,7 +39,8 @@ struct NotificationView: View {
                         .foregroundStyle(VolarColor.textPri)
                         .lineLimit(2)
                     Text(timing)
-                        .font(.system(size: 12))
+                        .font(Font.volarMono(size: 12))
+                        .monospacedDigit()
                         .foregroundStyle(VolarColor.textSec)
                 }
                 Spacer(minLength: 0)
@@ -54,7 +55,7 @@ struct NotificationView: View {
         }
         .padding(14)
         .frame(width: 380)
-        .volarGlass(level: .heavy, tint: Color(volar: 0x282828), cornerRadius: 14)
+        .volarGlass(level: .standard, tint: VolarColor.surfaceHi, cornerRadius: 14)
     }
 
     private func actionButton(_ label: String, solid: Bool, action: @escaping () -> Void) -> some View {

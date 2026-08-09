@@ -29,15 +29,15 @@ struct KeyBadge: View {
             .padding(.horizontal, 5)
             .frame(minWidth: 18, minHeight: 18)
             .background(accent ? accentColors.surface : VolarColor.veil(0.08))
-            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                RoundedRectangle(cornerRadius: 4, style: .continuous)
                     .stroke(accent ? accentColors.solid.opacity(0.33) : VolarColor.veil(0.10), lineWidth: 0.5)
             )
     }
 }
 
-/// Dot + High/Medium/Low pill. Ported from `volar-popover.jsx`'s `PriorityBadge`.
+/// Dot + High/Medium/Low chip. Ported from `volar-popover.jsx`'s `PriorityBadge`.
 struct PriorityBadge: View {
     let priority: Priority
 
@@ -67,11 +67,11 @@ struct PriorityBadge: View {
         .padding(.horizontal, 9)
         .frame(height: 22)
         .background(s.background)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
 
-/// Accent time pill. Ported from `volar-popover.jsx`'s `TimeBadge`; `filled` mirrors the
+/// Accent time chip. Ported from `volar-popover.jsx`'s `TimeBadge`; `filled` mirrors the
 /// "isActive" solid-fill variant used in `volar-mac.jsx`'s `TaskRow`.
 struct TimeBadge: View {
     let text: String
@@ -88,13 +88,13 @@ struct TimeBadge: View {
 
     var body: some View {
         Text(text)
-            .font(.system(size: 11.5, weight: .medium))
+            .font(Font.volarMono(size: 11.5, weight: .medium))
             .monospacedDigit()
             .foregroundStyle(filled ? Color.white : accentColors.solid)
             .padding(.horizontal, 9)
             .frame(height: 22)
             .background(filled ? accentColors.solid : accentColors.surface)
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
 
@@ -157,7 +157,7 @@ struct ToolButton: View {
     private var background: Color {
         if accent { return isHovering ? accentColors.hover : accentColors.solid }
         if tint { return accentColors.surface }
-        return isHovering ? VolarColor.veil(0.08) : .clear
+        return isHovering ? VolarColor.veil(0.06) : .clear
     }
 
     var body: some View {
@@ -167,7 +167,7 @@ struct ToolButton: View {
         }
         .buttonStyle(ToolButtonStyle())
         .background(background)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
     }
@@ -212,7 +212,7 @@ struct SectionHeader: View {
                 .frame(height: 0.5)
             if let count {
                 Text("\(count)")
-                    .font(.system(size: 10.5))
+                    .font(Font.volarMono(size: 10.5))
                     .monospacedDigit()
                     .foregroundStyle(VolarColor.textMut)
             }

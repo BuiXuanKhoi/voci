@@ -54,6 +54,68 @@ final class ReminderScheduler: NSObject {
     private var foregroundObserverToken: NSObjectProtocol?
     #endif
 
+    // MARK: - Full-screen escalation (the last rung above system notification + voice — see
+    // `sweepForFullScreenEscalation()` below, and `Sources/Reminders/FullScreenEscalationDecision.swift`/
+    // `FullScreenTakeoverWindow.swift` for the pure decision + the window itself)
+
+    // The seam this file is built around (plan 007 §2): the DECISION to escalate is shared —
+    // `FullScreenEscalationDecision` is platform-neutral, lives in `Shared/`, and is unit-tested
+    // for every platform. Only the PRESENTATION is macOS-only, because a full-screen `NSPanel`
+    // seizing the display is a desktop gesture; `FullScreenTakeoverWindow` therefore stays in
+    // `Volar/Sources/Reminders/` and is not compiled for iOS or watchOS at all.
+    //
+    // Consequence, deliberately accepted for now: iOS reaches the same "this needs escalating"
+    // conclusion and then has nowhere to put it. The intended iOS/watchOS surface is a local
+    // notification plus haptic rather than a takeover window — not built yet, tracked in
+    // backlog.md. Guarding rather than stubbing keeps that gap loud instead of shipping an
+    // escalation path that silently does nothing.
+    #if os(macOS)
+    private let takeoverWindow = FullScreenTakeoverWindow()
+    #endif
+    /// Records that have already been offered ONE full-screen takeover this run. Deliberately
+    /// one-shot per record, not a re-nag loop: both "Xong" and "Tôi thấy rồi — 10 phút nữa" already
+    /// change the record's state/urgency so it stops qualifying on its own (see
+    /// `handleAction`/`reschedule`); this set exists specifically to also cover the THIRD outcome —
+    /// the 60s auto-close timeout, where nothing about the record changes at all. Without this
+    /// guard, an ignored takeover would reappear on every later sweep tick
+    /// (`fullScreenSweepInterval`) forever, which is the opposite of anh Khôi's explicit
+    /// no-rage requirement for this feature. In-memory only (not persisted): a relaunch starts
+    /// this set empty again, so a record that timed out before quitting CAN be offered once more
+    /// after a relaunch — an accepted, documented trade-off, not an oversight (flagged in this
+    /// task's report as a candidate follow-up if anh Khôi instead wants persistent one-shot state
+    /// or a repeat cadence).
+    private var escalatedRecordIds: Set<UUID> = []
+    // NO `fullScreenSweepTimer` STORED PROPERTY, and no `deinit` (2026-08-01). Both used to exist
+    // purely so `deinit` could `invalidate()` the sweep timer, on the assumption that
+    // `Timer.invalidate()` being thread-safe made it legal there. It isn't: a `deinit` on a
+    // `@MainActor` class runs NONISOLATED under Swift 6, and reaching a stored property of the
+    // non-`Sendable` type `Timer?` from that context is a hard error ("cannot access property
+    // 'fullScreenSweepTimer' with a non-Sendable type 'Timer?'") — the thread-safety of the method
+    // being CALLED is irrelevant, it's touching the property at all that's rejected.
+    //
+    // Same conclusion `HotkeyManager.swift` already reached for the identical rule ("No `deinit`:
+    // teardown happens via `stop()`... Swift 6 also forbids a `deinit` on a `@MainActor`-isolated
+    // class from touching actor-isolated stored properties"). Teardown moved INTO the timer block
+    // instead — see `startFullScreenEscalationSweep()`, where the tick invalidates its own timer as
+    // soon as `self` is gone. Nothing else ever read this property, so storing it bought nothing
+    // once `deinit` couldn't use it.
+    /// How often the sweep re-checks for a delivered, high-urgency, non-nudge record that has sat
+    /// undismissed long enough to escalate. Independent of `FullScreenEscalationDecision.ignoredAfter`
+    /// (the 5-minute "has it been ignored" threshold) — this is just the polling cadence.
+    private static let fullScreenSweepInterval: TimeInterval = 60
+
+    /// Seam for "Volar's own capture panel is mid-recording" (contract §B — a takeover must never
+    /// fight the app's own capture UI). `AppState`/`AppDelegate` (App-wiring, not owned by this
+    /// task) is the only place with a live reference to `CapturePanelController`'s driving state
+    /// (`appState.captureState`), so this defaults to a closure that always answers `false` ("not
+    /// capturing") until that owner assigns a real one — same "unwired extension point reads as no
+    /// signal" convention `ReminderContextGate.isLocalMicCaptureActive` already established (see
+    /// that file's header comment). THE MISSING WIRING LINE (for whoever owns `AppState.swift`):
+    /// after constructing `scheduler`, add `scheduler.isVolarCapturing = { [weak self] in
+    /// self?.captureState == .recording }`. Until that line exists, this check can never block a
+    /// takeover on Volar's own recording — flagged prominently in this task's final report.
+    var isVolarCapturing: () -> Bool = { false }
+
     init(store: TaskStore, voice: VoiceReminderChannel, gate: ReminderContextGate) {
         self.store = store
         self.voice = voice
@@ -98,24 +160,41 @@ final class ReminderScheduler: NSObject {
         // deleted rather than fixed in place, since `VolarApp.swift` (App-wiring, sibling-owned)
         // already has the correct wake path wired via `NSWorkspace.shared.notificationCenter` and
         // calls `scheduler?.rebuildFromStorage()` from there.
+
+        // macOS-only: the sweep exists solely to drive `FullScreenTakeoverWindow`. Starting it on
+        // iOS would burn a 60s timer forever to reach a presentation call that does not exist.
+        #if os(macOS)
+        startFullScreenEscalationSweep()
+        #endif
     }
 
     // MARK: - Contract §A
 
     /// Rebuilds ALL scheduler state from durable storage: re-derives reminders for every open,
     /// dated task that doesn't have any `ReminderRecord` yet (covers a task created/edited before
-    /// this scheduler existed, or a derivation that never landed), fires any `.scheduled` record
-    /// already past due ("due-but-missed" recovery — constitution IV), then refills the system's
-    /// pending-request queue with the nearest-N. Call once at launch; also called automatically on
-    /// `NSWorkspace.didWakeNotification` (see `init`). O(n) in the number of persisted tasks/
-    /// records: one `TaskStore.fetchAll()`, one records fetch, one dictionary build — no nested
-    /// re-fetching per record.
+    /// this scheduler existed, or a derivation that never landed) — and, for a no-deadline task
+    /// specifically, ALSO re-derives once its current nudge batch has fully fired, so "lặp mãi mỗi
+    /// 3 ngày" actually keeps going instead of going quiet after the first batch (see
+    /// `ensureDerived`'s doc comment for the full reasoning and why that doesn't apply to a
+    /// deadline task) — fires any `.scheduled` record already past due ("due-but-missed" recovery
+    /// — constitution IV), then refills the system's pending-request queue with the nearest-N.
+    /// Call once at launch; also called automatically on `NSWorkspace.didWakeNotification` (see
+    /// `init`). O(n) in the number of persisted tasks/records: one `TaskStore.fetchAll()`, one
+    /// records fetch, one dictionary build — no nested re-fetching per record.
     func rebuildFromStorage() {
         let now = Date()
         let tasks = store.fetchAll()
-        let openDatedTasks = tasks.filter { ($0.status == .todo || $0.status == .inProgress) && $0.deadline != nil }
-        for task in openDatedTasks {
-            ensureDerived(taskId: task.id, deadline: task.deadline, reminderOverride: task.reminderOverride)
+        // WG-nudge: this used to require `$0.deadline != nil` too, so an open task with no
+        // deadline never got any reminder derived for it at all. anh Khôi's approved design gives
+        // every open task SOME reminder now — a deadline-anchored one if it has a deadline, else a
+        // gentle createdAt-anchored backoff nudge (`ReminderRecord.derive`'s no-deadline branch) —
+        // so this only gates on lifecycle status, not on whether a deadline is set.
+        let openTasks = tasks.filter { $0.status == .todo || $0.status == .inProgress }
+        for task in openTasks {
+            ensureDerived(
+                taskId: task.id, deadline: task.deadline, createdAt: task.createdAt,
+                priority: task.priority.rawValue, reminderOverride: task.reminderOverride, now: now
+            )
         }
 
         let byId = Dictionary(uniqueKeysWithValues: tasks.map { ($0.id, $0) })
@@ -166,7 +245,8 @@ final class ReminderScheduler: NSObject {
     /// reminders at all.
     func scheduleReminders(for task: VolarTask) {
         deriveAndSchedule(
-            taskId: task.id, status: task.status, deadline: task.deadline, reminderOverride: task.reminderOverride
+            taskId: task.id, status: task.status, deadline: task.deadline, createdAt: task.createdAt,
+            priority: task.priorityRaw, reminderOverride: task.reminderOverride
         )
     }
 
@@ -181,18 +261,22 @@ final class ReminderScheduler: NSObject {
     func scheduleReminders(taskId: UUID) {
         guard let task = store.fetchAll().first(where: { $0.id == taskId }) else { return }
         deriveAndSchedule(
-            taskId: taskId, status: task.status, deadline: task.deadline, reminderOverride: task.reminderOverride
+            taskId: taskId, status: task.status, deadline: task.deadline, createdAt: task.createdAt,
+            priority: task.priority.rawValue, reminderOverride: task.reminderOverride
         )
     }
 
     /// Shared body for both `scheduleReminders` overloads above, so the derive logic can't drift
     /// apart between them.
-    private func deriveAndSchedule(taskId: UUID, status: TaskStatus, deadline: Date?, reminderOverride: ReminderPolicy?) {
+    private func deriveAndSchedule(
+        taskId: UUID, status: TaskStatus, deadline: Date?, createdAt: Date, priority: Int?,
+        reminderOverride: ReminderPolicy?
+    ) {
         clearScheduled(taskId: taskId)
         guard status == .todo || status == .inProgress else { return }
         let records = ReminderRecord.derive(
-            taskId: taskId, deadline: deadline, reminderOverride: reminderOverride,
-            globalPolicy: Self.currentGlobalReminderPolicy()
+            taskId: taskId, deadline: deadline, createdAt: createdAt, priority: priority,
+            reminderOverride: reminderOverride, globalPolicy: Self.currentGlobalReminderPolicy(), now: Date()
         )
         for record in records { context.insert(record) }
         save()
@@ -525,16 +609,183 @@ final class ReminderScheduler: NSObject {
     /// system, capped at `capacity`. No I/O — directly unit-testable
     /// (`ReminderSchedulerTests.testNearestNRefillUnderCap`) without touching
     /// `UNUserNotificationCenter` at all.
+    ///
+    /// WG-nudge (ship-blocker, flagged by anh Khôi): every open task now gets SOME reminder, even
+    /// one with no deadline (`offsetKind == "nudge"`, `ReminderRecord.derive`'s no-deadline
+    /// branch). A plain "earliest fire time wins" sort would let a pile of near-term nudges (e.g.
+    /// dozens of stale tasks all due to nudge within the next hour) crowd a REAL deadline
+    /// reminder — one that actually matters and is due tomorrow — out of the `capacity` slots
+    /// entirely, since it fires later than all of them. Deadline-anchored reminders (every
+    /// `offsetKind` except `"nudge"`: `-1d`/`-1h`/`at`/`override`/`resurface`/`unblocked`) are
+    /// therefore given priority as a GROUP — all of them are placed ahead of every `"nudge"`
+    /// record regardless of which fires sooner — with nudges only filling whatever capacity is
+    /// left over. Within each group, earliest-first ordering is unchanged.
     static func nearestCandidates(_ records: [ReminderRecord], excluding registeredIds: [UUID], capacity: Int) -> [ReminderRecord] {
         guard capacity > 0 else { return [] }
         let excluded = Set(registeredIds)
-        return Array(
-            records
-                .filter { $0.state == "scheduled" && !excluded.contains($0.id) }
-                .sorted { $0.fireAt < $1.fireAt }
-                .prefix(capacity)
+        let eligible = records.filter { $0.state == "scheduled" && !excluded.contains($0.id) }
+        let prioritized = eligible.filter { $0.offsetKind != "nudge" }.sorted { $0.fireAt < $1.fireAt }
+        let nudges = eligible.filter { $0.offsetKind == "nudge" }.sorted { $0.fireAt < $1.fireAt }
+        return Array((prioritized + nudges).prefix(capacity))
+    }
+
+    // MARK: - Full-screen escalation sweep (contract §A/§B)
+    //
+    // This is the ONE new hook point this feature adds to the scheduler: a periodic timer (started
+    // from `init`) that notices when a delivered, high-urgency, non-nudge reminder has sat
+    // undismissed in Notification Center past `FullScreenEscalationDecision.ignoredAfter`, and — if
+    // every other contract §B condition also holds — takes the screen over
+    // (`FullScreenTakeoverWindow`). Nothing about the EXISTING delivery path above (`fire`,
+    // `presentationDecision`, `refillSystemRequests`, `nearestCandidates`) is touched or reordered;
+    // this only ever READS `fetchAllRecords()`/`store.fetchAll()` and, on escalation, calls the
+    // already-existing `handleAction(_:recordId:)` — the exact same entry point a real system
+    // notification's Done/Snooze buttons use — so there is no second, parallel "mark done"/"snooze"
+    // implementation anywhere in this file.
+
+    // Everything from here to `presentFullScreenTakeover`'s closing brace is the macOS takeover
+    // presentation path — see the seam note on `takeoverWindow` above.
+    #if os(macOS)
+    private func startFullScreenEscalationSweep() {
+        // Mirrors `AppState.startDelegationTimer()`'s exact construction
+        // (`Timer(timeInterval:repeats:block:)` + `RunLoop.main.add(_:forMode:.common)`, read for
+        // convention only — that file isn't edited by this task): the `@Sendable` block hops back
+        // onto `@MainActor` via `_Concurrency.Task` for the same Swift 6 isolation reason documented
+        // there (a MainActor-inferred method called directly from a non-isolated `Timer` callback
+        // traps at runtime under strict concurrency checking).
+        let timer = Timer(timeInterval: Self.fullScreenSweepInterval, repeats: true) { @Sendable [weak self] firingTimer in
+            // Self-teardown, replacing the `deinit` that used to hold (and invalidate) this timer —
+            // see the comment where that property used to be declared for why `deinit` cannot do it
+            // under Swift 6. `RunLoop.main` owns the timer, so without this an outlived scheduler
+            // would leave a no-op tick firing every 60s for the rest of the process's life.
+            // `invalidate()` runs on the same thread that scheduled the timer (the main run loop),
+            // which is exactly what Foundation requires of it.
+            //
+            // In practice this is belt-and-braces: `AppState` builds exactly one scheduler and
+            // holds it for the whole app lifetime, so `self` outliving the process is the norm and
+            // this branch is expected never to run outside tests.
+            guard self != nil else {
+                firingTimer.invalidate()
+                return
+            }
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.sweepForFullScreenEscalation()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    /// One tick: gather every `.delivered`, `isHighUrgency`, non-`"nudge"` record that hasn't
+    /// already been offered a takeover (`escalatedRecordIds`) and MIGHT be at least `ignoredAfter`
+    /// past its ACTUAL delivery moment, then resolve the impure signals that need a system call
+    /// (`getDeliveredNotifications()`, which also carries each notification's real `date`) before
+    /// handing everything to the pure `FullScreenEscalationDecision.shouldEscalate`. Deliberately
+    /// serialized behind `takeoverWindow.isPresenting`: only ever escalates ONE record per tick, so
+    /// a backlog of several eligible records can't stack multiple full-screen windows — the rest
+    /// simply wait for a later tick (by which point the first will likely have been acted on or
+    /// auto-closed).
+    ///
+    /// FIX (Opus review): `deliveredAt` must be the notification's REAL delivery moment
+    /// (`UNNotification.date`), never `ReminderRecord.fireAt`. Those two differ exactly in the
+    /// most dangerous case: a due-but-missed recovery fire (`rebuildFromStorage`'s due-but-missed
+    /// pass / `fire(_:using:)`) posts the notification "now" for a `fireAt` that can be hours in
+    /// the past (e.g. the Mac slept overnight past the deadline). Using `fireAt` there would make
+    /// `now - fireAt` blow past `ignoredAfter` the INSTANT the notification is first shown —
+    /// full-screen-taking-over the user's just-woken machine before they've had one chance to see
+    /// the banner. `fireAt` is only ever used below as a cheap, deliberately OVER-inclusive
+    /// pre-filter (see `candidates` in `sweepForFullScreenEscalation` below) — it can never cause a
+    /// false NEGATIVE (excluding a record that should truly qualify), because delivery can never
+    /// happen before `fireAt`, so
+    /// `now - fireAt` is always >= the true `now - realDeliveredAt`. The real per-notification
+    /// `date` below is what actually decides the answer.
+    private struct CandidateSnapshot: Sendable {
+        let id: UUID
+        let taskId: UUID
+        let isHighUrgency: Bool
+        let offsetKind: String
+    }
+
+    private func sweepForFullScreenEscalation() {
+        guard FullScreenEscalationSetting.isEnabled else { return }
+        guard !takeoverWindow.isPresenting else { return }
+
+        let now = Date()
+        // Cheap, over-inclusive pre-filter only (see this method's doc comment for why `fireAt`
+        // can never wrongly EXCLUDE a record here) — just avoids waking up the async
+        // `getDeliveredNotifications()` path at all when nothing could possibly qualify yet.
+        let candidates: [CandidateSnapshot] = fetchAllRecords()
+            .filter {
+                $0.state == "delivered"
+                    && $0.isHighUrgency
+                    && $0.offsetKind != "nudge"
+                    && !escalatedRecordIds.contains($0.id)
+                    && now.timeIntervalSince($0.fireAt) >= FullScreenEscalationDecision.ignoredAfter
+            }
+            .map { CandidateSnapshot(id: $0.id, taskId: $0.taskId, isHighUrgency: $0.isHighUrgency, offsetKind: $0.offsetKind) }
+        guard !candidates.isEmpty else { return }
+
+        // `TaskItem` (unlike `ReminderRecord`) IS `Sendable` (a plain struct — see
+        // `Sources/Model/TaskItem.swift`), so this dictionary is safe to carry across the `Task`
+        // boundary below as-is.
+        let tasksById = Dictionary(uniqueKeysWithValues: store.fetchAll().map { ($0.id, $0) })
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let delivered = await self.center.deliveredNotifications()
+            // The REAL delivery moment per identifier (`UNNotification.date`) — not `fireAt`. A
+            // record whose identifier isn't a key here is simply no longer in Notification Center
+            // (already interacted with) OR its date couldn't be resolved; either way it's excluded
+            // below rather than ever falling back to `fireAt`.
+            var deliveredAtById: [UUID: Date] = [:]
+            for notification in delivered {
+                if let id = UUID(uuidString: notification.request.identifier) {
+                    deliveredAtById[id] = notification.date
+                }
+            }
+
+            for candidate in candidates.sorted(by: { (deliveredAtById[$0.id] ?? .distantFuture) < (deliveredAtById[$1.id] ?? .distantFuture) }) {
+                // Freshest possible task read for THIS record specifically (contract §B: "đọc lại
+                // bản tươi từ store, đừng tin snapshot cũ") — `tasksById` above was built once per
+                // tick, immediately before this loop, not carried over from an earlier tick.
+                guard let task = tasksById[candidate.taskId] else { continue }
+                // Fail-safe (Opus review, explicit): no resolvable REAL delivery date -> skip this
+                // record THIS tick rather than ever guessing via `fireAt`. This also naturally
+                // covers "no longer in Notification Center" (`stillInNotificationCenter == false`),
+                // since that identifier simply won't be a key in `deliveredAtById` either.
+                guard let realDeliveredAt = deliveredAtById[candidate.id] else { continue }
+                let signals = EscalationSignals(
+                    isHighUrgency: candidate.isHighUrgency,
+                    offsetKind: candidate.offsetKind,
+                    isTaskOpen: task.status != .done && task.status != .archived,
+                    stillInNotificationCenter: true, // guaranteed by the guard just above
+                    deliveredAt: realDeliveredAt,
+                    isMicrophoneInUse: MicrophoneActivityMonitor.isMicrophoneInUseSystemWide(),
+                    isVolarCapturing: self.isVolarCapturing(),
+                    settingEnabled: FullScreenEscalationSetting.isEnabled
+                )
+                guard FullScreenEscalationDecision.shouldEscalate(signals: signals, now: Date()) else { continue }
+
+                self.escalatedRecordIds.insert(candidate.id)
+                self.presentFullScreenTakeover(task: task, recordId: candidate.id)
+                break // one takeover at a time — see this method's doc comment.
+            }
+        }
+    }
+
+    /// Presents the takeover, wiring its two buttons/Esc straight back to the SAME
+    /// `handleAction(_:recordId:)` a real notification's "Done"/"Snooze 10 min" actions already go
+    /// through — no second mark-done/snooze implementation.
+    private func presentFullScreenTakeover(task: TaskItem, recordId: UUID) {
+        takeoverWindow.present(
+            title: task.title,
+            deadline: task.deadline,
+            onDone: { [weak self] in
+                self?.handleAction(ReminderAction.done, recordId: recordId)
+            },
+            onSnooze: { [weak self] in
+                self?.handleAction(ReminderAction.snooze10, recordId: recordId)
+            }
         )
     }
+    #endif
 
     private func postScheduledRequest(record: ReminderRecord, task: TaskItem) async {
         let content = Self.buildContent(task: task, offsetKind: record.offsetKind)
@@ -621,14 +872,44 @@ final class ReminderScheduler: NSObject {
         for record in scheduled { context.delete(record) }
     }
 
-    /// Only derives when NO record exists yet for `taskId` (any state) — makes repeated
+    /// Derives when NO record exists yet for `taskId` (any state) — makes repeated
     /// `rebuildFromStorage()` calls idempotent instead of re-deriving (and re-firing) the same
-    /// offsets on every wake.
-    private func ensureDerived(taskId: UUID, deadline: Date?, reminderOverride: ReminderPolicy?) {
-        guard recordsForTask(taskId).isEmpty else { return }
+    /// offsets on every wake. For a no-deadline task ONLY, ALSO re-derives once its current batch
+    /// has fully fired — see the asymmetry note below.
+    ///
+    /// FIX (anh Khôi's "lặp mãi" nudge repeat, ship-blocker — was a KNOWN GAP left unfixed by the
+    /// task that introduced the no-deadline "nudge" backoff): `ReminderRecord.derive`'s no-deadline
+    /// branch caps out at `maxBeforeDeadlineMarks` (8) marks per call BY DESIGN — "repeat forever"
+    /// literally cannot be a finite list, so the architecture leans on being CALLED AGAIN later to
+    /// top up (see that function's own doc comment). The plain "any record at all" guard used to
+    /// defeat that: once all 8 nudges in a batch had fired (state `"delivered"`/`"satisfied"`),
+    /// `recordsForTask(taskId)` was never empty again, so this method stopped deriving anything
+    /// further for that task FOREVER — the opposite of "lặp mãi mỗi 3 ngày". Fixed by also
+    /// re-deriving whenever the no-deadline task has no `"scheduled"` record left with `fireAt` in
+    /// the future (i.e. the whole current batch is spent and needs topping up).
+    ///
+    /// ⚠️ ASYMMETRIC ON PURPOSE — do NOT "simplify" this to the same condition for a task WITH a
+    /// deadline. A deadline task's fixed `policy.offsets` marks (e.g. offset `0` = "at deadline")
+    /// sit in the PAST once the task is overdue, and `ReminderRecord.derive`'s overdue branch
+    /// returns those past offsets VERBATIM with no future-only filtering (unlike `noDeadlineMarks`,
+    /// which only ever keeps marks `> now`). Loosening this guard the same way for a deadline task
+    /// would re-derive and re-insert those already-fired past-due marks as brand-new `.scheduled`
+    /// rows on every later `rebuildFromStorage`/wake, re-firing a notification the user already
+    /// received. A no-deadline task has no such risk (`noDeadlineMarks` never emits a mark that
+    /// isn't strictly after `now`), so only it gets the loosened re-derive condition below.
+    private func ensureDerived(
+        taskId: UUID, deadline: Date?, createdAt: Date, priority: Int?, reminderOverride: ReminderPolicy?, now: Date
+    ) {
+        let existing = recordsForTask(taskId)
+        if deadline == nil {
+            let hasFutureScheduled = existing.contains { $0.state == "scheduled" && $0.fireAt > now }
+            guard existing.isEmpty || !hasFutureScheduled else { return }
+        } else {
+            guard existing.isEmpty else { return }
+        }
         let records = ReminderRecord.derive(
-            taskId: taskId, deadline: deadline, reminderOverride: reminderOverride,
-            globalPolicy: Self.currentGlobalReminderPolicy()
+            taskId: taskId, deadline: deadline, createdAt: createdAt, priority: priority,
+            reminderOverride: reminderOverride, globalPolicy: Self.currentGlobalReminderPolicy(), now: now
         )
         for record in records { context.insert(record) }
         save()

@@ -106,8 +106,13 @@ final class WhisperKitEngine: SpeechEngine {
 
     /// WhisperKit only needs the microphone (no Speech-framework authorization, no server
     /// consent — everything stays on-device). Matches `GroqEngine`'s mic-only path.
+    ///
+    /// Fix (2026-07-27): was `AVAudioApplication.requestRecordPermission()` — wrong, iOS-only API
+    /// that never showed macOS's mic prompt at all (see `MicrophonePermission.swift`'s header for
+    /// the full story). Routed through the shared helper so this and every other engine ask macOS
+    /// the same, correct way.
     func requestAuthorization() async -> Bool {
-        await AVAudioApplication.requestRecordPermission()
+        await MicrophonePermission.request()
     }
 
     func start(onPartial: @escaping (String) -> Void) {

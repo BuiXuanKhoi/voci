@@ -16,19 +16,17 @@
 // today.
 //
 // WHY THIS REQUESTS "FULL" ACCESS (read this before touching the usage strings, entitlement, or
-// privacy doc — all three must make the same claim this file backs up): EventKit on macOS 14/
-// iOS 17 exposes exactly two request calls: `requestFullAccessToEvents()` and
-// `requestWriteOnlyAccessToEvents()` (both introduced simultaneously on both platforms — the
-// older, single-tier `requestAccess(to:)` is deprecated on both and is NOT used anywhere in this
-// file). There is no `requestReadOnlyAccessToEvents` — the write-only grant cannot be used to read
-// a single event or even list calendars for reading. So the ONLY EventKit API that grants read
-// access is "full access," which also happens to be exactly what Volar now genuinely needs, since
-// it both reads (calendar count today, busy intervals possibly later) and writes (via
-// `CalendarSync`, into its own calendar only). "Requests full access, uses it read-only" is no
-// longer the story for this app as a whole — but the write half is scoped to a single app-created
-// calendar by construction, never to calendars the user already had. If a future OS adds a
-// finer-grained request API, revisit this file, the usage-description strings (Info.plist), and
-// `docs/app-store-privacy.md` together.
+// privacy doc — all three must make the same claim this file backs up): EventKit on macOS 14
+// exposes exactly two request calls: `requestFullAccessToEvents()` and
+// `requestWriteOnlyAccessToEvents()`. There is no `requestReadOnlyAccessToEvents` — the write-only
+// grant cannot be used to read a single event or even list calendars for reading. So the ONLY
+// EventKit API that grants read access on this OS version is "full access," which also happens to
+// be exactly what Volar now genuinely needs, since it both reads (calendar count today, busy
+// intervals possibly later) and writes (via `CalendarSync`, into its own calendar only). "Requests
+// full access, uses it read-only" is no longer the story for this app as a whole — but the write
+// half is scoped to a single app-created calendar by construction, never to calendars the user
+// already had. If a future macOS adds a finer-grained request API, revisit this file, the two
+// usage-description strings (Info.plist), and `docs/app-store-privacy.md` together.
 //
 // WHY `@MainActor`: `EKEventStore` is not `Sendable`, and this target builds with
 // `SWIFT_STRICT_CONCURRENCY: complete` under Swift 6 (see VolarApp.swift's own `@Sendable` notes
@@ -91,7 +89,7 @@ final class CalendarAccess {
         self.lastError = nil
     }
 
-    /// Requests full calendar access (the only read-capable request on this OS — see file header)
+    /// Requests full calendar access (the only read-capable request on macOS 14 — see file header)
     /// and refreshes `status`/`calendarCount` from the result. Never throws to the caller, never
     /// force-unwraps: any EventKit failure lands in `lastError` with `status` re-derived from
     /// `authorizationStatus(for:)` rather than assumed.
@@ -169,9 +167,9 @@ final class CalendarAccess {
             // rather than claiming the feature works.
             return .denied
         case .authorized:
-            // Deprecated pre-macOS-14/pre-iOS-17 case (old-style single-tier authorization).
-            // Mapped to `.granted` for backward compatibility on the off chance this ever runs on
-            // an older OS than either platform's floor declares — should be unreachable in practice.
+            // Deprecated pre-macOS-14 case (old-style single-tier authorization). Mapped to
+            // `.granted` for backward compatibility on the off chance this ever runs on an older
+            // OS than the 14.0 floor declares — should be unreachable in practice.
             return .granted
         @unknown default:
             return .unavailable
