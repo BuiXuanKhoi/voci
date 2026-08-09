@@ -1,24 +1,25 @@
 // Sources/Design/Theme.swift — frozen design tokens: palette, accents, density, glass (spec §3)
 //
-// RETHEME 2 — "Volar Twilight" (2026-07-26). Values taken from the design board of that name
-// (claude.ai/design, project "Voci voice command app design", `Volar Twilight.dc.html`), which is
-// now the source of truth for palette and tone; it supersedes the earlier "Studio Dark / One Lit
-// Thing" pass whose prototype files (`volar-redesign/foundations.html`, `menubar-now.html`) the
-// comments below still cite for PROVENANCE of each token's role. Token NAMES are unchanged again,
-// so every call site keeps compiling — only values moved.
+// RETHEME 3 — "Volar Graphite" (2026-08-07, specs/005-cursor-retheme/design-spec.md). Supersedes
+// RETHEME 2 "Volar Twilight" (2026-07-26) on ink/hairline/text VALUES only — the mint spotlight
+// rule, the anti-red rule, and the mint logo family it all serves are untouched. Token NAMES are
+// unchanged yet again, so every call site keeps compiling — only values moved.
 //
-// What changed vs. Studio Dark, and why: the key light is now MINT, matching the logo mark
-// (assets/…design.zip -> export-logo/README.txt: "nón sáng rọi xuống đúng một chấm"; the lit dot is
-// mint and is the brand's whole identity). Warm amber was the key light when the palette had no
-// logo to answer to; keeping it would have left the app's single brightest element a different hue
-// from the mark on its own icon. The neutral graphite ink also moves to the board's three night-blue
-// layers so the mint reads as a light source in a blue room rather than a green chip on gray.
+// What changed vs. Twilight, and why: Twilight's three ink layers (`bg`/`surface`/`surfaceHi`) and
+// its hairline/veil base were tinted cool blue (`0x94B2E0`) on the theory that a night-blue room
+// makes the mint spotlight read as a light source rather than a green chip on gray. In practice the
+// blue ink was the SAME family as the mint accent it was supposed to set off — it competed with the
+// spotlight instead of making it pop. This pass (borrowing Cursor's IDE palette, see the spec's §0)
+// moves the ink to a near-neutral graphite (R≈G, B nudged +2) and reverts every hairline/veil/card
+// token to a plain white base at lower alphas, exactly as it was before Twilight. A neutral ground
+// is the best possible backdrop for a single colored light source: nothing on the page competes
+// with mint for "warmest/coolest thing in the room" except mint itself.
 //
-// THE ONE RULE (unchanged in spirit, new hue): mint (`nowAccent` family) is a spotlight, not a
+// THE ONE RULE (unchanged, still the whole point): mint (`nowAccent` family) is a spotlight, not a
 // brand-everywhere color — reserved for the single active/NOW task (spotlight glow, NOW label, NOW
-// focus ring). The board states it as "bạc hà = NOW duy nhất · xanh băng = thông tin". So the
-// app-wide accent (`VolarAccent.indigo`, the default) and every informational token resolve to the
-// ICE BLUE instrument family instead. If two things on a screen are mint, one of them is wrong.
+// focus ring). The app-wide accent (`VolarAccent.indigo`, the default) and every informational
+// token resolve to the ICE BLUE instrument family instead. If two things on a screen are mint, one
+// of them is wrong.
 import SwiftUI
 
 extension Color {
@@ -39,40 +40,43 @@ extension Color {
 /// `--tx-*`, `--sage`, etc). Dark-only; this app is dark-first Studio Dark (see §"Support
 /// light+dark?" — no light variant exists here, so none needs preserving).
 enum VolarColor {
-    // --- Ink / depth — Twilight's "3 tầng xanh đêm" (three night-blue layers) ---
-    /// `--ink-0` — base bg, deepest. Twilight page ground.
-    static let bg = Color(volar: 0x07090E)
+    // --- Ink / depth — Graphite's three near-neutral layers ---
+    /// `--ink-0` — base bg, deepest. Graphite page ground.
+    static let bg = Color(volar: 0x0F0F11)
     /// `--surface-1` — raised surface, one step up from `bg`. NOTE: name predates the retheme.
-    static let surface = Color(volar: 0x0A101C)
-    /// `--surface-2` — raised surface, higher. Top of the Mac window's own gradient on the board.
-    static let surfaceHi = Color(volar: 0x101827)
-    /// Low-key translucent card fill over whichever surface it sits on. Tinted with the same cool
-    /// blue as the hairlines rather than pure white: over night-blue ink a white veil greys the
-    /// surface out, which is what made the old chrome read as gray plastic.
-    static let card = Color(volar: 0x94B2E0, opacity: 0.05)
-    static let cardHover = Color(volar: 0x94B2E0, opacity: 0.08)
-    /// `--hairline` — Twilight draws every divider/edge as `rgba(148,178,224,.10)`, a cool blue
-    /// hairline, NOT white. This is what keeps window edges from reading as a bright white line.
-    static let border = Color(volar: 0x94B2E0, opacity: 0.10)
-    /// `--hairline-strong` — the board's stronger edge, `rgba(148,178,224,.18)`.
-    static let borderHi = Color(volar: 0x94B2E0, opacity: 0.18)
+    static let surface = Color(volar: 0x16161A)
+    /// `--surface-2` — raised surface, higher. Card / input / hover panel.
+    static let surfaceHi = Color(volar: 0x1E1E23)
+    /// Low-key translucent card fill over whichever surface it sits on. Base reverted to plain
+    /// white (was Twilight's cool-blue `0x94B2E0`, see file header): the ink is now a near-neutral
+    /// graphite, so a white film no longer greys the surface out the way it did over night-blue ink
+    /// — a white veil is what Cursor itself uses over its own neutral ground.
+    static let card = Color.white.opacity(0.035)
+    static let cardHover = Color.white.opacity(0.06)
+    /// `--hairline` — reverted to white (was Twilight's cool-blue `rgba(148,178,224,.10)`); alpha
+    /// also dropped 0.10 → 0.07. Cursor separates panels by a fill delta more than a drawn line, so
+    /// the hairline can afford to sit lighter than it did on Twilight's blue ink.
+    static let border = Color.white.opacity(0.07)
+    /// `--hairline-strong` — reverted to white, alpha dropped 0.18 → 0.12 (was Twilight's
+    /// `rgba(148,178,224,.18)`).
+    static let borderHi = Color.white.opacity(0.12)
 
     /// One-off translucent film at an arbitrary strength, for the ~40 places across the views that
     /// need a fill/stroke between two named tokens (hover tints, chip backgrounds, progress-track
-    /// fills). Those all used `Color.white.opacity(x)` before Twilight; over night-blue ink a white
-    /// film desaturates the surface to grey, so they take the SAME cool base as `border`/`card` and
-    /// keep their original alpha. Prefer a named token when one fits — this exists so a view never
-    /// has to reach back for `Color.white` and reintroduce the grey.
-    static func veil(_ opacity: Double) -> Color { Color(volar: 0x94B2E0, opacity: opacity) }
+    /// fills). Reverted to the pre-Twilight formula — plain `Color.white.opacity(x)` — now that the
+    /// ink underneath it is graphite instead of night-blue, so every one of those ~40 call sites
+    /// needs no edits: the base changed here, not at the call site. Prefer a named token when one
+    /// fits — this exists so a view never has to reach back for `Color.white` directly.
+    static func veil(_ opacity: Double) -> Color { Color.white.opacity(opacity) }
 
     // --- Text (foundations.html --tx-1/2/3) ---
-    /// `--tx-1` primary. Contrast vs `bg` (#07090E) ≈ 16.9:1 — passes WCAG AAA for body text.
-    static let textPri = Color(volar: 0xEDF2F9)
-    /// `--tx-2` secondary. Contrast vs `bg` ≈ 7.9:1 — passes WCAG AA (and AAA) for body text.
-    static let textSec = Color(volar: 0x9AA7BC)
-    /// `--tx-3` tertiary / muted. Contrast vs `bg` ≈ 3.3:1 — intentionally BELOW body-text AA per
+    /// `--tx-1` primary. Contrast vs `bg` (#0F0F11) ≈ 15.7:1 — passes WCAG AAA for body text.
+    static let textPri = Color(volar: 0xE8E8EA)
+    /// `--tx-2` secondary. Contrast vs `bg` ≈ 7.5:1 — passes WCAG AA (and AAA) for body text.
+    static let textSec = Color(volar: 0xA1A1A8)
+    /// `--tx-3` tertiary / muted. Contrast vs `bg` ≈ 3.6:1 — intentionally BELOW body-text AA per
     /// the source spec (this token is for de-emphasized/tertiary labels, never body copy).
-    static let textMut = Color(volar: 0x57637C)
+    static let textMut = Color(volar: 0x6B6B74)
 
     // --- Priority / status dots & badges ---
     // No red, ever (anti-shame rule, foundations.html §01 rule-callout) and no mint (mint is
@@ -80,8 +84,10 @@ enum VolarColor {
     // is expressed as a warm-neutral clay → taupe → cool-gray ramp, which stays clear of the
     // reserved hue by construction: nothing in this ramp is green.
     /// High priority — muted clay/terracotta. Deliberately NOT alarm red. (Pre-Twilight this also
-    /// had to dodge the amber NOW spotlight; amber is no longer reserved, but the ramp is unchanged
-    /// — it reads correctly against night-blue ink and re-tuning it is not this pass's business.)
+    /// had to dodge the amber NOW spotlight; amber is no longer reserved. Held again through the
+    /// Graphite pass, unchanged — on a neutral graphite ground this warm ramp becomes the ONLY warm
+    /// hue anywhere on screen, so the priority tier reads even more clearly than it did on Twilight's
+    /// blue ink: warm = priority, cool = information, mint = NOW.)
     static let high = Color(volar: 0xB9705A)
     /// Medium priority — muted warm taupe, between `high` and `low`.
     static let med = Color(volar: 0x9C8C6B)
@@ -173,40 +179,42 @@ enum VolarAccent: String, CaseIterable, Identifiable, Sendable, Equatable, Hasha
     }
 }
 
-/// Row/section spacing presets (`VOLAR_DENSITY`). Default is `.comfy`. Unchanged by the retheme —
-/// spacing is not a color/token-value concern.
+/// Row/section spacing presets (`VOLAR_DENSITY`). Default is `.comfy`. Tightened in the Graphite
+/// pass (§1.7): Cursor's list density reads chattier/denser than Twilight's, so every tier's
+/// padding/gap moved down a notch. See per-case comments below for the old (Twilight) numbers.
 enum Density: Sendable, Equatable, Hashable {
     case cozy, comfy, roomy
 
     var rowPadY: CGFloat {
         switch self {
-        case .cozy: return 7
-        case .comfy: return 10
-        case .roomy: return 14
+        case .cozy: return 5
+        case .comfy: return 8   // was 10 (Twilight)
+        case .roomy: return 12  // was 14 (Twilight)
         }
     }
 
     var rowGap: CGFloat {
         switch self {
-        case .cozy: return 3
-        case .comfy: return 4
-        case .roomy: return 6
+        case .cozy: return 2
+        case .comfy: return 3   // was 4 (Twilight)
+        case .roomy: return 5   // was 6 (Twilight)
         }
     }
 
     var sectionGap: CGFloat {
         switch self {
-        case .cozy: return 18
-        case .comfy: return 22
-        case .roomy: return 30
+        case .cozy: return 14
+        case .comfy: return 18  // was 22 (Twilight)
+        case .roomy: return 26  // was 30 (Twilight)
         }
     }
 }
 
-/// Glass/material intensity presets (`VOLAR_GLASS`). Default is `.standard`. Blur/opacity numbers
-/// unchanged — they already read as "deep, cool, low-key" once layered over the new ink `bg`/
-/// `borderHi` tokens above (see `Glass.swift`'s default `tint`/`borderColor`), so no numeric
-/// retune was needed here.
+/// Glass/material intensity presets (`VOLAR_GLASS`). Default is `.standard`. `blur` and `material`
+/// are unchanged by the Graphite pass; `bgOpacity` moved up sharply (§1.5, "flatten by default" —
+/// design-spec.md §0 rule 5) because blur is now reserved for surfaces that truly float over the
+/// desktop (menubar popover, `FocusOverlay`) — every panel inside the main window should read flat
+/// and opaque instead of glassy. See per-case comments below for the old (Twilight) numbers.
 enum GlassLevel: Sendable, Equatable, Hashable {
     case subtle, standard, heavy
 
@@ -223,9 +231,9 @@ enum GlassLevel: Sendable, Equatable, Hashable {
     /// Opacity of the `VolarColor.bg` tint layered over the system material.
     var bgOpacity: Double {
         switch self {
-        case .subtle: return 0.92
-        case .standard: return 0.78
-        case .heavy: return 0.55
+        case .subtle: return 1.00    // was 0.92 (Twilight) — fully flat, no material shows through
+        case .standard: return 0.97  // was 0.78 (Twilight) — material still present, nearly invisible
+        case .heavy: return 0.80     // was 0.55 (Twilight) — still glass; for surfaces floating over the desktop
         }
     }
 
@@ -287,12 +295,14 @@ enum VolarMotion {
 // MARK: - NEW: Spotlight primitive (foundations.html §03 "The spotlight — the signature";
 // menubar-now.html `.pool` + `.vignette`)
 
-/// The reusable mint radial pool + vignette-into-night-shadow that sits behind exactly ONE (the
+/// The reusable mint radial pool + vignette-into-shadow that sits behind exactly ONE (the
 /// active/NOW) task. Theme-level only — no view currently adopts this; it's prepared here so a
 /// later per-view pass can drop `.volarSpotlight()` onto the NOW task's container without
 /// reinventing the gradient math. Two layers, matching the prototype 1:1:
 ///   1. `.pool` — a soft mint radial glow (`nowGlow` → `nowGlowSoft` → clear), blurred.
-///   2. `.vignette` — a dark radial overlay that settles the pool's edges into night-blue shadow.
+///   2. `.vignette` — a dark radial overlay that settles the pool's edges into `bg` shadow (graphite
+///      as of the RETHEME 3 pass, was night-blue under Twilight — the overlay itself is unchanged,
+///      it just reads `VolarColor.bg` live).
 /// UNVERIFIED: not build-checked on this machine (Windows, no Xcode) — `RadialGradient`,
 /// `ZStack`, and `.blur(radius:)` are all macOS 10.15+ SwiftUI API, so this should compile
 /// cleanly on the macOS 14 floor, but the composited visual result hasn't been rendered/verified.

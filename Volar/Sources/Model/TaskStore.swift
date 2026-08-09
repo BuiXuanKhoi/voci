@@ -136,6 +136,87 @@ final class TaskStore {
         save()
     }
 
+    /// Việc 3 (confirm-list data layer, duplicate-detection merge, 2026-07-28): merges a freshly-
+    /// confirmed draft into an ALREADY-PERSISTED task the user chose instead of creating a
+    /// duplicate row (`AppState.ConfirmDraft.DuplicateResolution.useExisting`). `applying` receives
+    /// the task's CURRENT `TaskItem` and returns the merged version — building it this way (a
+    /// caller-supplied transform, rather than a long list of optional-field parameters) keeps every
+    /// "present vs. absent" / "dismissed vs. accepted" rule exactly where it already lives
+    /// (`AppState.resolvedValue`/`AppState.mergeTransform`), while this method owns the two things
+    /// a bare field copy would get wrong:
+    ///   - Validation rule 2 (recurrence only on a leaf): if the merged result would set a
+    ///     recurrence on a task that has children, that ONE field is silently reverted back to the
+    ///     task's existing recurrence rather than rejecting the whole merge outright (the merge
+    ///     already represents something the user explicitly asked for — a save failing over one
+    ///     attribute the calling utterance likely didn't even care about would be a worse
+    ///     experience than dropping that one field, mirroring `sanitizedConditions`'s "partial
+    ///     success beats losing everything" precedent below).
+    ///   - Validation rule 1 (`.taskDone` cycle/self-reference): the merged `conditions` array is
+    ///     re-run through `sanitizedConditions` — the SAME bulk-insert gate `add`/`addBatch` use —
+    ///     so a merge can never smuggle in a cyclic edge `addCondition`'s single-edge path would
+    ///     have caught.
+    /// Reuses `VolarTask.apply(_:)` (already documented there as "the one obvious place a future
+    /// 'edit task' API writes through") for the actual field sync, so this file has exactly one
+    /// place that copies a `TaskItem`'s fields onto a live model. A no-op (returns `nil`, no save)
+    /// for an unknown id — nothing to merge into.
+    @discardableResult
+    func mergeIntoExisting(_ id: UUID, applying transform: (TaskItem) -> TaskItem) -> TaskItem? {
+        guard let model = fetchModel(id) else { return nil }
+        var merged = transform(model.asTaskItem)
+        if merged.recurrence != nil, hasChildren(id) {
+            merged.recurrence = model.recurrence
+        }
+        merged.conditions = sanitizedConditions(merged.conditions, for: id, in: allEngineSnapshot())
+        model.apply(merged)
+        save()
+        return merged
+    }
+
+    /// Manual-edit contract §1.3
+    /// (`specs/002-workflow-command-center/contracts/manual-edit-contract.md`): writes ONLY the 7
+    /// fields a user can edit by hand on an already-created task — `title`, `details`, `notes`,
+    /// `priorityRaw`, `startTime`, `deadline`, `durationMinutes`, `reminderOverride` — then saves.
+    /// `AppState.updateTask` (the manual-edit contract's single write path, §1.4) is the sole
+    /// caller. Returns `false` (no save) for an unknown id.
+    ///
+    /// Deliberately does NOT go through `VolarTask.apply(_:)` even though that method's own doc
+    /// comment invites a future "edit task" API to reuse it (`mergeIntoExisting` above already
+    /// does, for its own validated merge path). `apply` also overwrites `conditions`/`parentId`/
+    /// `createdAt`/`status`/`completedAt` — invariants (`.taskDone` DAG-ness, parent/child
+    /// structure, recurring-task no-children rule, completion history) this call has no validated
+    /// snapshot to re-check. `mergeIntoExisting` earns the right to use `apply` by re-running
+    /// `sanitizedConditions`/the recurrence-vs-children guard on the merged result first; a bare
+    /// 7-field manual edit does none of that and has no business touching any of the four.
+    @discardableResult
+    func updateEditableFields(from item: TaskItem) -> Bool {
+        guard let model = fetchModel(item.id) else { return false }
+        model.title = item.title
+        model.details = item.details
+        model.notes = item.notes
+        model.priorityRaw = item.priority.rawValue
+        model.startTime = item.startTime
+        model.deadline = item.deadline
+        model.durationMinutes = item.durationMinutes
+        model.reminderOverride = item.reminderOverride
+        save()
+        return true
+    }
+
+    /// Cycle-detection contract §1.4: removes the condition at `index` from task `id`. Returns
+    /// `false` (no save, no mutation) if `id` is unknown or `index` is out of bounds — same "safe
+    /// no-op for bad input" convention as `clearFirstExternal`/`delete` above. `addCondition`
+    /// keeps rejecting a cyclic `.taskDone` via `TaskStoreError.invalidCondition`; this is purely
+    /// the removal half (an edge always being removed can never introduce a cycle, so there's
+    /// nothing to validate here).
+    @discardableResult
+    func removeCondition(at index: Int, from id: UUID) -> Bool {
+        guard let model = fetchModel(id) else { return false }
+        guard model.conditions.indices.contains(index) else { return false }
+        model.conditions.remove(at: index)
+        save()
+        return true
+    }
+
     /// Validation rule 2: recurrence is only ever allowed on a task with no children.
     func setRecurrence(_ recurrence: Recurrence?, on id: UUID) throws {
         guard let model = fetchModel(id) else { return }
@@ -441,6 +522,7 @@ final class TaskStore {
             priority: item.priority,
             status: item.status,
             deadline: item.deadline,
+            startTime: item.startTime,
             createdAt: item.createdAt,
             when: item.when,
             durationMinutes: item.durationMinutes,

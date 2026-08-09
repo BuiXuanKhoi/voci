@@ -18,10 +18,16 @@
 //      `SUPABASE_ANON_KEY`, with the CALLER's token forwarded as that client's own Authorization
 //      header. GoTrue resolves `getUser()` against whichever token the client was built with; the
 //      anon key is not a per-user JWT that resolves to a user, so this correctly rejects it.
-//   3. Load `entitlements` (service-role client — RLS is enabled with zero policies on this table,
-//      so only the service-role key can ever read it) and resolve the effective tier: `pro` only
-//      if the row's `tier = 'pro'` AND `expires_at > now()`; `free` otherwise (including "no row at
-//      all", which is the normal state for a free account that never subscribed).
+//   3. Load ALL of `entitlements`' rows for this user (service-role client — RLS is enabled with
+//      zero policies on this table, so only the service-role key can ever read it; there is now up
+//      to one row per (user, source) — 'apple' and 'mor' can both exist for the same user, see
+//      migrations/0003_entitlements_multi_source.sql) and resolve the effective tier: `pro` if ANY
+//      row has `tier = 'pro'` AND `expires_at > now()` ("any-row-wins" — a Pro row from one
+//      platform is never cancelled out by a free/expired row from the other); `free` otherwise
+//      (including "no rows at all", which is the normal state for a free account that never
+//      subscribed on any platform). Entitlements from different sources are never summed — a user
+//      Pro-until-March on Apple and Pro-until-June on the MoR is Pro until June, not until
+//      September; `expiresAt` below reports the later (maximum) of the qualifying rows.
 //
 // IMPORTANT — why `supabase/config.toml` still has `verify_jwt = false` for every route that calls
 // `verifyAccount`: Supabase's platform gateway "verify JWT" gate only checks that the bearer token
@@ -37,7 +43,7 @@
 import { createClient, type SupabaseClient } from "npm:@supabase/supabase-js@2.110.6";
 import { requireEnv } from "./env.ts";
 import { errorResponse } from "./http.ts";
-import { logError } from "./log.ts";
+import { errorDetails, logError } from "./log.ts";
 
 export type Tier = "free" | "pro";
 
@@ -77,7 +83,20 @@ interface EntitlementsRow {
   expires_at: string | null;
 }
 
-export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
+function isEntitlementsRowArray(value: unknown): value is EntitlementsRow[] {
+  return Array.isArray(value) &&
+    value.every((row) =>
+      typeof row === "object" && row !== null && "tier" in row && "expires_at" in row
+    );
+}
+
+/** `reqId`, when passed, threads the caller's correlation id into every `logError` call this
+ *  function makes — optional only so the signature doesn't break a hypothetical caller written
+ *  before request-id tracing existed; every real call site (`../groq/index.ts`,
+ *  `../parse/index.ts`, `../subscription/index.ts`) passes it. Without this, exactly the log lines
+ *  most useful while tracing an auth failure (config missing, token rejected, entitlements lookup
+ *  failure) would be the ones NOT tied back to the request that triggered them. */
+export async function verifyAccount(req: Request, reqId?: string): Promise<AccountAuthResult> {
   const token = extractBearerToken(req.headers.get("authorization"));
   if (!token) {
     return { ok: false, response: errorResponse(401, "auth_missing") };
@@ -87,7 +106,7 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
   if (!cfg.ok) {
     // Opaque to the caller (info-leak hardening) — the specific missing keys are only useful to
     // whoever owns the deployment, never to an unauthenticated internet caller.
-    logError("account_config_missing", { missingEnv: cfg.missing.join(",") });
+    logError("account_config_missing", { reqId, missingEnv: cfg.missing.join(",") });
     return { ok: false, response: errorResponse(503, "service_unavailable") };
   }
 
@@ -102,10 +121,22 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
   try {
     const { data, error } = await userClient.auth.getUser();
     if (error || !data?.user?.id) {
+      // `error` here is GoTrue's own rejection (expired/malformed/revoked token, wrong key type,
+      // etc.) — its `.message` is a fixed library string, never anything derived from what the
+      // caller sent, so it is safe to log; still opaque to the CLIENT (401 `auth_invalid`, no
+      // detail in the response body).
+      logError("account_token_rejected", {
+        reqId,
+        message: error?.message ?? "no_user_on_response",
+      });
       return { ok: false, response: errorResponse(401, "auth_invalid") };
     }
     userId = data.user.id;
-  } catch {
+  } catch (err) {
+    // Previously a bare `catch { ... }` that swallowed the exception entirely — a transport/library
+    // failure here looked IDENTICAL in the logs to a deliberately-rejected token, which is exactly
+    // the kind of silent boundary this logging pass exists to close. Still opaque to the client.
+    logError("account_token_check_exception", { reqId, ...errorDetails(err) });
     return { ok: false, response: errorResponse(401, "auth_invalid") };
   }
 
@@ -114,29 +145,69 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
   });
 
   try {
+    // No `.maybeSingle()` / `.single()` here on purpose: a user can now have up to one row PER
+    // SOURCE ('apple' and 'mor' both possible for the same user_id — see
+    // migrations/0003_entitlements_multi_source.sql), so more than one row is an expected, valid
+    // shape, not an error condition. `.select()` alone returns an array (possibly empty).
     const { data, error } = await adminClient
       .from("entitlements")
       .select("tier, expires_at")
-      .eq("user_id", userId)
-      .maybeSingle();
+      .eq("user_id", userId);
     if (error) {
-      logError("entitlements_lookup_failed", { message: error.message });
+      logError("entitlements_lookup_failed", { reqId, message: error.message, errorCode: error.code });
       return { ok: false, response: errorResponse(503, "service_unavailable") };
     }
-    const row = data as EntitlementsRow | null;
-    const isPro = !!row && row.tier === "pro" && !!row.expires_at &&
-      new Date(row.expires_at).getTime() > Date.now();
+    // Defensive guard against an unexpected PostgREST response shape — never trust an unchecked
+    // cast here, and never fail open into "pro" when the shape is wrong.
+    //
+    // `data == null` is deliberately NOT treated as a shape error. A plain `.select()` is documented
+    // to return `[]` for "no matching rows", but "this account has never subscribed on any platform"
+    // is the single most common state in the entire system, and if the client library ever handed
+    // back `null`/`undefined` there instead, 503-ing on it would take EVERY free user offline —
+    // including their on-device fallbacks, which route through this same call. An empty row set is
+    // the correct, safe reading of "nothing here": it resolves to `free` two lines below, exactly as
+    // an explicit `[]` would. Only a non-null, non-array body is a genuine shape error.
+    let rows: EntitlementsRow[];
+    if (data == null) {
+      rows = [];
+    } else if (isEntitlementsRowArray(data)) {
+      rows = data;
+    } else {
+      logError("entitlements_lookup_unexpected_shape", { reqId });
+      return { ok: false, response: errorResponse(503, "service_unavailable") };
+    }
+
+    // "Any-row-wins": pro if AT LEAST ONE row is pro and unexpired. Rows from different sources are
+    // never added together — see the module doc comment above. The judgement of "is it expired" is
+    // made entirely in TypeScript against `Date.now()` (Deno's clock), deliberately not pushed into
+    // the PostgREST query (e.g. `.gt("expires_at", ...)`), so there is a single clock making the
+    // expiry decision instead of splitting the judgement between Postgres's `now()` and Deno's
+    // `Date.now()` — matching how the single-row version of this code already worked.
+    const now = Date.now();
+    let expiresAt: string | null = null;
+    for (const row of rows) {
+      if (row.tier !== "pro" || !row.expires_at) continue;
+      if (new Date(row.expires_at).getTime() <= now) continue;
+      // Keep the MAXIMUM expires_at among qualifying rows, as the original ISO string returned by
+      // the DB (never re-serialized through `Date`, to avoid any formatting drift from what was
+      // actually stored).
+      if (expiresAt === null || new Date(row.expires_at).getTime() > new Date(expiresAt).getTime()) {
+        expiresAt = row.expires_at;
+      }
+    }
+    const isPro = expiresAt !== null;
+
     return {
       ok: true,
       userId,
       tier: isPro ? "pro" : "free",
-      // `expires_at < now()` reports as plain `free` with a null expiry (contract §3 `/status`:
-      // "expires_at < now() -> trả free (không cần cron hạ tier)") — no background job downgrades
-      // the stored row; this is computed fresh on every call.
-      expiresAt: isPro ? row!.expires_at : null,
+      // `expires_at < now()` on every row reports as plain `free` with a null expiry (contract §3
+      // `/status`: "expires_at < now() -> trả free (không cần cron hạ tier)") — no background job
+      // downgrades the stored rows; this is computed fresh on every call.
+      expiresAt,
     };
   } catch (err) {
-    logError("entitlements_lookup_exception", { message: err instanceof Error ? err.name : "unknown" });
+    logError("entitlements_lookup_exception", { reqId, ...errorDetails(err) });
     return { ok: false, response: errorResponse(503, "service_unavailable") };
   }
 }
@@ -145,10 +216,10 @@ export async function verifyAccount(req: Request): Promise<AccountAuthResult> {
  *  admin user deletion), and this keeps the "which env vars, what auth mode" decision in one place
  *  rather than re-derived per file. Returns `undefined` (never throws) when config is incomplete
  *  so callers can map that to a uniform `503 service_unavailable`. */
-export function createServiceRoleClient(): SupabaseClient | undefined {
+export function createServiceRoleClient(reqId?: string): SupabaseClient | undefined {
   const cfg = requireEnv(["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"] as const);
   if (!cfg.ok) {
-    logError("service_role_config_missing", { missingEnv: cfg.missing.join(",") });
+    logError("service_role_config_missing", { reqId, missingEnv: cfg.missing.join(",") });
     return undefined;
   }
   return createClient(cfg.values.SUPABASE_URL, cfg.values.SUPABASE_SERVICE_ROLE_KEY, {

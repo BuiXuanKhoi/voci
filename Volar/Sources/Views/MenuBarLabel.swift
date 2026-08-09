@@ -112,7 +112,7 @@ struct MenuBarLabel: View {
                     .offset(x: 2, y: 2)
             }
 
-            if let title = appState.activeTask?.title {
+            if let title = appState.dashboardActiveTask?.title {
                 Text(title)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundStyle(VolarColor.textPri)

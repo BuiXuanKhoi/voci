@@ -11,7 +11,7 @@
 
 import { Buffer } from "node:buffer";
 import { readEnv, requireEnv } from "./env.ts";
-import { logError } from "./log.ts";
+import { errorDetails, logError } from "./log.ts";
 
 const APPSTORE_ENV_NAMES = ["APPSTORE_BUNDLE_ID", "APPSTORE_ENVIRONMENT", "APPSTORE_ROOT_CA_PEM"] as const;
 
@@ -83,7 +83,13 @@ export type AppStoreVerifyResult =
  *  official `@apple/app-store-server-library`. Fails closed: any missing/invalid config is a 503
  *  (deployment problem, not the caller's fault), any signature/chain/shape failure is a 401
  *  (real auth failure). Never throws. */
-export async function verifyAppStoreJWS(jws: string): Promise<AppStoreVerifyResult> {
+/** `reqId`, when passed, threads the caller's correlation id into every `logError` call this
+ *  function makes — optional only so the signature doesn't break a hypothetical caller written
+ *  before request-id tracing existed; the one real call site (`../subscription/index.ts`'s
+ *  `handleLink`) passes it. Without this, a JWS verification failure — one of the higher-stakes
+ *  failure modes in the whole system, since it gates who gets billed as Pro — would be exactly the
+ *  kind of log line NOT traceable back to the request that produced it. */
+export async function verifyAppStoreJWS(jws: string, reqId?: string): Promise<AppStoreVerifyResult> {
   if (jws.length === 0 || jws.length > 8000) {
     return { ok: false, status: 401, code: "auth_invalid" };
   }
@@ -93,17 +99,20 @@ export async function verifyAppStoreJWS(jws: string): Promise<AppStoreVerifyResu
 
   const cfg = requireEnv(APPSTORE_ENV_NAMES);
   if (!cfg.ok) {
-    logError("appstore_config_missing", { missingEnv: cfg.missing.join(",") });
+    logError("appstore_config_missing", { reqId, missingEnv: cfg.missing.join(",") });
     return { ok: false, status: 503, code: "service_unavailable" };
   }
   const appAppleIdRaw = readEnv("APPSTORE_APP_APPLE_ID");
   const environment = cfg.values.APPSTORE_ENVIRONMENT;
   if (environment !== "Sandbox" && environment !== "Production") {
-    logError("appstore_config_invalid", { reason: "appstore_environment_not_sandbox_or_production" });
+    logError("appstore_config_invalid", {
+      reqId,
+      reason: "appstore_environment_not_sandbox_or_production",
+    });
     return { ok: false, status: 503, code: "service_unavailable" };
   }
   if (environment === "Production" && !appAppleIdRaw) {
-    logError("appstore_config_missing", { missingEnv: "APPSTORE_APP_APPLE_ID" });
+    logError("appstore_config_missing", { reqId, missingEnv: "APPSTORE_APP_APPLE_ID" });
     return { ok: false, status: 503, code: "service_unavailable" };
   }
 
@@ -115,7 +124,7 @@ export async function verifyAppStoreJWS(jws: string): Promise<AppStoreVerifyResu
   if (appAppleIdRaw !== undefined) {
     const parsed = Number.parseInt(appAppleIdRaw, 10);
     if (!Number.isSafeInteger(parsed)) {
-      logError("appstore_config_invalid", { reason: "appstore_app_apple_id_not_safe_integer" });
+      logError("appstore_config_invalid", { reqId, reason: "appstore_app_apple_id_not_safe_integer" });
       return { ok: false, status: 503, code: "service_unavailable" };
     }
     appAppleId = parsed;
@@ -123,7 +132,10 @@ export async function verifyAppStoreJWS(jws: string): Promise<AppStoreVerifyResu
 
   const rootCAs = splitPemCertificates(cfg.values.APPSTORE_ROOT_CA_PEM);
   if (rootCAs.length === 0) {
-    logError("appstore_config_invalid", { reason: "appstore_root_ca_pem_no_parseable_certificates" });
+    logError("appstore_config_invalid", {
+      reqId,
+      reason: "appstore_root_ca_pem_no_parseable_certificates",
+    });
     return { ok: false, status: 503, code: "service_unavailable" };
   }
 
@@ -147,10 +159,16 @@ export async function verifyAppStoreJWS(jws: string): Promise<AppStoreVerifyResu
       appAppleId,
     );
   } catch (err) {
-    // Never log the full error message — it may embed input (e.g. a malformed cert) — only the
-    // error's class/name, which is enough to tell an operator "the verifier failed to initialize"
-    // without risking a secret/PII leak into logs.
-    logError("appstore_verifier_init_failed", { error: err instanceof Error ? err.name : "unknown" });
+    // Deliberately narrower than `errorDetails(err)` — never log the full message/stack here, only
+    // the error's class/name: this catch wraps root-CA-cert parsing + verifier construction, where
+    // an error message could embed a fragment of the malformed cert/config input itself. The class
+    // name alone ("the verifier failed to initialize") is enough to point an operator at this
+    // function without risking that leak.
+    logError("appstore_verifier_init_failed", {
+      reqId,
+      reason: "verifier_init_threw",
+      errorName: err instanceof Error ? err.constructor?.name ?? "Error" : typeof err,
+    });
     return { ok: false, status: 503, code: "service_unavailable" };
   }
 
@@ -185,10 +203,15 @@ export async function verifyAppStoreJWS(jws: string): Promise<AppStoreVerifyResu
         bundleId,
       },
     };
-  } catch {
+  } catch (err) {
     // Signature/chain verification failure, expired transaction, revoked cert, etc. — never leak
-    // the library's internal error detail to the client (opaque per hardening requirement); this
-    // IS a real auth failure (fail closed), not a config problem, so 401 not 503.
+    // the library's internal error detail to the CLIENT (opaque per hardening requirement); this
+    // IS a real auth failure (fail closed), not a config problem, so 401 not 503. Logging it
+    // server-side (unlike the client response) is safe and necessary: this decode/verify failure
+    // is about the SUBMITTED JWS, not about our own secrets, and was previously a bare `catch {}`
+    // that swallowed the real reason entirely — undiagnosable if a legitimate renewal starts
+    // failing verification for a reason that isn't "the transaction is fraudulent".
+    logError("appstore_jws_verify_failed", { reqId, reason: "verify_or_decode_threw", ...errorDetails(err) });
     return { ok: false, status: 401, code: "auth_invalid" };
   }
 }

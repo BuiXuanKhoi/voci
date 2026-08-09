@@ -29,7 +29,19 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     var details: String
     var priority: Priority
     var status: TaskStatus
+    /// The moment this task must be DONE by — drives ordering tier 2 of `VolarCore.nextTask` (see
+    /// `NextTask.swift`) and the reminder subsystem. Contrast with `startTime` immediately below,
+    /// which is a different instant entirely.
     var deadline: Date?
+    /// The moment the user said they'd START working — set from an urgent utterance ("làm ngay
+    /// lập tức" / "right now"), where `startTime` = the instant the utterance was spoken.
+    /// Deliberately inert: it does NOT drive ordering, eligibility, or reminders (those all stay
+    /// on `deadline`/`conditions` exactly as before). An urgent task "jumps the queue" because its
+    /// PARSER-DERIVED `deadline` (typically `startTime + 30min`) lands in today's near-term tier,
+    /// not because of this field — this is carried purely as data for anything downstream that
+    /// wants to show/reason about "when did they mean to start". `nil` for every task that wasn't
+    /// created from an urgent utterance.
+    var startTime: Date?
     /// Gates eligibility (replaces v1's `dependsOn: [UUID]` — data-model.md "Persisted layer").
     /// AND semantics, mirrors `VolarCore.Task.conditions` 1:1 (see `snapshot()`). `.taskDone`
     /// edges must be validated via `TaskStore` before being attached (validation rule 1); this
@@ -56,6 +68,12 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     var reminderOverride: ReminderPolicy?
     /// "Save game" note surfaced on re-entry (FR-042).
     var resumeNote: String?
+    /// Implementation-intention cue (specs/006-cues-and-waiting/design.md §2 Việc B) — the user's
+    /// own if-then utterance ("ngủ dậy thì test feature này"), read back verbatim at the right
+    /// moment. SURFACING ONLY (design.md §1): this field never gates eligibility and is not a
+    /// `VolarCore.Condition` — a task with a cue is eligible exactly as if it had none. See
+    /// `Reminders/CueFiring.swift` for the pure decision logic that reads it.
+    var cue: TaskCue?
     /// Đổi-gió counter; ≥3 triggers a one-time breakdown suggestion (FR-030).
     var switchAwayCount: Int
     /// Latest completion instant; full history lives in `CompletionEvent` — recurrence resets
@@ -76,6 +94,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
+        startTime: Date? = nil,
         conditions: [VolarCore.Condition] = [],
         createdAt: Date = Date(),
         when: When,
@@ -90,7 +109,8 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         switchAwayCount: Int = 0,
         completedAt: Date? = nil,
         parentId: UUID? = nil,
-        delegation: DelegationMeta? = nil
+        delegation: DelegationMeta? = nil,
+        cue: TaskCue? = nil
     ) {
         self.id = id
         self.title = title
@@ -98,6 +118,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         self.priority = priority
         self.status = status
         self.deadline = deadline
+        self.startTime = startTime
         self.conditions = conditions
         self.createdAt = createdAt
         self.when = when
@@ -113,6 +134,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         self.completedAt = completedAt
         self.parentId = parentId
         self.delegation = delegation
+        self.cue = cue
     }
 
     /// Derived: "done" is purely the engine status, never a separately stored bool.

@@ -17,20 +17,46 @@ import Foundation
 /// - A task that is the parent (via another task's `parentId`) of any `.todo`/`.inProgress`
 ///   child is excluded, even if that child is itself ineligible for other reasons.
 ///
-/// Ordering (unchanged from 001): among eligible tasks, the minimum under
-/// `Task.orderedBefore(_:now:calendar:)` is returned.
+/// IMPLEMENTED IN TERMS OF `eligibleTasksOrdered` (2026-08-09, specs/006-cues-and-waiting):
+/// `nextTask` is by definition `eligibleTasksOrdered(from:now:calendar:).first` — not merely
+/// documented to agree with it, but literally delegating, so the single-winner pick and the full
+/// ordered list can never diverge. There is no separate `.min(by:)` path to keep in sync anymore.
 public func nextTask(from snapshot: [Task], now: Date, calendar: Calendar) -> Task? {
-    eligibleTasks(in: snapshot, now: now).min { $0.orderedBefore($1, now: now, calendar: calendar) }
+    eligibleTasksOrdered(from: snapshot, now: now, calendar: calendar).first
+}
+
+/// Every eligible task in `snapshot` at `now`, ordered by `Task.orderedBefore(_:now:calendar:)` —
+/// the SAME total order `nextTask` selects its single winner from. `nextTask(from:now:calendar:)`
+/// is exactly `eligibleTasksOrdered(from:now:calendar:).first` (see that function's own doc
+/// comment) — this is the one place that guarantee is implemented, not just asserted.
+///
+/// Added 2026-08-09 (specs/006-cues-and-waiting, Việc C "waiting-mode holder"): the app layer
+/// needs the FULL eligible ranking — not just the top pick — to know which task fits in the gap
+/// before a held deadline. Before this existed, the only way to approximate it from outside this
+/// package was to hand-copy `eligibleTasks`'s filter rule (package-internal) into app code; that
+/// copy could silently drift the moment this file's eligibility rule changed, with no compiler
+/// error and no test catching it. This function removes the need for that copy entirely.
+///
+/// `calendar`/`now` behave exactly as they do for `nextTask` — explicit caller-supplied data,
+/// never read from a global (Constitution Principle III).
+public func eligibleTasksOrdered(from snapshot: [Task], now: Date, calendar: Calendar) -> [Task] {
+    eligibleTasks(in: snapshot, now: now).sorted { $0.orderedBefore($1, now: now, calendar: calendar) }
 }
 
 /// All eligible tasks in `snapshot` at `now`, in the original (unordered) array order. Shared by
-/// `nextTask` and `eligibilityDiff` (`Snapshots.swift`) so the eligibility rule lives in exactly
-/// one place.
+/// `eligibleTasksOrdered` (and, transitively, `nextTask`) and `eligibilityDiff` (`Snapshots.swift`)
+/// so the eligibility rule lives in exactly one place.
+///
+/// `public` since 2026-08-09 (specs/006-cues-and-waiting) — previously package-internal, which is
+/// exactly what pushed an earlier attempt at the app layer to hand-copy this rule instead of
+/// calling it (see `eligibleTasksOrdered`'s doc comment). Exposing the UNORDERED set (rather than
+/// only ever the ordered one) stays useful in its own right for a caller that only cares about
+/// membership, not ranking (e.g. `eligibilityDiff` below, in this same file's module).
 ///
 /// O(n) precomputation (an `id -> status` lookup and an `id -> hasOpenChild` set, each built with
 /// a single pass) followed by an O(n) filter — no per-task or per-comparison rescans of the
 /// snapshot, so this stays linear even at large n.
-func eligibleTasks(in snapshot: [Task], now: Date) -> [Task] {
+public func eligibleTasks(in snapshot: [Task], now: Date) -> [Task] {
     // Built with an explicit loop (rather than `Dictionary(uniqueKeysWithValues:)`) so a
     // malformed snapshot with duplicate ids cannot crash the engine; the last occurrence for a
     // given id wins.

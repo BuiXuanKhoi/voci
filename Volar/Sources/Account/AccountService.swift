@@ -13,8 +13,6 @@
 // header, and status code below matches it exactly.
 import Foundation
 import AppKit
-import AuthenticationServices
-import CryptoKit
 
 /// Supabase Auth (GoTrue) + the two account-lifecycle edge functions (`subscription/status` is
 /// `Entitlements`'s concern; `subscription/link` too — this file owns identity + session only,
@@ -62,33 +60,6 @@ actor AccountService {
     var isSignedIn: Bool { cachedSession != nil }
     var currentEmail: String? { cachedSession?.user.email }
     var currentUserID: String? { cachedSession?.user.id }
-
-    // MARK: - Sign in with Apple
-
-    /// Contract §2 Apple nonce dance: generate a random raw nonce, send its SHA-256 hash to Apple
-    /// (`ASAuthorizationAppleIDRequest.nonce`), then send the RAW nonce (not the hash) to Supabase
-    /// alongside the identity token. Getting this backwards is the classic Sign In with Apple +
-    /// Supabase failure mode — Supabase re-hashes whatever nonce it receives and compares that
-    /// against the hash embedded inside Apple's identity token JWT; sending the hash to Apple and
-    /// the raw value to Supabase (i.e. this direction, correct) is what lets those match. Sending
-    /// them the other way around means Supabase hashes an already-hashed value and rejects the
-    /// token as `auth_invalid` every time.
-    ///
-    /// Email: deliberately NEVER read from `ASAuthorizationAppleIDCredential.email` here (contract
-    /// §2: "Apple chỉ trả email lần đăng nhập ĐẦU TIÊN... lấy email từ session.user.email") — this
-    /// method returns whatever `AccountUser` the Supabase session carries, which is the single
-    /// source of truth on every login, first or not.
-    func signInWithApple() async throws -> AccountUser {
-        let coordinator = await AppleSignInCoordinator()
-        let (identityToken, rawNonce) = try await coordinator.signIn()
-        let body: [String: Any] = [
-            "provider": "apple",
-            "id_token": identityToken,
-            "nonce": rawNonce,
-        ]
-        let session = try await tokenRequest(query: "grant_type=id_token", body: body)
-        return store(session)
-    }
 
     // MARK: - Email OTP
 
@@ -178,6 +149,48 @@ actor AccountService {
         KeychainStore.clearSession()
     }
 
+    // MARK: - Promo code redemption
+
+    /// `POST /functions/v1/subscription/redeem` (backlog: "1 free month of Pro" promo codes — ONE
+    /// code string shared by many people, each may redeem it exactly once). Requires an account
+    /// (same `validAccessToken()` gate as `deleteAccount()` above) — redemption is meaningless
+    /// without a signed-in identity to attach the grant to, so a `nil` token throws `.signedOut`
+    /// rather than silently no-op'ing.
+    ///
+    /// Normalization happens in `normalizeCode(_:)` below and ONLY there — callers
+    /// (`AppState.redeemPromoCode`) pass through whatever the user typed untouched, so there is
+    /// exactly one seam in the whole client that could ever drift from the server's own
+    /// normalization instead of two call sites that could quietly disagree.
+    func redeemPromoCode(_ code: String) async throws -> RedeemResult {
+        guard let token = try await validAccessToken() else { throw AccountError.signedOut }
+        let normalized = Self.normalizeCode(code)
+        let data = try await functionsRequest(
+            path: "functions/v1/subscription/redeem",
+            body: ["code": normalized],
+            bearer: token,
+            errorMapper: Self.mapRedeemError
+        )
+        guard let result = try? JSONDecoder().decode(RedeemResult.self, from: data) else {
+            throw AccountError.decoding
+        }
+        return result
+    }
+
+    /// The ONE place client-side code normalization happens: trim surrounding whitespace/newlines
+    /// (a pasted code very plausibly carries them — e.g. copied from an email/Slack message with a
+    /// trailing newline) then uppercase, because the server stores/matches codes uppercase (this
+    /// comment is the other half of that agreement — if the server's normalization rule ever
+    /// changes, this is the one line that needs to change to match it).
+    ///
+    /// `nonisolated static` (not `private`, unlike most of this actor's internals) specifically so
+    /// this ONE pure transformation is reachable — and tested — without any networking or actor
+    /// isolation involved, mirroring `AppState.applyTextCaptureParseResult`'s own precedent
+    /// (`AppState.swift`) of loosening a method's access specifically so a test can drive it
+    /// directly instead of only being reachable through a real, network-bound call.
+    nonisolated static func normalizeCode(_ code: String) -> String {
+        code.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    }
+
     // MARK: - Networking helpers
 
     private func tokenRequest(query: String, body: [String: Any]) async throws -> AccountSession {
@@ -197,9 +210,24 @@ actor AccountService {
     /// — no `apikey` header, matching the existing `CloudParser`/`GroqTranscriptionClient`
     /// convention of sending Authorization only (config.toml's `verify_jwt = false`, see contract
     /// §7 — the function verifies the account token itself via `auth.getUser()`).
-    private func functionsRequest(path: String, body: [String: Any], bearer: String) async throws -> Data {
+    ///
+    /// `errorMapper` defaults to the shared `Self.mapError` — every existing call site (`redeem`
+    /// is the only exception, see `redeemPromoCode` below) gets the exact same opaque `.http(status:
+    /// code:)` mapping it always has. This is a deliberate seam rather than a second networking
+    /// path: `redeemPromoCode`'s contract hands back SPECIFIC, user-presentable meanings for 404/
+    /// 409/410/429 (see `AccountError`'s doc comments on those cases) that only apply to THAT one
+    /// endpoint — folding that switch into the shared `mapError` would make every OTHER edge
+    /// function on this actor (e.g. `deleteAccount`) misreport an unrelated 404/409 as a promo-code
+    /// failure. Passing a mapper keeps the single 2xx-check-then-throw shape shared by every caller
+    /// while letting the meaning of a non-2xx stay endpoint-specific.
+    private func functionsRequest(
+        path: String,
+        body: [String: Any],
+        bearer: String,
+        errorMapper: (Int, Data) -> AccountError = AccountService.mapError
+    ) async throws -> Data {
         let (status, data) = try await send(path: path, body: body, bearer: bearer, includeApiKey: false)
-        guard (200..<300).contains(status) else { throw Self.mapError(status: status, data: data) }
+        guard (200..<300).contains(status) else { throw errorMapper(status, data) }
         return data
     }
 
@@ -248,126 +276,29 @@ actor AccountService {
         return .http(status: status, code: body?.error)
     }
 
+    /// `redeemPromoCode`'s `errorMapper` — the documented contract (see `POST subscription/redeem`
+    /// in this feature's contract doc) has FOUR statuses with a specific, distinct meaning worth
+    /// surfacing to the user; everything else (400 malformed, 401 dead session, 503, or any status
+    /// this contract didn't document) falls through to the same opaque `.http` shape every other
+    /// endpoint on this actor already uses via `mapError` — deliberately NOT invented a second
+    /// fallback shape just for this one endpoint.
+    ///
+    /// `static` (not `private`, same reasoning as `normalizeCode` above) so this pure status ->
+    /// `AccountError` mapping is directly testable with no networking.
+    static func mapRedeemError(status: Int, data: Data) -> AccountError {
+        switch status {
+        case 404: return .promoCodeInvalid
+        case 409: return .promoCodeAlreadyRedeemed
+        case 410: return .promoCodeExhausted
+        case 429: return .promoCodeTooManyAttempts
+        default: return mapError(status: status, data: data)
+        }
+    }
+
     @discardableResult
     private func store(_ session: AccountSession) -> AccountUser {
         cachedSession = session
         KeychainStore.saveSession(session)
         return session.user
-    }
-}
-
-// MARK: - Apple Sign In bridging
-
-/// Bridges `ASAuthorizationController`'s delegate-based API to `async`/`await`. Mirrors the idea
-/// in `Sources/Speech/SpeechCapture.swift`'s `ContinuationOnce` (an `NSLock`-guarded box that drops
-/// every resume after the first) — reimplemented here as a THROWING variant, since Apple's
-/// delegate has both a success and an error callback, either of which — plus a user cancellation,
-/// which arrives through the SAME error callback with `ASAuthorizationError.canceled` — must
-/// resume the continuation EXACTLY once. Not the literal same type because `SpeechCapture`'s
-/// `ContinuationOnce` is `private` to that file and wraps a non-throwing continuation.
-private final class ThrowingContinuationOnce<T>: @unchecked Sendable {
-    private var continuation: CheckedContinuation<T, Error>?
-    private let lock = NSLock()
-
-    init(_ continuation: CheckedContinuation<T, Error>) {
-        self.continuation = continuation
-    }
-
-    /// `sending` (both here and on `resume(throwing:)`) matches `SpeechCapture`'s `ContinuationOnce`
-    /// and, more importantly, `CheckedContinuation.resume(returning:)`'s own Swift 6 signature
-    /// (`sending T`, SE-0430). Without it the compiler rejects the forward below with "sending
-    /// 'value' risks causing data races": a plain parameter is task-isolated, so handing it to a
-    /// `sending` parameter would let this task keep a reference to a value the continuation's
-    /// resumed task now also owns. Declaring it `sending` pushes that obligation out to the call
-    /// sites, which all pass freshly-constructed (and in fact `Sendable`) values.
-    func resume(returning value: sending T) {
-        lock.lock()
-        let c = continuation
-        continuation = nil
-        lock.unlock()
-        c?.resume(returning: value)
-    }
-
-    func resume(throwing error: sending Error) {
-        lock.lock()
-        let c = continuation
-        continuation = nil
-        lock.unlock()
-        c?.resume(throwing: error)
-    }
-}
-
-/// One-shot coordinator for a single Sign In with Apple attempt: construct, call `signIn()` once,
-/// discard. A fresh instance per attempt means there is no reentrancy to worry about (unlike
-/// `SpeechCapture`, which is long-lived and reused across many capture sessions).
-///
-/// `@MainActor` — // UNVERIFIED: `ASAuthorizationControllerDelegate`'s callbacks are not annotated
-/// with any particular isolation by the SDK, and this repo's `SpeechCapture.swift` documents in
-/// detail how a similar system callback (`SFSpeechRecognizer.requestAuthorization`) can arrive on
-/// a background queue and TRAP (EXC_BREAKPOINT) if the receiving closure/method is MainActor-
-/// isolated. `ASAuthorizationController`'s delegate + `presentationAnchor(for:)` are widely
-/// documented/observed (Apple sample code, common third-party usage) to be invoked on the main
-/// thread — presenting the Sign In with Apple sheet requires it — so `@MainActor` here should be
-/// safe in practice, but this has NOT been exercised on a real Mac. If it traps, the fix mirrors
-/// `SpeechCapture`'s: make the delegate methods `nonisolated`, extract only `Sendable` primitives,
-/// and hop to `@MainActor` explicitly before touching `self`.
-@MainActor
-private final class AppleSignInCoordinator: NSObject, ASAuthorizationControllerDelegate, ASAuthorizationControllerPresentationContextProviding {
-    private var box: ThrowingContinuationOnce<(identityToken: String, rawNonce: String)>?
-    private var rawNonce = ""
-
-    func signIn() async throws -> (identityToken: String, rawNonce: String) {
-        let nonce = try Self.randomNonce()
-        rawNonce = nonce
-
-        let request = ASAuthorizationAppleIDProvider().createRequest()
-        request.requestedScopes = [.email]
-        // See `AccountService.signInWithApple`'s doc comment: HASHED nonce to Apple, RAW nonce to
-        // Supabase. This line is the "hashed to Apple" half.
-        request.nonce = Self.sha256Hex(nonce)
-
-        let controller = ASAuthorizationController(authorizationRequests: [request])
-        controller.delegate = self
-        controller.presentationContextProvider = self
-
-        return try await withCheckedThrowingContinuation { continuation in
-            self.box = ThrowingContinuationOnce(continuation)
-            controller.performRequests()
-        }
-    }
-
-    func presentationAnchor(for controller: ASAuthorizationController) -> ASPresentationAnchor {
-        NSApp.keyWindow ?? NSApp.windows.first ?? ASPresentationAnchor()
-    }
-
-    func authorizationController(controller: ASAuthorizationController, didCompleteWithAuthorization authorization: ASAuthorization) {
-        guard let credential = authorization.credential as? ASAuthorizationAppleIDCredential,
-              let tokenData = credential.identityToken,
-              let identityToken = String(data: tokenData, encoding: .utf8) else {
-            box?.resume(throwing: AccountError.decoding)
-            return
-        }
-        // Deliberately never reads `credential.email` — see this type's doc comment and
-        // `AccountService.signInWithApple`'s.
-        box?.resume(returning: (identityToken, rawNonce))
-    }
-
-    func authorizationController(controller: ASAuthorizationController, didCompleteWithError error: Error) {
-        if let authError = error as? ASAuthorizationError, authError.code == .canceled {
-            box?.resume(throwing: AccountError.cancelled)
-        } else {
-            box?.resume(throwing: AccountError.network(error.localizedDescription))
-        }
-    }
-
-    private static func randomNonce(length: Int = 32) throws -> String {
-        var bytes = [UInt8](repeating: 0, count: length)
-        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
-        guard status == errSecSuccess else { throw AccountError.network("Secure random generation failed") }
-        return bytes.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func sha256Hex(_ input: String) -> String {
-        SHA256.hash(data: Data(input.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 }

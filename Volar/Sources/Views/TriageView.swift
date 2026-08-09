@@ -46,7 +46,7 @@ struct TriageView: View {
         }
         .padding(16)
         .frame(width: 520)
-        .volarGlass(level: .heavy, cornerRadius: 16)
+        .volarGlass(level: .standard, cornerRadius: 16)
     }
 
     // MARK: - Header
@@ -95,7 +95,7 @@ struct TriageView: View {
     private var footer: some View {
         HStack {
             Text("\(items.count) task\(items.count == 1 ? "" : "s")")
-                .font(.system(size: 11))
+                .font(.volarMono(size: 11))
                 .monospacedDigit()
                 .foregroundStyle(VolarColor.textMut)
             Spacer(minLength: 8)
@@ -143,8 +143,8 @@ private struct TriageRow: View {
         }
         .padding(12)
         .background(isHovering ? VolarColor.cardHover : VolarColor.card)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .volarHairline(cornerRadius: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .volarHairline(cornerRadius: 8)
         .onHover { hovering in
             if reduceMotion {
                 isHovering = hovering
@@ -165,7 +165,7 @@ private struct TriageRow: View {
             Spacer(minLength: 8)
             if let durationLabel = item.durationLabel {
                 Text(durationLabel)
-                    .font(.system(size: 11))
+                    .font(.volarMono(size: 11))
                     .monospacedDigit()
                     .foregroundStyle(VolarColor.textMut)
             }

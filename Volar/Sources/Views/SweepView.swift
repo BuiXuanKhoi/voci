@@ -42,7 +42,7 @@ struct SweepView: View {
         }
         .padding(16)
         .frame(width: 520)
-        .volarGlass(level: .heavy, cornerRadius: 16)
+        .volarGlass(level: .standard, cornerRadius: 16)
     }
 
     // MARK: - Header
@@ -85,6 +85,7 @@ struct SweepView: View {
         HStack {
             Text("\(items.count) task\(items.count == 1 ? "" : "s") open")
                 .font(.volarMono(size: 11))
+                .monospacedDigit()
                 .foregroundStyle(VolarColor.textMut)
             Spacer(minLength: 8)
             Button {
@@ -130,8 +131,8 @@ private struct SweepRow: View {
         }
         .padding(12)
         .background(isHovering ? VolarColor.cardHover : VolarColor.card)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .volarHairline(cornerRadius: 12)
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .volarHairline(cornerRadius: 8)
         .onHover { hovering in
             if reduceMotion {
                 isHovering = hovering
@@ -154,6 +155,7 @@ private struct SweepRow: View {
             if let durationLabel = item.durationLabel {
                 Text(durationLabel)
                     .font(.volarMono(size: 11))
+                    .monospacedDigit()
                     .foregroundStyle(VolarColor.textMut)
             }
         }

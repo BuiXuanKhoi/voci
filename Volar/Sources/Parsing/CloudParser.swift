@@ -92,15 +92,91 @@ struct CloudParser: Sendable {
     /// etc.) comfortably fit well under this.
     var maxResponseBytes = 256 * 1024
     var timeout: TimeInterval = 20
+    /// Client-side truncation cap for the OPTIONAL `sourceTranscript` context field (anh Khôi,
+    /// 2026-07-29 "richer context" addendum) — mirrors the server's own `MAX_CONTEXT_TRANSCRIPT_CHARS`
+    /// (`_shared/schema.ts`) so truncation happens (cheaply, and before the request ever leaves the
+    /// device) on this side too, not just server-side — same "client truncates too, belt-and-
+    /// suspenders" convention `maxTranscriptChars` already establishes for the primary `transcript`
+    /// field in `parseDetailed` above.
+    var maxContextTranscriptChars = 1000
+    /// Mirrors the server's own `MAX_EXISTING_SUBTASKS` (`_shared/schema.ts`) — same number, so
+    /// client and server never silently disagree about "how many subtasks are worth telling the
+    /// model about."
+    var maxExistingSubtasks = 20
+    /// Server-side re-check of `_shared/schema.ts`'s `MAX_NEXT_ACTION_CHARS` (currently 160) —
+    /// same "never trust a remote response blindly" posture `maxDreadMessageChars` below
+    /// documents for the sibling `dread` reason. Deliberately SHORTER than that cap — see
+    /// `MAX_NEXT_ACTION_CHARS`'s doc comment server-side for why.
+    var maxNextActionChars = 160
 
     /// Fresh instance per call, deliberately not a shared `static let`: `ISO8601DateFormatter` is
     /// a mutable reference type Foundation has not audited/marked `Sendable`, and this struct's
     /// methods run off the main actor — sharing one instance across concurrent calls would be a
     /// Swift 6 strict-concurrency risk (and a real, if unlikely, data race) for a cost that's
-    /// negligible next to the network round trip itself. Default `formatOptions` include
-    /// `.withInternetDateTime`, which always emits a trailing `Z` — satisfies the server's
-    /// `isIso8601WithZone` check (`_shared/schema.ts`) that requires a zone designator on `now`.
-    private static func makeRequestFormatter() -> ISO8601DateFormatter { ISO8601DateFormatter() }
+    /// negligible next to the network round trip itself.
+    ///
+    /// Emits the caller's OWN local wall-clock time with its REAL UTC offset (e.g.
+    /// `2026-07-28T15:00:00+07:00` for a user in Vietnam) — deliberately NOT `Z`/UTC. This is
+    /// intentional, not an oversight: the server prompt asks the model to resolve relative phrases
+    /// like "sáng nay"/"chiều nay" ("this morning"/"this afternoon") against the caller's actual
+    /// wall clock, so `now` must actually BE that wall clock, offset and all — sending UTC would
+    /// make every such phrase resolve against the wrong clock. `timeZone` defaults to `.current`,
+    /// re-read fresh on EVERY call (never cached in a stored property) — a user who changes
+    /// timezone (e.g. mid-flight) gets the correct offset on their very next request. The
+    /// parameter exists so tests can inject a fixed zone instead of depending on whatever timezone
+    /// happens to be set on the machine running the test suite.
+    ///
+    /// BUG THIS FIXES: `ISO8601DateFormatter()`'s own default `timeZone` is GMT, so the previous
+    /// code here silently RE-STAMPED local time as if it were UTC — a user at 15:00 local
+    /// (UTC+7) sent `...T08:00:00Z` (their own clock digits, wrongly labeled `Z`), the server then
+    /// resolved "this afternoon" against that mislabeled instant, and the client decoded the
+    /// resulting deadline exactly 7 hours off from what the user meant. Explicitly setting
+    /// `timeZone = .current` (or the injected zone) is the fix.
+    ///
+    /// `formatOptions = [.withInternetDateTime]` is required, not just conventional: the server
+    /// rejects any `now` that fails `isIso8601WithZone` (`_shared/schema.ts`) —
+    /// `/(Z|[+-]\d{2}:\d{2})$/` — which requires the UTC offset to include the colon (`+07:00`,
+    /// NOT `+0700`). `.withInternetDateTime` includes `.withColonSeparatorInTimeZone`, so this is
+    /// already satisfied, but `formatOptions` is set explicitly (rather than left at
+    /// `ISO8601DateFormatter`'s own default, which happens to match today) so a future edit can
+    /// never silently drop the colon by "simplifying" this line — that would 400 every
+    /// parse/resolve_completion request server-side.
+    ///
+    /// Not `private`: exposed at `internal` (package-default) visibility so `CloudParserTests` can
+    /// call it directly via `@testable import Volar` — mirrors the precedent
+    /// `CloudCompletionResolutionTests.swift` already documents for pulling `AppState
+    /// .resolveCloudMatch` out to a testable `static` function rather than leaving pure logic
+    /// trapped behind a live network/UI call.
+    static func makeRequestFormatter(timeZone: TimeZone = .current) -> ISO8601DateFormatter {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        formatter.timeZone = timeZone
+        return formatter
+    }
+
+    /// Defensive gate on the new `timezone` wire field (parse mode only — see `parseDetailed`
+    /// below). The server interpolates this value directly into the model prompt (a parallel,
+    /// not-yet-landed piece of server work as of this writing) — an unvalidated string here would
+    /// be a real prompt-injection surface, not defense-in-depth theater, so this mirrors the
+    /// server's OWN locked validation rule for this field rather than trusting
+    /// `TimeZone.current.identifier` to always be well-formed: 1...64 characters, matching
+    /// `^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+){0,2}$` (letters/digits/`_`/`+`/`-`, 1-3 `/`-separated
+    /// segments — covers real IANA ids like `Asia/Ho_Chi_Minh`, `UTC`,
+    /// `America/Argentina/Buenos_Aires`). Returns `nil` (never a best-effort sanitized/truncated
+    /// string) on any mismatch — the caller then OMITS the `timezone` field entirely rather than
+    /// risk sending something the server would 400 on, which would otherwise kill the ENTIRE parse
+    /// request over a field that's only ever a hint.
+    ///
+    /// Not `private`, same testability rationale as `makeRequestFormatter` above.
+    static func validatedTimezoneField(_ identifier: String) -> String? {
+        guard (1...64).contains(identifier.utf16.count) else { return nil }
+        guard identifier.range(
+            of: "^[A-Za-z0-9_+-]+(?:/[A-Za-z0-9_+-]+){0,2}$", options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return identifier
+    }
 
     /// Truncates by UTF-16 code units — matching the server's validation (`_shared/schema.ts`
     /// checks JS string `.length`, which counts UTF-16 units, not Unicode scalars or grapheme
@@ -126,9 +202,119 @@ struct CloudParser: Sendable {
         return result
     }
 
+    /// Shared context-payload builder (anh Khôi, 2026-07-29 "richer context" addendum) — appends
+    /// `source_transcript`/`deadline`/`existing_subtasks` to an in-progress request `payload` IN
+    /// PLACE, used by `breakdownDetailed`, `dreadDetailed`, and `nextActionDetailed` alike so the
+    /// three modes can never drift onto three different truncation/formatting rules for the same
+    /// three OPTIONAL fields. An instance method (not `static`, unlike `utf16Prefix` above) purely
+    /// so it can read `self.maxContextTranscriptChars`/`self.maxExistingSubtasks`.
+    ///
+    /// `sourceTranscript` is UNTRUSTED input (the user's own speech, captured verbatim at
+    /// task-creation time) — exactly like `notes`/`title` on every call site already, it is added
+    /// here as a plain JSON DATA field on the SAME envelope, never concatenated into any kind of
+    /// instruction string (that discipline is entirely server-side, in `gemini.ts`'s
+    /// `build*Contents` — this file only ever builds an inert `[String: Any]` dictionary that
+    /// becomes a JSON body, so there is no "prompt" for it to be smuggled into on this side at
+    /// all). `deadline` is formatted via `Self.makeRequestFormatter()` — the SAME formatter/offset
+    /// convention `now` already uses elsewhere in this file (local wall-clock time with its real
+    /// UTC offset, never `Z`/UTC — see that function's own doc comment for why silently mislabeling
+    /// local time as UTC would shift every downstream date reasoning the server does).
+    private func appendContext(
+        to payload: inout [String: Any],
+        sourceTranscript: String?,
+        deadline: Date?,
+        existingSubtasks: [TaskContextSubtask]?
+    ) {
+        if let sourceTranscript {
+            let trimmed = Self.utf16Prefix(sourceTranscript, maxContextTranscriptChars)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                payload["source_transcript"] = trimmed
+            }
+        }
+        if let deadline {
+            payload["deadline"] = Self.makeRequestFormatter().string(from: deadline)
+        }
+        if let existingSubtasks, !existingSubtasks.isEmpty {
+            payload["existing_subtasks"] = Array(existingSubtasks.prefix(maxExistingSubtasks)).map {
+                ["title": Self.utf16Prefix($0.title, 300), "done": $0.done]
+            }
+        }
+    }
+
     // MARK: Parse mode
 
+    /// Wire capability the client advertises via `"client_caps": ["task_refs_v1"]` on every parse
+    /// request (anh Khôi, 2026-08-02 task-refs design; server side: `_shared/schema.ts`'s
+    /// `ParseRequest.clientCaps`, `MAX_TASK_REFS`/`MAX_UPDATES`). Additive, two-way handshake —
+    /// NOT a version number (App Store clients fragment across versions while this Edge Function
+    /// redeploys freely; see `ParseRequest.clientCaps`'s own doc comment server-side for the same
+    /// reasoning spelled out in full): a server that does NOT yet recognize this string (not
+    /// redeployed yet, or a rollback) ignores the field entirely and returns today's bare
+    /// `[RawParsedTask]` array; a server that DOES recognize it returns the richer envelope object
+    /// `{ tasks, taskRefs, updates }` instead (`RawParseEnvelope`, `IntentParsing.swift`). BOTH
+    /// response shapes MUST decode without throwing — see `performParse`'s `200` branch below,
+    /// which tries the envelope shape first and falls back to the bare array, so an utterance is
+    /// never lost to a decode failure regardless of which server version answers.
+    static let taskRefsCapability = "task_refs_v1"
+
+    /// Wire capability for `cue` (implementation-intention surfacing, `specs/006-cues-and-waiting/
+    /// design.md`) — sent ALONGSIDE `taskRefsCapability` in `"client_caps"`, never replacing it
+    /// (both are independent, additive handshakes; a server can recognize either, both, or
+    /// neither). Same additive-handshake contract as `taskRefsCapability` documents in full above:
+    /// a server that doesn't yet recognize this string (not redeployed, or a rollback) simply
+    /// never populates `cue` on its response, which decodes as `nil` here either way — see
+    /// `RawParsedTask.cue`'s own doc comment for the back-compat mechanics this depends on.
+    static let cuesCapability = "task_cues_v1"
+
+    /// task_refs_v1: the full-`ParsedCapture` sibling of `CloudParseOutcome` — identical
+    /// quota/unavailable semantics, but the success case carries the full validated `ParsedCapture`
+    /// (tasks + taskRefs + updates) instead of just `[ParsedTask]`. A SEPARATE type from
+    /// `CloudParseOutcome` (never a payload-type change to that one) so `parseDetailed`'s existing
+    /// `[ParsedTask]`-only contract — and every call site that already depends on it — never has to
+    /// change shape; see `performParse` below for the one shared network/decode path both
+    /// `parseDetailed` and `parseCaptureDetailed` delegate to (never two network round trips for
+    /// what is, on the wire, one request).
+    enum CloudParseCaptureOutcome: Sendable, Equatable {
+        case capture(ParsedCapture)
+        /// Identical meaning to `CloudParseOutcome.quotaExceeded`.
+        case quotaExceeded(resetAt: Date?)
+        /// Identical meaning to `CloudParseOutcome.unavailable`.
+        case unavailable
+    }
+
     func parseDetailed(_ transcript: String, now: Date, openTaskTitles: [String]) async -> CloudParseOutcome {
+        switch await performParse(transcript, now: now, openTaskTitles: openTaskTitles) {
+        case .capture(let capture):
+            return .tasks(capture.tasks)
+        case .quotaExceeded(let resetAt):
+            return .quotaExceeded(resetAt: resetAt)
+        case .unavailable:
+            return .unavailable
+        }
+    }
+
+    /// task_refs_v1 sibling of `parseDetailed` above — same network call (via the shared
+    /// `performParse` below), but returns the FULL `ParsedCapture` (`taskRefs`/`updates` included)
+    /// instead of discarding them down to `[ParsedTask]`. The one real call site is
+    /// `IntentRouter.parseCapture` (`IntentParsing.swift`).
+    func parseCaptureDetailed(
+        _ transcript: String, now: Date, openTaskTitles: [String]
+    ) async -> CloudParseCaptureOutcome {
+        await performParse(transcript, now: now, openTaskTitles: openTaskTitles)
+    }
+
+    /// Shared network + decode path for `parseDetailed`/`parseCaptureDetailed` (anh Khôi, 2026-08-02
+    /// task-refs design: factored out of what used to be `parseDetailed`'s own body, verbatim, so a
+    /// second public-facing shape could be added without a second round trip). Every pre-existing
+    /// behavior this refactor must NOT disturb: the consent/credential gate, the `timezone`/
+    /// `open_task_titles` payload fields, the 429 quota/`resetAt` handling, the `maxResponseBytes`
+    /// pre-decode size gate, and the 2026-08-01 "`200 []` is a well-formed answer, not
+    /// `.unavailable`" fix (see the inline comment at the `200` case below — unchanged, just now
+    /// reached via an empty `ParsedCapture` instead of an empty `[ParsedTask]` directly).
+    private func performParse(
+        _ transcript: String, now: Date, openTaskTitles: [String]
+    ) async -> CloudParseCaptureOutcome {
         let trimmed = Self.utf16Prefix(transcript, maxTranscriptChars)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return .unavailable }
@@ -145,9 +331,23 @@ struct CloudParser: Sendable {
         var payload: [String: Any] = [
             "transcript": trimmed,
             "now": Self.makeRequestFormatter().string(from: now),
+            // task_refs_v1 (anh Khôi, 2026-08-02) + task_cues_v1 (006-cues-and-waiting, 2026-08-08):
+            // both advertised on EVERY parse request, unconditionally, side by side — see
+            // `taskRefsCapability`'s own doc comment for the additive-handshake contract this
+            // relies on (a server that doesn't recognize a given string yet, or has been rolled
+            // back, simply ignores THAT field and answers exactly as before; the two caps are
+            // independent, neither gates the other).
+            "client_caps": [Self.taskRefsCapability, Self.cuesCapability],
         ]
         if !openTaskTitles.isEmpty {
             payload["open_task_titles"] = Array(openTaskTitles.prefix(100)).map { Self.utf16Prefix($0, 200) }
+        }
+        // `timezone`: parse mode ONLY (locked contract — `resolveCompletion` below deliberately
+        // does NOT send this; the server only reads it in parse mode). IANA identifier, gated
+        // through `validatedTimezoneField` — omit the field entirely rather than send a malformed
+        // value and risk a 400 on the whole request over what is only ever a hint.
+        if let timezone = Self.validatedTimezoneField(TimeZone.current.identifier) {
+            payload["timezone"] = timezone
         }
 
         guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
@@ -171,12 +371,40 @@ struct CloudParser: Sendable {
         switch http.statusCode {
         case 200:
             guard data.count <= maxResponseBytes else { return .unavailable }
-            guard let raws = try? JSONDecoder().decode([RawParsedTask].self, from: data), !raws.isEmpty else {
+            // 2026-08-01: an EMPTY array is no longer folded into `.unavailable`. `200 []` is a
+            // well-formed, deliberate server answer — "the model read the utterance and found no
+            // actionable task in it" (small talk) — and `supabase/functions/_shared/schema.ts`'s
+            // `validateParsedTaskArray` documents it as such explicitly, returning `200 []` rather
+            // than a 502 on purpose. Reporting it as `.unavailable` claimed the Cloud tier had
+            // FAILED when it had actually succeeded: `IntentRouter.lastRoute` recorded the wrong
+            // tier, and the router's `.cloud` empty branch was unreachable dead code.
+            //
+            // What the user sees is UNCHANGED (anh Khôi chốt 2026-08-01): the router still falls
+            // through to its title-only floor either way, so an utterance never silently vanishes —
+            // only the diagnosis of WHY it fell through is now honest.
+            //
+            // task_refs_v1 (anh Khôi, 2026-08-02): the ENVELOPE shape is tried FIRST. A server that
+            // doesn't recognize `client_caps` (not yet redeployed, or a rollback) ignores that field
+            // and returns the OLD bare `[RawParsedTask]` array — decoding THAT as `RawParseEnvelope`
+            // fails outright (a top-level JSON array can never satisfy an object-keyed container),
+            // so this always falls through cleanly to the bare-array branch below on an old server,
+            // never silently misreads array elements as envelope fields. Both branches must decode
+            // without throwing — this is the one thing standing between a server-version mismatch
+            // and losing the user's utterance entirely.
+            if let envelope = try? JSONDecoder().decode(RawParseEnvelope.self, from: data) {
+                // `now: now` (task_cues_v1): the SAME instant this request declared as its own
+                // wall clock — see `ParsedTaskValidation.validate`'s `now:` doc comment for why
+                // this, not a fresh `Date()` read at decode time, is what stamps a decoded cue's
+                // `TaskCue.createdAt`.
+                let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: transcript, now: now)
+                return .capture(capture)
+            }
+            guard let raws = try? JSONDecoder().decode([RawParsedTask].self, from: data) else {
                 return .unavailable
             }
             let capped = Array(raws.prefix(IntentRouter.maxTaskCap))
-            let validated = ParsedTaskValidation.validateAll(capped, sourceTranscript: transcript)
-            return .tasks(validated)
+            let validated = ParsedTaskValidation.validateAll(capped, sourceTranscript: transcript, now: now)
+            return .capture(ParsedCapture(tasks: validated, taskRefs: [], updates: []))
         case 429:
             let quota = try? JSONDecoder().decode(QuotaResponse.self, from: data)
             let resetAt = quota?.resetAt.flatMap { ParsedTaskValidation.parseISO8601($0) }
@@ -191,7 +419,17 @@ struct CloudParser: Sendable {
 
     // MARK: Breakdown mode (same route, `mode: "breakdown"`)
 
-    func breakdownDetailed(title: String, notes: String?) async -> [String]? {
+    /// `sourceTranscript`/`deadline`/`existingSubtasks` (anh Khôi, 2026-07-29 "richer context"
+    /// addendum) are OPTIONAL, defaulting to `nil` so every pre-addendum call site keeps compiling
+    /// and behaving exactly as before — see `appendContext(to:sourceTranscript:deadline:
+    /// existingSubtasks:)` for how they're added to the wire payload.
+    func breakdownDetailed(
+        title: String,
+        notes: String?,
+        sourceTranscript: String? = nil,
+        deadline: Date? = nil,
+        existingSubtasks: [TaskContextSubtask]? = nil
+    ) async -> [String]? {
         let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedTitle.isEmpty else { return nil }
 
@@ -205,6 +443,9 @@ struct CloudParser: Sendable {
         if let notes, !notes.isEmpty {
             payload["notes"] = Self.utf16Prefix(notes, 1000)
         }
+        appendContext(
+            to: &payload, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
+        )
 
         guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
             return nil
@@ -228,6 +469,311 @@ struct CloudParser: Sendable {
         // already enforces it (`_shared/schema.ts`) — never trust a remote response blindly.
         guard (3...9).contains(steps.count) else { return nil }
         return steps
+    }
+
+    // MARK: - Stuck mode, "dread" and "too_big" reasons (same route, `mode: "stuck"`)
+    //
+    // "Stuck?" feature (anh Khôi, 2026-07-29, REDESIGNED same day after he challenged the first
+    // version): three different reasons a task doesn't get started need three genuinely different
+    // fixes. "dread" ("em ngán/sợ động vào nó" — I don't want to touch this one) names the SPECIFIC
+    // dreaded part of THIS task and proposes a <=2-minute physical action touching it.
+    // "too_big" used to route straight into the EXISTING `breakdownDetailed` flow above
+    // (`AppState.openBreakdown(for:)`); it now calls `nextActionDetailed` below instead, which asks
+    // for exactly ONE next physical action, never a 3-9 step plan — see `NEXT_ACTION_SYSTEM_PREAMBLE`'s
+    // doc comment server-side (`supabase/functions/_shared/gemini.ts`) for why a full plan under
+    // near-zero context is fabrication dressed as advice. The full plan is still one tap away (the
+    // client's "See full plan" button still calls `AppState.openBreakdown(for:)`, unchanged). The
+    // third reason ("cant_start" — can't get moving at all) never reaches this file or the network
+    // at all: it's a plain client-side 2-minute timer (`AppState.startStuckCantStartTimer`), so
+    // there is no corresponding method here.
+
+    /// Server-side re-check of `_shared/schema.ts`'s `MAX_DREAD_MESSAGE_CHARS` (currently 400) —
+    /// same "never trust a remote response blindly" posture `breakdownDetailed`'s `(3...9)`
+    /// re-check documents right above. Kept as an instance `var` (not a `static let`) purely so a
+    /// future test can override it, mirroring `maxTranscriptChars`/`maxResponseBytes`'s own shape.
+    var maxDreadMessageChars = 400
+
+    private struct DreadResponse: Decodable {
+        var message: String
+    }
+
+    private struct NextActionResponse: Decodable {
+        var message: String
+    }
+
+    /// Cloud call for the "dread" reason only. Mirrors `breakdownDetailed`'s exact shape (same
+    /// consent/credential gate, same `makeRequest`/timeout helpers, same `utf16Prefix` truncation)
+    /// — the only differences are the wire `mode`/`reason` literals, the response shape, and the
+    /// re-validation cap. Returns `nil` on ANY failure (no consent/credential, offline, non-200,
+    /// oversized body, undecodable JSON, empty message, over-cap message) — never partially
+    /// trusts a malformed response, and never throws up to the UI (matches every other method in
+    /// this file's error-handling convention). `sourceTranscript`/`deadline`/`existingSubtasks`
+    /// (anh Khôi, 2026-07-29 "richer context" addendum) are OPTIONAL, defaulting to `nil` so every
+    /// pre-addendum call site keeps compiling and behaving exactly as before.
+    func dreadDetailed(
+        title: String,
+        notes: String?,
+        sourceTranscript: String? = nil,
+        deadline: Date? = nil,
+        existingSubtasks: [TaskContextSubtask]? = nil
+    ) async -> String? {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return nil }
+
+        guard let base = try? await credentials.baseURL(),
+              let header = await credentials.authHeader() else { return nil }
+
+        var payload: [String: Any] = [
+            "mode": "stuck",
+            "reason": "dread",
+            "task_title": Self.utf16Prefix(trimmedTitle, 300),
+        ]
+        if let notes, !notes.isEmpty {
+            payload["notes"] = Self.utf16Prefix(notes, 1000)
+        }
+        appendContext(
+            to: &payload, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
+        )
+
+        guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
+            return nil
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            // Transport failure — silent fall-through, no logging (same privacy rationale as
+            // `parseDetailed`'s/`resolveCompletion`'s identical catch blocks).
+            return nil
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+        guard data.count <= maxResponseBytes else { return nil }
+        guard let decoded = try? JSONDecoder().decode(DreadResponse.self, from: data) else { return nil }
+
+        let trimmedMessage = decoded.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty, trimmedMessage.utf16.count <= maxDreadMessageChars else { return nil }
+        return trimmedMessage
+    }
+
+    /// Cloud call for the "too_big" reason (anh Khôi, 2026-07-29 REDESIGN — replaces this reason's
+    /// original "reuse breakdownDetailed verbatim" call). Mirrors `dreadDetailed`'s exact shape
+    /// (same consent/credential gate, same `makeRequest`/timeout helpers, same context-forwarding,
+    /// same error-handling convention) — the only differences are the wire `reason` literal, the
+    /// re-validation cap (`maxNextActionChars`, deliberately SHORTER than `maxDreadMessageChars`),
+    /// and that this reason has no static fallback content to fall back to on the client (see
+    /// `AppState.applyStuckNextActionResult`): `nil` here means "found nothing," never "here's a
+    /// generic suggestion instead."
+    func nextActionDetailed(
+        title: String,
+        notes: String?,
+        sourceTranscript: String? = nil,
+        deadline: Date? = nil,
+        existingSubtasks: [TaskContextSubtask]? = nil
+    ) async -> String? {
+        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty else { return nil }
+
+        guard let base = try? await credentials.baseURL(),
+              let header = await credentials.authHeader() else { return nil }
+
+        var payload: [String: Any] = [
+            "mode": "stuck",
+            "reason": "too_big",
+            "task_title": Self.utf16Prefix(trimmedTitle, 300),
+        ]
+        if let notes, !notes.isEmpty {
+            payload["notes"] = Self.utf16Prefix(notes, 1000)
+        }
+        appendContext(
+            to: &payload, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
+        )
+
+        guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
+            return nil
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            return nil
+        }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
+        guard data.count <= maxResponseBytes else { return nil }
+        guard let decoded = try? JSONDecoder().decode(NextActionResponse.self, from: data) else { return nil }
+
+        let trimmedMessage = decoded.message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedMessage.isEmpty, trimmedMessage.utf16.count <= maxNextActionChars else { return nil }
+        return trimmedMessage
+    }
+
+    // MARK: - Resolve-completion mode (T0xx: cloud paraphrase rescue for `VoiceDone`'s
+    // empty-candidate case — see `Sources/App/AppState.swift`'s `resolveCompletionViaCloud`).
+    //
+    // WHY this exists: `VoiceDone.classify` (Sources/Speech/VoiceDone.swift) matches a completion
+    // utterance against open-task titles with on-device Jaccard token-set overlap. A paraphrase
+    // ("xong cái vụ report rồi" vs. the real title "Viết báo cáo Q3") shares no tokens and scores
+    // 0.0 — `VoiceDone` correctly reports "phrase present, nothing matched" (empty candidates), and
+    // THIS is the one place that empty-candidates outcome gets a second, semantic-match attempt
+    // before the app gives up and tells the user "no matching task."
+    //
+    // LOCKED wire contract (`mode: "resolve_completion"`, a new mode alongside parse/breakdown on
+    // the same `/functions/v1/parse` route — a parallel agent implements the server half against
+    // this identical contract, so the field names/shapes below are NOT open to renegotiation):
+    //   Request:  { mode, transcript, now, kind: "complete"|"clear_external", candidates: [String] }
+    //   Response: { intent: "complete"|"clear_external"|"none", matchIndex?: Int (1-BASED),
+    //               matchTitle?: String, confidence: Double (0...1) }
+    // `matchIndex` is 1-BASED: `candidates[matchIndex - 1]` is the chosen title. Every touch point
+    // below comments this loudly — getting it wrong marks the WRONG task done.
+
+    /// Wire `kind` for `resolve_completion` — mirrors `VoiceDoneAction`'s two actionable cases
+    /// (`AppState.swift`) at the transport boundary. Kept as its own type here rather than reusing
+    /// `VoiceDoneAction` directly so this file never depends on `VoiceDone.swift`'s frozen seam
+    /// (same separation `CloudParser` already keeps from `ParsedTask`'s owning module elsewhere).
+    enum CompletionKind: Sendable, Equatable {
+        case complete
+        case clearExternal
+
+        /// The exact wire literal the locked contract specifies.
+        fileprivate var wireValue: String {
+            switch self {
+            case .complete: return "complete"
+            case .clearExternal: return "clear_external"
+            }
+        }
+    }
+
+    /// `resolveCompletion`'s result. Deliberately keeps `.none` ("the model looked at the
+    /// candidates and confidently reported no match, or the 200 response failed a defensive
+    /// validation check") distinct from `.unavailable` ("we never got a trustworthy answer at all:
+    /// no consent/credential, offline, timeout, non-200, oversized body, or undecodable JSON").
+    /// Both collapse to the SAME caller behavior today (`AppState` presents "no matching task"
+    /// either way — see `resolveCompletionViaCloud`), but conflating them here would destroy
+    /// information a future retry-only-on-`.none` or telemetry-only-on-`.unavailable` decision
+    /// would need, per this task's own instruction not to blur that distinction in the transport
+    /// layer.
+    enum CompletionResolution: Sendable, Equatable {
+        /// `index` is 1-BASED into the `candidates` array THIS CALL was given (already re-checked
+        /// against `1...candidates.count` below before this case is ever produced) —
+        /// `candidates[index - 1]` is `title`, echoed verbatim (trimmed) from the wire response.
+        /// The caller (`IntentRouter.resolveCompletion` / `AppState.resolveCompletionViaCloud`) is
+        /// still responsible for re-validating `index`/`title` against ITS OWN local snapshot
+        /// before acting — this case only guarantees the WIRE-LEVEL checks below already passed,
+        /// not that the caller's candidate list is still the same one that was sent (constitution
+        /// II: never trust a remote response transitively).
+        case resolved(index: Int, title: String, confidence: Double)
+        /// Well-formed 200 with `intent == "none"`, OR a 200 that failed one of the defensive
+        /// checks below (unrecognized `intent`, non-finite/out-of-range `confidence`,
+        /// missing/non-integer/out-of-range `matchIndex`, missing/empty `matchTitle`) — the server
+        /// DID answer, so this is "found nothing," never a transport failure.
+        case none
+        /// No trustworthy answer: no consent/credential available (`ParseCredentialProvider` gate),
+        /// transport failure (offline/DNS/TLS/timeout), non-200 status, oversized body, or a
+        /// response that failed to decode at all.
+        case unavailable
+    }
+
+    private struct ResolveCompletionResponse: Decodable {
+        var intent: String
+        var matchIndex: Int?
+        var matchTitle: String?
+        var confidence: Double
+    }
+
+    /// Cloud-only semantic-match attempt for a completion/clear-external utterance that `VoiceDone`
+    /// already tried and failed to match locally. Reuses `parseDetailed`'s exact machinery: the
+    /// same credential/consent guard (never sends anything without a resolved `baseURL`/auth
+    /// header), the same `makeRequest`/timeout/formatter helpers, the same `utf16Prefix`
+    /// truncation, and the same 100-entry cap on the candidate-titles list `parseDetailed` applies
+    /// to `open_task_titles`.
+    func resolveCompletion(
+        _ transcript: String, now: Date, kind: CompletionKind, candidates: [String]
+    ) async -> CompletionResolution {
+        let trimmed = Self.utf16Prefix(transcript, maxTranscriptChars)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return .unavailable }
+
+        guard let base = try? await credentials.baseURL(),
+              let header = await credentials.authHeader() else {
+            // Identical consent/entitlement/credential gate as `parseDetailed` (same doc comment
+            // applies verbatim): never send an unauthenticated request, not even the candidate
+            // titles, when there is no consent/entitlement/token available right now.
+            return .unavailable
+        }
+
+        // Same defensive cap + per-title truncation `parseDetailed` applies to `open_task_titles`
+        // — this wire field is the same shape (a list of open-task titles), just under the locked
+        // `candidates` name for this mode. `boundedCandidates.count` is what `matchIndex` gets
+        // validated against below, so this MUST be the exact list actually sent on the wire.
+        let boundedCandidates = Array(candidates.prefix(100)).map { Self.utf16Prefix($0, 200) }
+
+        let payload: [String: Any] = [
+            "mode": "resolve_completion",
+            "transcript": trimmed,
+            "now": Self.makeRequestFormatter().string(from: now),
+            "kind": kind.wireValue,
+            "candidates": boundedCandidates,
+        ]
+
+        guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
+            return .unavailable
+        }
+
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            // Transport failure — silent fall-through, no logging (same privacy rationale as
+            // `parseDetailed`'s identical catch block: never log error strings that could echo
+            // request details on some platforms).
+            return .unavailable
+        }
+        guard let http = response as? HTTPURLResponse else { return .unavailable }
+        guard http.statusCode == 200 else {
+            // Follows `parseDetailed`'s existing degrade convention: every non-200 (401 invalid/
+            // expired auth, 403, 429, 5xx) falls through to unavailable. This mode's result shape
+            // has no quota-note case (unlike `CloudParseOutcome.quotaExceeded`) — a 429 here is
+            // just "not available right now," not a distinct signal the caller acts on.
+            return .unavailable
+        }
+        guard data.count <= maxResponseBytes else { return .unavailable }
+        guard let decoded = try? JSONDecoder().decode(ResolveCompletionResponse.self, from: data) else {
+            return .unavailable
+        }
+
+        // TRUST BOUNDARY — this decides which of the user's tasks gets completed. Every violation
+        // below maps to `.none`, never to a patched-up/defaulted `.resolved`.
+        switch decoded.intent {
+        case "complete", "clear_external":
+            break
+        case "none":
+            return .none
+        default:
+            // Unrecognized literal — schema drift or a hostile/corrupted response. Never guess.
+            return .none
+        }
+
+        guard decoded.confidence.isFinite, (0...1).contains(decoded.confidence) else { return .none }
+
+        // `matchIndex` is 1-BASED (locked contract) — bounds-checked against `boundedCandidates`,
+        // the EXACT list this call sent, so `candidates[matchIndex - 1]` (whenever a caller does
+        // that arithmetic) is always in range for THIS response.
+        // Two plain comparisons, not `(1...boundedCandidates.count).contains(matchIndex)`: an
+        // empty `boundedCandidates` (caller passed no candidates at all) makes `1...0` an invalid
+        // `ClosedRange` that TRAPS at construction, before `.contains` ever runs — a hostile/buggy
+        // server response with a non-nil `matchIndex` on a zero-candidate request must degrade to
+        // `.none`, never crash the app.
+        guard let matchIndex = decoded.matchIndex,
+              matchIndex >= 1, matchIndex <= boundedCandidates.count else { return .none }
+
+        guard let matchTitle = decoded.matchTitle?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !matchTitle.isEmpty else { return .none }
+
+        return .resolved(index: matchIndex, title: matchTitle, confidence: decoded.confidence)
     }
 
     // MARK: - Shared request builder

@@ -196,9 +196,12 @@ final class SpeechCapture {
         print("[Volar.Speech] speech auth = \(speechStatus.rawValue)")
         guard speechStatus == .authorized else { return false }
 
-        // Native async variant (macOS 14+) — no completion handler, no continuation, and
-        // therefore no isolation-inference hazard at all for the mic half.
-        let micGranted = await AVAudioApplication.requestRecordPermission()
+        // Fix (2026-07-27): was `AVAudioApplication.requestRecordPermission()` — that API is
+        // iOS 17+/Mac Catalyst only and never triggered macOS's mic TCC prompt at all, which is
+        // why anh Khôi never saw a permission dialog. `MicrophonePermission` (this module) wraps
+        // the real native-macOS entry point, `AVCaptureDevice.requestAccess(for:)` — no completion
+        // handler, no continuation, so still no isolation-inference hazard for the mic half.
+        let micGranted = await MicrophonePermission.request()
         print("[Volar.Speech] mic granted = \(micGranted)")
         return micGranted
     }

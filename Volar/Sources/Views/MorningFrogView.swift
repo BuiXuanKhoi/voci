@@ -63,7 +63,7 @@ struct MorningFrogView: View {
         .padding(.horizontal, 32)
         .padding(.top, 36)
         .padding(.bottom, 24)
-        .volarGlass(level: .heavy, cornerRadius: 16)
+        .volarGlass(level: .standard, cornerRadius: 16)
     }
 
     // MARK: - Voice CTA
@@ -72,8 +72,10 @@ struct MorningFrogView: View {
 
     private var voiceCTA: some View {
         Button {
-            // Answer by voice: kick off the real toggle-capture flow, then dismiss this modal
-            // the same way "Skip today" does.
+            // Answer by voice, then dismiss this modal the same way "Skip today" does. Stays on
+            // `toggleCapture()`: this prompt asks the user to SPEAK an answer, so the one thing it
+            // must never do is silently save some unrelated draft that happened to still be open.
+            // `handleHotkey()` is for the bare ⌃⌥M keypress only — see its own doc comment.
             appState.toggleCapture()
             onSkip()
         } label: {
@@ -169,15 +171,15 @@ struct MorningFrogView: View {
                 .padding(.horizontal, 7)
                 .padding(.vertical, 2)
                 .background(VolarColor.high.opacity(0.12))
-                .clipShape(Capsule())
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
         .background(selected ? accentColors.surface : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 9, style: .continuous)
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
                 .stroke(selected ? accentColors.solid.opacity(0.27) : .clear, lineWidth: 0.5)
         )
         .contentShape(Rectangle())

@@ -1,0 +1,59 @@
+<!--
+  Supabase Auth ▸ "Magic Link" template — Volar AI
+
+  Despite the name, this is what an EXISTING address receives when the app calls
+  `/auth/v1/otp`. New addresses get "Confirm signup" (confirm-signup.html, same folder).
+  Volar never uses an actual magic link — the app asks for a 6-digit code — so this renders
+  `{{ .Token }}` and no `{{ .ConfirmationURL }}`.
+
+  Kept near-identical to confirm-signup.html on purpose: the same person sees this one on
+  every subsequent sign-in, and two visually different emails for what is, to them, the same
+  action reads as a phishing attempt. The only difference is the opening line.
+-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f6f9;margin:0;padding:32px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:440px;background-color:#ffffff;border-radius:14px;border:1px solid #e3e8ef;">
+
+        <tr>
+          <td style="padding:32px 32px 0 32px;">
+            <div style="font-size:17px;font-weight:600;color:#0f172a;letter-spacing:-0.2px;">Volar AI</div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:20px 32px 0 32px;">
+            <div style="font-size:15px;line-height:1.55;color:#334155;">
+              Here is your sign-in code. Enter it in Volar to continue.
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:24px 32px 0 32px;">
+            <div style="background-color:#f1f5f9;border:1px solid #e2e8f0;border-radius:10px;padding:18px 0;text-align:center;">
+              <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:30px;font-weight:600;letter-spacing:7px;color:#0f172a;">{{ .Token }}</span>
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:16px 32px 0 32px;">
+            <div style="font-size:13px;line-height:1.55;color:#64748b;">
+              The code expires in one hour and can only be used once.
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:24px 32px 32px 32px;">
+            <div style="border-top:1px solid #eef2f7;padding-top:16px;font-size:12.5px;line-height:1.55;color:#94a3b8;">
+              If you didn't try to sign in to Volar, you can ignore this email — no one can use this code without it.
+            </div>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

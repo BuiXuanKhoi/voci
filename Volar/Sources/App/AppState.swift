@@ -90,6 +90,68 @@ enum VoiceDeliveryMode: String, Sendable, Equatable, Hashable, CaseIterable, Ide
     }
 }
 
+/// One step of a real (server- or on-device-generated) task breakdown, as rendered by
+/// `TaskBreakdownView`. `id` is the step's position, not a UUID — `IntentRouter.breakdown(title:
+/// notes:)` (the frozen `IntentParser` seam this is built from, `Sources/Parsing/
+/// IntentParsing.swift`) returns bare `[String]` titles only; the backend's `POST /parse` with
+/// `mode: "breakdown"` also returns a per-step `estimateMinutes`, but that number never survives
+/// the trip through `CloudParser.breakdown(title:notes:) -> [String]` (it discards everything but
+/// the title before returning — see that file, out of this task's allowed files, for the decode).
+/// So there is no real per-step duration available through this seam today; `TaskBreakdownView`
+/// intentionally shows none rather than inventing one (the OLD hard-coded "10 min"/"5 min" labels
+/// this view used to show were exactly the kind of fake-looking content this feature removes).
+struct BreakdownStep: Identifiable, Equatable, Sendable {
+    let id: Int
+    let title: String
+}
+
+/// State machine for `AppState.fetchBreakdown` (Change 3: real "Save all as tasks"). `TaskBreakdownView`
+/// renders directly off this rather than owning any fetch state of its own.
+enum BreakdownFetchState: Equatable, Sendable {
+    /// No breakdown sheet open, or a fresh `openBreakdown(for:)` hasn't kicked off its fetch yet.
+    case idle
+    /// Request in flight (or about to be — set synchronously by `fetchBreakdown` before the async
+    /// hop, so the sheet never shows a blank frame between opening and "loading").
+    case loading
+    /// Real steps, from either the on-device FoundationModels tier or the actual cloud call —
+    /// never the hard-coded heuristic template (see `fetchBreakdown`'s doc comment for how that's
+    /// ruled out). Empty is not a valid case here; `fetchBreakdown` maps an empty result to `.failed`.
+    case loaded([BreakdownStep])
+    /// Cloud parsing isn't usable AT ALL right now for a KNOWN reason determined before ever
+    /// calling the router — not signed in, or never opted into cloud parsing
+    /// (`AppState.cloudParseConsent != true`). Deliberately distinguished from `.failed` (which
+    /// means an attempt was actually made) so `TaskBreakdownView` can point the user at Settings/
+    /// sign-in instead of suggesting "try again."
+    case unavailable
+    /// Cloud was attempted (preconditions were met) but produced nothing usable — offline, quota
+    /// exhausted server-side, or a decode failure. (2026-07-28: `IntentRouter.breakdown` used to
+    /// have an unconditional hard-coded heuristic-template fallback here too — `HeuristicNLParser
+    /// .breakdown`, `NLParser.swift` — which `fetchBreakdown` diffed the result against to catch
+    /// it in disguise; that fallback is now disconnected from the router entirely, so an empty/
+    /// non-real result reaches here as a plain empty array, not a template needing a diff.)
+    case failed
+}
+
+/// "Stuck?" feature (anh Khôi, 2026-07-29): the three reasons a task can fail to get started, each
+/// with its own deliberately different fix — see `AppState.chooseStuckReason(_:for:)`. Plain
+/// English UI copy for each (never these raw case names) lives in `Sources/Views/FocusOverlay
+/// .swift`'s `StuckReasonPicker`, shared by both places "Stuck?" appears.
+enum StuckReason: Equatable, Sendable {
+    /// "This feels like more than one task" — the ONLY reason "chia nhỏ"/breakdown actually fixes.
+    /// REDESIGNED 2026-07-29: no longer opens the full breakdown plan directly — fetches exactly
+    /// ONE next physical action first (`AppState.StuckNextActionState`/`fetchStuckNextAction`),
+    /// with the full plan still one tap away via that banner's own secondary button. See
+    /// `AppState.chooseStuckReason`'s doc comment for the full reasoning.
+    case tooBig
+    /// "This one feels heavy to even look at" — breakdown does NOT help here (splitting one scary
+    /// task into several scary pieces doesn't reduce the dread); needs naming the specific dreaded
+    /// part instead (`AppState.stuckDreadState` / `IntentRouter.stuckDread`).
+    case dread
+    /// "I can't get myself moving at all" — the problem isn't the task's size or content at all,
+    /// so no model call is ever made for this reason; see `AppState.startStuckCantStartTimer`.
+    case cantStart
+}
+
 /// One attribute a confirm-card chip governs (T024). Deliberately narrower than `ParsedTask`'s
 /// full field list — `title`/`notes`/`subtasks` have no chip (title is the always-shown headline,
 /// notes/subtasks aren't part of the v2 chip set per the contract's "Confirm + materialize"
@@ -103,6 +165,84 @@ enum ChipKind: String, CaseIterable, Hashable, Sendable {
     /// every other attribute, defaulting ON (dismissing it is the exception, not the rule) but
     /// removable before Save.
     case followUpReview
+    /// T-disposition (2026-07-28, "làm ngay lập tức" / urgent-task disposition): `ParsedTask.
+    /// startTime` — the instant the user said they'd START, as opposed to `.deadline` (when it's
+    /// DUE). Same dismissible/uncertain-gated chip shape as every other scalar attribute above; see
+    /// `TaskItem.startTime`'s own doc comment for why this is deliberately inert (never drives
+    /// ordering/eligibility/reminders on its own — that's still `.deadline`'s job).
+    case startTime
+}
+
+/// T-overdue (2026-07-28, confirm-card overdue nudge): the confirm card's client-side,
+/// deterministic answer to "did the parser hand back a deadline that's already in the past AT
+/// CAPTURE TIME" (e.g. "submit the report this morning" said at 3pm) — a plain `Date` comparison,
+/// never a model call; the server side is separately instructed to return exactly the instant the
+/// user said (never to silently push a spoken-past time into the future itself), so detecting
+/// "did that instant already pass" is this app's job, not the parser's. `originalDeadline` is
+/// `ParsedTask.deadline`'s raw value at the moment this was computed; `suggestedDeadline` is
+/// `originalDeadline` moved forward by whole calendar day(s) — never a raw 86_400-second add,
+/// which would land an hour off across a DST boundary — until it clears "now" (see
+/// `OverdueSuggestion.makeIfOverdue` below for the exact loop + its hard cap). This is a SUGGESTION
+/// only: constitution II forbids ever moving a deadline without an explicit tap, so nothing reads
+/// `suggestedDeadline` unless the user acts on it via `AppState.applyOverdueSuggestion`.
+struct OverdueSuggestion: Equatable, Sendable {
+    let originalDeadline: Date
+    let suggestedDeadline: Date
+
+    /// Pure, deterministic, and `static` so it's directly unit-testable without constructing an
+    /// `AppState`/`ConfirmDraft` at all (this task's own test guidance) — the ONE place this
+    /// task's whole "was this overdue, and what's a sane fix" logic lives; `AppState.
+    /// buildConfirmDrafts` just calls it. Calendar-DAY arithmetic, not a raw 86_400-second add:
+    /// adding seconds crosses a DST boundary an hour off in any timezone that observes one;
+    /// `Calendar.date(byAdding: .day, value: 1, to:)` preserves the wall-clock time of day across
+    /// that boundary instead (self-review "correctness"). A deadline that's several days in the
+    /// past — a stale transcript re-parsed days later, or "last Monday" said today — may STILL be
+    /// in the past after just +1 day, so this walks forward a day at a time until the candidate
+    /// clears `now`, capped at 366 iterations (a little over a year) so a corrupt/adversarial
+    /// deadline can never spin this loop forever (self-review "client-exploit"). Returns `nil`
+    /// when there's no deadline, the deadline is already in the future (the common case — no
+    /// nudge needed), `Calendar.date(byAdding:...)` returns `nil` (should not happen for `.day`,
+    /// but its `Optional` is never force-unwrapped), or the cap is hit without ever clearing `now`
+    /// — all three mean "no sane suggestion to offer," never a crash or a still-wrong suggestion.
+    static func makeIfOverdue(deadline: Date?, now: Date, calendar: Calendar = .current) -> OverdueSuggestion? {
+        guard let deadline, deadline < now else { return nil }
+        var candidate = deadline
+        for _ in 0..<366 {
+            guard let next = calendar.date(byAdding: .day, value: 1, to: candidate) else { return nil }
+            candidate = next
+            if candidate >= now {
+                return OverdueSuggestion(originalDeadline: deadline, suggestedDeadline: candidate)
+            }
+        }
+        return nil
+    }
+}
+
+/// cycle-detection-contract.md §1.2 (2026-07-29, anh Khôi: "A đợi B, B đợi C, C đợi A" must be
+/// caught and explained, not silently dropped): the confirm-card batch's current `.taskDone`
+/// cycle, if the drafts-plus-already-persisted-tasks graph has one right now. `nil` = clean —
+/// `AppState.recomputeConfirmCycle()` is the only writer, called after every mutation that can
+/// change the batch's edge set (see that method's own doc comment for the full call-site list).
+/// `PopoverView` renders a BATCH-level (not per-draft) warning row off this and locks Save while
+/// it's non-nil — unlike `conflicts`/`overdueSuggestion` above, this is a real error, not a
+/// dismissible advisory, because dismissing it wouldn't make the cycle go away.
+struct ConfirmCycle: Equatable {
+    /// Closed display path: `["A", "B", "C", "A"]` — first == last, same shape
+    /// `VolarCore.cyclePath`/`findCycle` return, just titles instead of ids.
+    var titles: [String]
+    /// Edges IN the cycle the user can remove right from the confirm card (an edge belonging to
+    /// a draft in THIS batch). An edge belonging to an already-persisted task's own condition
+    /// isn't in here — there's no draft/index for the card to dismiss it by; that half of the
+    /// cycle has to be broken from `TaskDetailView` (§4) instead.
+    var removableEdges: [RemovableEdge]
+
+    struct RemovableEdge: Equatable, Identifiable {
+        var id: String { "\(draftID)-\(conditionIndex)" }
+        var draftID: ConfirmDraft.ID
+        var conditionIndex: Int
+        /// "C waits on A" — human-readable, same "from waits on to" reading as the titles path.
+        var label: String
+    }
 }
 
 /// One confirmed task's editable confirm-card state, layered OVER a router-parsed `ParsedTask`
@@ -113,6 +253,14 @@ enum ChipKind: String, CaseIterable, Hashable, Sendable {
 struct ConfirmDraft: Identifiable, Equatable {
     let id = UUID()
     var task: ParsedTask
+    /// 2026-07-28 (confirm-list data layer, Việc 1): ticked by default — the common case is the
+    /// user wants every drafted task in the batch saved. Unticking (future `PopoverView` checkbox,
+    /// lượt 2b) excludes this draft from `confirmSave()` entirely: not created, not eligible as an
+    /// intra-batch `.taskDone` target (see `intraBatchTaskDone` below), nothing. Defaulting `true`
+    /// is exactly what makes today's behavior fall out unchanged — every existing call site
+    /// builds a fresh `ConfirmDraft` and never touches this field, so `confirmSave()` still saves
+    /// every draft it's handed, same as before this field existed.
+    var isIncluded: Bool = true
     /// Scalar attribute chips the user explicitly removed — dismissed attributes are never saved,
     /// regardless of confidence (constitution II: dismiss always wins).
     var dismissed: Set<ChipKind> = []
@@ -129,6 +277,43 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// choice. Never populated by a guess below that bar (constitution II) — an unresolved
     /// `.taskDone` is simply absent here and gets dropped at save, not committed.
     var resolvedTaskDone: [Int: UUID] = [:]
+    /// 2026-07-28 (confirm-list data layer, Việc 2 — real gap fix, not a new feature toggle):
+    /// `task.conditions` indices of `.taskDone` cases resolved against ANOTHER DRAFT in the SAME
+    /// batch rather than an already-persisted task — "xong task A thì tạo task B" said in one
+    /// breath makes A and B together, so A is nowhere in `openTasks` for `preResolveConditions` to
+    /// find; without this, that dependency was silently dropped at save (see that method's own
+    /// doc comment). The value is the OTHER `ConfirmDraft`'s `id`, deliberately NOT a real task
+    /// UUID — that task doesn't exist until `confirmSave()`'s first pass creates it. Kept as a
+    /// SEPARATE map from `resolvedTaskDone` (never both set for the same index) so a real,
+    /// already-persisted resolution can never be confused with a same-batch one that still needs
+    /// `confirmSave()`'s second pass to become a real edge — see that method's doc comment for
+    /// the two-pass save this drives.
+    var intraBatchTaskDone: [Int: ConfirmDraft.ID] = [:]
+    /// task_refs_v1 (2026-08-02, anh Khôi "update task đã có bằng giọng nói"): extra `.taskDone`/
+    /// `.afterDate` conditions merged onto THIS draft by a DIFFERENT draft's `ParsedTaskUpdate` when
+    /// that update's task reference resolved to THIS draft (`AppState.RefResolution.sibling` — "xong
+    /// task A thì B lúc 3 giờ, và A đợi C" said in one breath, where A is this draft and C is
+    /// another new task in the same batch). Kept as its OWN array, never folded into `task.
+    /// conditions`/`intraBatchTaskDone`/`resolvedTaskDone`, for two reasons: (1) these conditions
+    /// never came from THIS task's own parse at all — they arrived on a sibling draft's update
+    /// payload — so there is no `task.conditions` index for them to occupy without corrupting the
+    /// index space `dismissedConditions`/`acceptedConditions`/`resolvedTaskDone`/`intraBatchTaskDone`
+    /// all key off; (2) `task` itself stays exactly what the router produced, never mutated in place
+    /// (this struct's own header comment) — `AppState.mergeUpdateIntoSibling` DOES mutate `task.
+    /// deadline`/`startTime`/`priority` directly for the SAME merge (see that method's doc comment
+    /// for why THOSE three fields are a deliberate, narrow exception), but conditions have no single
+    /// scalar slot to overwrite, so they get this parallel array instead. `.taskDone` targets are
+    /// recorded as the OTHER draft's `id` (not yet a real task UUID), matching `intraBatchTaskDone`'s
+    /// own "resolved to a real id only in `confirmSave`'s second pass" deferral exactly.
+    enum RefCondition: Equatable {
+        case taskDone(ConfirmDraft.ID)
+        case afterDate(Date)
+    }
+    var refConditions: [RefCondition] = []
+    /// Same "`Set<Int>` of dismissed indices, the array itself never mutated" convention as
+    /// `dismissedConditions` above, scoped to `refConditions`' own index space (never shared with
+    /// `dismissedConditions` — the two arrays have completely independent indices).
+    var dismissedRefConditions: Set<Int> = []
     /// T074 (conflict advisory, `contracts/phase4-contract.md` §C/§E): computed ONCE, right when
     /// this draft is created from a fresh parse (`AppState.runParse`) — never recomputed per chip
     /// edit (self-review "performance"). Empty = clean capture; `PopoverView` renders AT MOST the
@@ -140,6 +325,330 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// every other chip on this card — see `PopoverView.conflictAdvisoryRow`). Never re-surfaces
     /// within this confirm session; recording again starts fresh, same as every other draft field.
     var conflictDismissed: Bool = false
+    /// T-overdue: computed ONCE, at the same time and for the same reason as `conflicts`/
+    /// `duplicateCandidates` right above and below — never recomputed per chip edit (self-review
+    /// "performance": re-deriving this on every keystroke would mean re-running `OverdueSuggestion.
+    /// makeIfOverdue`'s `Calendar` math on every render for no reason, since the answer to "was
+    /// this already overdue when the confirm card first appeared" cannot change mid-session — only
+    /// the user's own action, `applyOverdueSuggestion`, ever changes it, and that clears it
+    /// directly rather than re-deriving it). `nil` means either there is no deadline at all, or the
+    /// deadline was still in the future at capture time — `PopoverView.overdueAdvisoryRow` renders
+    /// nothing in either case.
+    var overdueSuggestion: OverdueSuggestion?
+    /// User tapped the overdue advisory row's text (not its "Move to tomorrow" action) to dismiss
+    /// it — same one-way, never-re-surfaces-this-session convention as `conflictDismissed` above.
+    /// Deliberately independent of `dismissed.contains(.deadline)`: dismissing the deadline CHIP
+    /// itself already hides this row too (see `PopoverView.overdueAdvisoryRow`'s render guard), so
+    /// this field only needs to cover "I saw the nudge, I don't want it" without touching the chip.
+    var overdueDismissed: Bool = false
+    /// User-edited deadline, written only by `AppState.applyOverdueSuggestion` today. `nil` until
+    /// the user actually taps "Move to tomorrow" — mirrors `editedTitle`/`effectiveTitle` below
+    /// EXACTLY: `ParsedTask` stays exactly what the parser/router produced, never mutated in place;
+    /// every edit lives in this draft layer overlaid on top instead (same "never mutated in place"
+    /// contract `editedTitle`'s own doc comment documents). Named/shaped generally (a `Date?`, not
+    /// an "overdue-fix-only" type) so a future free-form deadline picker could reuse this same
+    /// field rather than needing a second one — `applyOverdueSuggestion` just happens to be its
+    /// only writer today.
+    var editedDeadline: Date?
+    /// 2026-07-28 (confirm-list data layer, Việc 3): up to 3 already-persisted tasks whose title
+    /// looks like it might BE this same task, worth surfacing so the user can say "oh, I already
+    /// have that" instead of ending up with two rows for the same thing. Computed EXACTLY ONCE,
+    /// right when this draft is created (`AppState.buildConfirmDrafts`) — never recomputed as the
+    /// user edits chips/title (self-review "performance": that would be an O(n) `openTasks` scan
+    /// per keystroke). See `AppState.duplicateCandidates(for:in:)` for the threshold and why it's
+    /// deliberately looser than `preResolveConditions`'s auto-resolve bar.
+    var duplicateCandidates: [UUID] = []
+    /// The user's call on what to do about `duplicateCandidates` — constitution II forbids ever
+    /// picking `.useExisting` FOR the user, so this always starts (and stays, absent explicit
+    /// input from a future `PopoverView` picker, lượt 2b) at `.addNew`. `Equatable` is declared
+    /// explicitly (rather than relying on synthesis) per this task's own technical constraints.
+    enum DuplicateResolution: Equatable {
+        /// Default: create a brand-new task, exactly like today (no duplicate handling existed
+        /// before this field).
+        case addNew
+        /// The user explicitly said "that's the same task" — `confirmSave()` merges this draft's
+        /// resolved attributes/conditions INTO the existing task at this id instead of creating a
+        /// second row. Never reached without an explicit user choice.
+        case useExisting(UUID)
+    }
+    var duplicateResolution: DuplicateResolution = .addNew
+    /// User-edited title from the confirm card's editable title field (`PopoverView.taskDraftCard`).
+    /// `nil` until the user actually types something — mirrors the Windows port's
+    /// `ConfirmDraft.EditedTitle` (`voci-windows/windows/.../CaptureFlowService.cs:126-134`), but
+    /// written through `AppState.updateDraftTitle(_:forDraft:)` rather than an object reference,
+    /// since this is a `struct` (see below). Never written into `task.title` directly — `ParsedTask`
+    /// stays exactly what the parser/router produced, same "never mutated in place" contract this
+    /// whole struct's header comment already documents for every other field.
+    var editedTitle: String?
+    /// The title actually rendered and saved: the user's edit if there is one and it isn't blank
+    /// after trimming, else the parser's original `task.title`. A whitespace-only edit silently
+    /// falls back rather than blocking Save or showing an error (constitution V — glance-and-dismiss,
+    /// never a dead end).
+    var effectiveTitle: String {
+        guard let editedTitle else { return task.title }
+        // Newlines are flattened, not just trimmed at the ends: the confirm card's title field is
+        // multi-line so it can WRAP, never so a task title can contain line breaks. If Return ever
+        // reaches the field instead of saving (see PopoverView's own note on `.onKeyPress`), the
+        // break dies here rather than in the task list.
+        let flattened = editedTitle
+            .components(separatedBy: .newlines)
+            .joined(separator: " ")
+        let trimmed = flattened.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? task.title : trimmed
+    }
+    /// The deadline actually resolved and saved: `editedDeadline` if the user has set one — via
+    /// the overdue nudge's "Move to tomorrow" (`applyOverdueSuggestion`) OR a direct manual edit
+    /// through the confirm card's `DatePicker` (`AppState.setDraftDeadline`, T-edit-deadline
+    /// 2026-07-28 — the SAME write path whether the draft already had a deadline or had none at
+    /// all) — else the parser's original `task.deadline`. Same "draft layer overlays the frozen
+    /// parse" shape `effectiveTitle` above already establishes. Confidence is pinned to `1.0`
+    /// (never inherited from `task.deadline`'s own confidence) whenever `editedDeadline` is set:
+    /// the user explicitly choosing that exact instant — whether by tapping a suggestion or
+    /// picking a time by hand — IS full confidence by definition, and anything less would let it
+    /// fall into `ChipKind.deadline`'s "<0.7 needs an explicit accept" gate (`resolvedValue`) —
+    /// silently requiring a SECOND tap on the deadline chip before an already-explicit user edit
+    /// actually saves, which would make the edit a lie. `AppState.confirmSave`/`materialize`/
+    /// `mergeTransform` (and `PopoverView`'s deadline chip) all read the deadline through THIS
+    /// property, never `task.deadline` directly, specifically so any edit takes effect everywhere
+    /// the original value used to be read (self-review "save path" — see this task's final report
+    /// for the full call-site audit).
+    var effectiveDeadline: ParsedValue<Date>? {
+        if let editedDeadline {
+            return ParsedValue(value: editedDeadline, confidence: 1.0)
+        }
+        // 2026-08-01: a DERIVED deadline follows the two values it was derived from. See
+        // `rederivedDeadline` below — returns `nil` for every deadline the user actually stated, so
+        // this line is the unchanged path for all of them.
+        if let rederived = rederivedDeadline {
+            return rederived
+        }
+        return task.deadline
+    }
+
+    /// Recomputes a MACHINE-DERIVED deadline (`startTime + estimate`) whenever the user edits either
+    /// input it was built from — `nil` in every other case, so the ordinary path through
+    /// `effectiveDeadline` above is untouched.
+    ///
+    /// THE BUG THIS FIXES (2026-08-01): `IntentRouter.applyStartTimeDerivation` fills an urgent,
+    /// no-deadline utterance's `deadline` AND `estimateMinutes` from the SAME number — anh Khôi's
+    /// single "default task duration" setting — precisely so the estimate chip and the deadline chip
+    /// can never state two different durations for one task. But the confirm card's estimate chip
+    /// wrote only `editedEstimateMinutes`, and `materialize` deliberately does no date math of its
+    /// own, so changing 30' to 60' moved the estimate chip and left the deadline chip at start+30':
+    /// the exact disagreement the one-setting design exists to prevent, now visible on screen.
+    /// Editing the START TIME had the same effect — the derived deadline stayed anchored to the old
+    /// start.
+    ///
+    /// Three guards keep this narrow, and each one matters:
+    ///   - `task.deadlineIsEstimated` — the ONLY signal that this deadline was machine-derived
+    ///     rather than spoken. A user who said "5 giờ chiều phải xong" gets `false` here, so their
+    ///     stated deadline is never recomputed out from under them (constitution II).
+    ///   - `editedDeadline == nil` (enforced by the caller above) — an explicit manual deadline edit
+    ///     always wins over anything derived, in both directions.
+    ///   - a positive `estimate` and a real `startTime` — with either missing there is nothing to
+    ///     derive from, so the original derived value stands rather than being dropped.
+    ///
+    /// Confidence is INHERITED from the original derived deadline (0.75 today), never raised to
+    /// `1.0` the way `editedDeadline` is: the user edited the estimate, not the deadline — the
+    /// deadline is still the app's arithmetic, and it must keep rendering with `PopoverView
+    /// .DeadlineControl`'s "est" marker (which keys off `deadlineIsEstimated` + `editedDeadline ==
+    /// nil`, both still true here). It stays above `ParsedValue.isUncertain`'s 0.7 bar for the same
+    /// reason the derivation picked 0.75 in the first place — see `applyStartTimeDerivation`'s long
+    /// comment on why dropping below that bar silently broke the whole urgent-task feature once.
+    private var rederivedDeadline: ParsedValue<Date>? {
+        guard task.deadlineIsEstimated, let original = task.deadline else { return nil }
+        guard let start = effectiveStartTime?.value,
+              let minutes = effectiveEstimateMinutes?.value, minutes > 0 else { return nil }
+        // `Calendar`, never raw `TimeInterval` second-math — same DST-safe convention (and the same
+        // "return the value unchanged rather than fabricate one from a failed computation" handling
+        // of a `nil` overflow result) as `applyStartTimeDerivation`, which produced `original`.
+        guard let recomputed = Calendar.current.date(byAdding: .minute, value: minutes, to: start)
+        else { return nil }
+        return ParsedValue(value: recomputed, confidence: original.confidence)
+    }
+    /// User-edited notes/description from the confirm card's notes editor
+    /// (`PopoverView.notesEditor`, T-edit-notes 2026-07-28 — anh Khôi: users need to fix a
+    /// misheard/misparsed description right on the card, not just the title). `nil` until the
+    /// user actually types something — same "overlay, never mutate `ParsedTask`" contract
+    /// `editedTitle` documents above; written through `AppState.updateDraftNotes(_:forDraft:)`.
+    var editedNotes: String?
+    /// The notes actually saved: the user's edit if there is one and it isn't blank after
+    /// trimming, else the parser's original `task.notes` — same fallback shape as `effectiveTitle`
+    /// above, with ONE deliberate difference: newlines are NOT flattened here. A task title is
+    /// conceptually single-line (it only wraps for display), but notes/description is genuinely
+    /// multi-line free text — a grocery list or a set of instructions someone dictated is exactly
+    /// the kind of note where line breaks are part of the content, not an artifact of the text
+    /// field wrapping. Only the ENDS are trimmed (leading/trailing whitespace/newlines from
+    /// however the field left focus), never anything in the middle.
+    var effectiveNotes: String? {
+        guard let editedNotes else { return task.notes }
+        let trimmed = editedNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? task.notes : trimmed
+    }
+
+    // MARK: - T-edit-attrs (2026-07-29, manual-edit-contract.md §1.1): the remaining 4 confirm-card
+    // attributes anh Khôi wants editable — priority/startTime/estimate/reminder-cadence — laid out
+    // in the SAME overlay shape `editedDeadline`/`effectiveDeadline` above already establish (`nil`
+    // until the user acts, never mutate `task` in place). Each `edited*` is written by exactly one
+    // setter below (`AppState.setDraftPriority` etc.); each `effective*` is what `materialize`/
+    // `mergeTransform`/`PopoverView`'s chips must read instead of `task.*` directly — see §2.
+
+    /// User-edited priority from the confirm card's priority chip. `nil` = user chưa sửa.
+    var editedPriority: Int?              // 1...3, nil = user chưa sửa
+    /// User-edited start time from the confirm card's start-time chip.
+    var editedStartTime: Date?
+    /// User-edited estimate/duration (minutes) from the confirm card's estimate chip.
+    var editedEstimateMinutes: Int?       // > 0
+    /// User-edited reminder CADENCE (not a full policy) from the confirm card's reminder chip —
+    /// see `effectiveReminderOverride` below for how a lone period gets folded into a full
+    /// `ReminderPolicy` at read time.
+    var editedRemindPeriod: TimeInterval? // giây, > 0
+
+    /// The priority actually resolved and saved: `editedPriority` if set, else the parser's
+    /// original `task.priority`. Confidence is pinned to `1.0` whenever `editedPriority` is set —
+    /// same non-negotiable reasoning `effectiveDeadline`'s doc comment above spells out in full:
+    /// inheriting the parser's own (possibly <0.7) confidence would route an already-explicit tap
+    /// back through `ChipKind.priority`'s uncertain-accept gate (`resolvedValue`), silently
+    /// demanding a SECOND confirmation before the user's own edit actually saves — turning the edit
+    /// into a lie. `materialize`/`mergeTransform` must read priority through THIS property, never
+    /// `task.priority` directly, exactly like `effectiveDeadline`'s call sites.
+    var effectivePriority: ParsedValue<Int>? {
+        if let editedPriority {
+            return ParsedValue(value: editedPriority, confidence: 1.0)
+        }
+        return task.priority
+    }
+    /// The start time actually resolved and saved — same shape/confidence-pinning reasoning as
+    /// `effectivePriority` immediately above.
+    var effectiveStartTime: ParsedValue<Date>? {
+        if let editedStartTime {
+            return ParsedValue(value: editedStartTime, confidence: 1.0)
+        }
+        return task.startTime
+    }
+    /// The estimate/duration actually resolved and saved — same shape/confidence-pinning reasoning
+    /// as `effectivePriority` above.
+    var effectiveEstimateMinutes: ParsedValue<Int>? {
+        if let editedEstimateMinutes {
+            return ParsedValue(value: editedEstimateMinutes, confidence: 1.0)
+        }
+        return task.estimateMinutes
+    }
+    /// The reminder policy actually resolved and saved. UNLIKE the three accessors above, this
+    /// can't just swap in the raw edited value — `editedRemindPeriod` is a single cadence, not a
+    /// full `ReminderPolicy` — so it folds onto a BASE policy first: `task.reminderOverride`'s
+    /// value if the parser produced one, else `.defaultPolicy` (never `nil` — there must always be
+    /// SOME base to carry `offsets`/`repeatEvery`/`fractionsRemaining` forward from). Only
+    /// `remindPeriod` itself is overwritten; every other field of the base survives untouched
+    /// (manual-edit-contract.md §1.1). `ReminderRecord.derive` already prefers `remindPeriod` over
+    /// `fractionsRemaining` whenever both are present, so overwriting just this one field is enough
+    /// to make the user's stated cadence win — no need to also clear `fractionsRemaining` here.
+    var effectiveReminderOverride: ParsedValue<ReminderPolicy>? {
+        guard let editedRemindPeriod else { return task.reminderOverride }
+        var policy = task.reminderOverride?.value ?? .defaultPolicy
+        policy.remindPeriod = editedRemindPeriod
+        return ParsedValue(value: policy, confidence: 1.0)
+    }
+}
+
+// MARK: - task_refs_v1 (2026-08-02): "update an existing task by voice" — resolution + confirm
+// state for `ParsedCapture.taskRefs`/`.updates` (the sibling wire-layer's `Sources/Parsing/
+// ParsedCapture.swift`, consumed here BY NAME ONLY, never redefined). See `AppState.runParse`/
+// `resolveTaskRefs`/`buildConfirmUpdateDrafts`/`confirmSave` for the pipeline this state feeds.
+
+/// How ONE `ParsedTaskRef` (a fuzzy title the model referenced, e.g. "task báo cáo") resolved
+/// against this parse's snapshot — computed ONCE per ref by `AppState.resolveTaskRefs`, then shared
+/// by every `ParsedTaskUpdate` whose `refIndex` points at it (task brief: "Resolve each ref ONCE").
+/// Mirrors `ConfirmDraft.DuplicateResolution`'s "explicit enum, no raw `UUID?`" shape for the same
+/// reason: a `nil` here would conflate "resolved to nothing yet" with "not yet attempted."
+enum RefResolution: Equatable {
+    /// A confident fuzzy match against an ALREADY-PERSISTED open task (`AppState.bestFuzzyMatch`,
+    /// same ≥0.7 `Similarity.strict` bar `preResolveConditions` uses for `.taskDone` — see that
+    /// method's doc comment for why a wrong match here is real corruption, not a glance-and-ignore
+    /// hint, and therefore needs the strict scorer).
+    case existing(UUID)
+    /// A confident fuzzy match against ANOTHER draft in this SAME batch (`AppState.scoredMatches`,
+    /// same bar) — "task A ... và cập nhật task B luôn" where B is a task this very utterance is
+    /// also creating. Carries the OTHER `ConfirmDraft`'s `id`, never a real task UUID (that task
+    /// doesn't exist until `confirmSave` creates it) — same "not real until confirmSave" deferral
+    /// `ConfirmDraft.intraBatchTaskDone`'s doc comment documents for the analogous `.taskDone` case.
+    case sibling(ConfirmDraft.ID)
+    /// Neither ladder step cleared the 0.7 bar — constitution II: never auto-attach a low-confidence
+    /// or no-match reference. `PopoverView` renders a picker (`AppState.resolveUpdateTarget`) rather
+    /// than guessing; still-unresolved at Save is dropped (`confirmSave`'s own doc comment).
+    case unresolved
+}
+
+/// One confirm-card update to an ALREADY-EXISTING (or, transiently, same-batch-sibling) task,
+/// layered over a router-parsed `ParsedTaskUpdate` (the sibling-owned contract type) the SAME way
+/// `ConfirmDraft` layers over `ParsedTask` — see that struct's header comment for the "never mutate
+/// the parsed payload in place, edits live in overlay fields" contract this follows verbatim, reused
+/// rather than reinvented (task brief: "REUSE its conventions... do not invent a second interaction
+/// grammar").
+///
+/// PRODUCT DECISION (anh Khôi, 2026-08-02, hard requirement): an update to an EXISTING task is NEVER
+/// auto-committed, at ANY confidence — mutating a task that already exists is strictly riskier than
+/// creating a new one (constitution II). That is why this struct exists as a SEPARATE confirm-card
+/// entity at all, rather than folding straight into `ConfirmDraft`/`confirmSave`: every instance
+/// here (except a `.sibling`-resolved one, which never becomes a card in the first place — see
+/// `AppState.mergeUpdateIntoSibling`) renders its OWN dismissible/editable card, and only what
+/// survives on screen to the moment the user hits Save is ever applied (`AppState.confirmSave`).
+///
+/// A `.sibling`-resolved `ParsedTaskUpdate` is merged straight into its target `ConfirmDraft` at
+/// construction time and NEVER produces one of these — "the referenced task turned out to be one the
+/// user is creating in the same breath," so its fields flow through that draft's OWN chips
+/// (`AppState.mergeUpdateIntoSibling`), which already carry the exact same confirm/dismiss gate this
+/// struct provides for an `.existing` target. `resolution` therefore only ever holds `.existing` or
+/// `.unresolved` for an instance that actually reaches `AppState.confirmUpdateDrafts` — `.sibling`
+/// stays a valid case on the shared `RefResolution` enum (so `resolveTaskRefs`'s ladder has one
+/// return type for all three outcomes) but is unreachable here in practice; `PopoverView` falls back
+/// to the `.unresolved` picker rather than rendering nothing if that invariant is ever violated.
+struct ConfirmUpdateDraft: Identifiable, Equatable {
+    let id = UUID()
+    /// 1-based, into `ParsedCapture.taskRefs` — the wire contract's own indexing convention,
+    /// preserved verbatim (not converted to 0-based) so a `// UNVERIFIED`/telemetry log naming this
+    /// index always matches what the router/server actually said.
+    var refIndex: Int
+    /// The fuzzy title the model referenced (`ParsedTaskRef.titleQuery`) — display fallback for the
+    /// `.unresolved` picker's label and for `AppState.logCorrection`-style telemetry when this draft
+    /// is dropped unresolved at Save (there is no `ParsedTask.sourceTranscript` to log against here,
+    /// unlike `ConfirmDraft`, since this struct has no `ParsedTask` of its own).
+    var sourceTitleQuery: String
+    var resolution: RefResolution
+    var deadline: ParsedValue<Date>?
+    var startTime: ParsedValue<Date>?
+    /// APPENDS to the existing task's notes at Save — never overwrites (see `AppState.
+    /// mergeNotesAppending`, the SAME helper `ConfirmDraft`'s own merge-into-existing path already
+    /// uses, reused verbatim here rather than a second copy).
+    var notesAppend: ParsedValue<String>?
+    var priority: ParsedValue<Int>?
+    var addConditions: [ParsedUpdateCondition]
+
+    /// The 4 fields above, as a dismiss/accept KEY set — deliberately a NEW small enum, not a reuse
+    /// of `ChipKind`: `ChipKind` also carries `estimate`/`reminder`/`recurrence`/`kind`/
+    /// `followUpReview`, none of which this struct has a field for, so reusing it verbatim would let
+    /// `dismissed`/`accepted` hold meaningless states (e.g. "estimate dismissed" on a struct with no
+    /// estimate). The MECHANICS below (present/dismissed/uncertain-needs-accept) are the exact same
+    /// gate `ConfirmDraft.dismissed`/`.accepted`/`AppState.resolvedValue` already apply — see
+    /// `AppState.resolvedUpdateValue`, the direct sibling of `resolvedValue` scoped to this enum —
+    /// so this is "reuse the CONVENTION," not "invent a new grammar," per the task brief's own
+    /// framing of that distinction.
+    enum Field: Hashable {
+        case deadline, startTime, notesAppend, priority
+    }
+    /// Chip explicitly removed by the user — never saved, regardless of confidence (constitution
+    /// II: dismiss always wins, same as `ConfirmDraft.dismissed`).
+    var dismissed: Set<Field> = []
+    /// Explicit tap-to-accept for an uncertain (<0.7) field chip, same gate `ConfirmDraft.accepted`
+    /// enforces for a brand-new task's attributes.
+    var accepted: Set<Field> = []
+    /// `addConditions` indices the user explicitly removed — same `Set<Int>`-over-the-array
+    /// convention as `ConfirmDraft.dismissedConditions` (the array itself is never mutated).
+    var dismissedAddConditions: Set<Int> = []
+    /// Card-level dismiss (task brief: "Card-level dismiss removes the whole update") — also how the
+    /// `.unresolved` picker's "Skip" resolves (`AppState.resolveUpdateTarget(_: to: nil)`), mirroring
+    /// `dependencyPicker`'s own "Skip — no dependency" -> `dismissCondition` wiring.
+    var cardDismissed: Bool = false
 }
 
 // MARK: - Phase 5 (T036): voice-done confirm state (contract A `VoiceDoneIntent`/`VoiceMatch`)
@@ -195,6 +704,20 @@ struct UpcomingDayGroup: Identifiable, Equatable {
     let tasks: [TaskItem]
 }
 
+/// One implementation-intention cue currently on screen (`AppState.cueBanner`'s value type,
+/// specs/006-cues-and-waiting/design.md §2 Việc B / §3). A thin DISPLAY projection of `TaskCue` —
+/// never the type itself, and `CueKind` is deliberately NOT carried through here at all: design.md
+/// §3 forbids ever rendering "wake"/"dayEnd"/"unknown" on screen, and the surest way to guarantee
+/// that is to not even hand the renderer a `kind` to accidentally interpolate. `createdAt` is
+/// carried only so the view can phrase a calm, date-aware lead-in ("Tối qua anh nói…" vs "Anh
+/// nói…") without reaching back into `AppState`/`TaskCue` for it.
+struct CueBanner: Identifiable, Equatable {
+    var id: UUID { taskId }
+    let taskId: UUID
+    let verbatim: String
+    let createdAt: Date
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -218,6 +741,19 @@ final class AppState {
     /// v1 single `ParsedTask?` now that one utterance can yield a compound/multi-task result
     /// (contract "Confirm + materialize": multi-task confirm, ≤10). Empty = nothing to confirm.
     var confirmDrafts: [ConfirmDraft] = []
+    /// task_refs_v1 (2026-08-02): confirm-card updates to EXISTING tasks from the last parse's
+    /// `ParsedCapture.taskRefs`/`.updates` — a `.sibling`-resolved update never lands here at all
+    /// (see `ConfirmUpdateDraft`'s own doc comment), so this is only ever `.existing`/`.unresolved`
+    /// entries. Empty = nothing to confirm, same "no reference in this utterance" degrade every
+    /// other reader of this property treats identically to the pre-task_refs_v1 behavior
+    /// (`PopoverView`'s new section renders nothing at all when this is empty — self-review
+    /// "no-reference path pixel-identical").
+    var confirmUpdateDrafts: [ConfirmUpdateDraft] = []
+    /// cycle-detection-contract.md §1.2: `nil` = batch sạch (no `.taskDone` cycle right now).
+    /// Non-nil means `PopoverView` must show the batch-level cycle warning and LOCK Save — see
+    /// `ConfirmCycle`'s own doc comment and `AppState.recomputeConfirmCycle()`. Only that method
+    /// writes this; every other reader treats it as derived state.
+    private(set) var confirmCycle: ConfirmCycle?
     /// T036: populated INSTEAD OF `confirmDrafts` when `finishRecording` classifies the transcript
     /// as `.complete`/`.clearExternal` (contract A) — routes to a distinct one-tap/disambiguation
     /// card in `PopoverView` rather than the normal parsed-task confirm card. `nil` = no voice-done
@@ -255,18 +791,63 @@ final class AppState {
     /// The transcript awaiting a decision in `pendingCloudConsent`, resumed by `resolveCloudConsent`.
     private var pendingParseTranscript: String?
 
+    // MARK: - Typed capture (⌃⌥T, `Sources/Views/TextCapturePanel.swift`) — "type one line, hit
+    // Add task, done." A SEPARATE state machine from `captureState` above, deliberately: the typed
+    // popup is a smaller surface with no recording/parsing-in-place/multi-second-wave visuals, and
+    // — for the genuinely simple case (2026-07-28, Việc 4: one task, no duplicate hint, no
+    // condition) — skips the confirm-card review pause `captureState == .parsed` exists for (see
+    // `submitTextCapture()`'s doc comment for exactly why and how it still reuses the SAME
+    // underlying save path). Anything more complex hands off to that SAME review pause instead of
+    // guessing (`applyTextCaptureParseResult`'s own doc comment). Mutually exclusive with
+    // `captureState`'s voice surface by construction (`openTextCapture()`/`handleHotkey()` below,
+    // and `VolarApp.swift`'s `syncCapturePanel()`) — never both non-idle/non-closed at once.
+    enum TextCaptureState: Sendable, Equatable {
+        case closed
+        case editing
+        case saving
+        case saved(titles: [String])
+        case failed(String)
+    }
+    var textCapture: TextCaptureState = .closed
+    var textCaptureInput: String = ""
+    /// Monotonic guard mirroring `captureSession`'s role (see that property's doc comment) but
+    /// scoped to the text-capture surface only. Kept as its OWN counter — never shared with
+    /// `captureSession` — because a text capture and a voice capture can never be in flight at the
+    /// same time (mutual exclusion is enforced by tearing the OTHER surface down before opening
+    /// this one; see `openTextCapture()`), so there is no scenario where one counter needs to
+    /// invalidate the other's in-flight work; keeping them separate just avoids one surface's
+    /// cancel/retry accidentally bumping — and thereby invalidating — the other's guard for no
+    /// reason.
+    private var textCaptureSession = 0
+
     // MARK: - Phase 4: reminder / voice-delivery / triage settings (contract E)
 
     /// Persisted (`voiceDeliveryModeKey`); default `.visualPlusVoice` per contract B.
     private(set) var voiceDeliveryMode: VoiceDeliveryMode
     /// Persisted (`globalReminderPolicyKey`); default `ReminderPolicy.defaultPolicy`.
     private(set) var globalReminderPolicy: ReminderPolicy
+    /// Persisted (`defaultTaskDurationMinutesKey`); default `30`. anh Khôi chốt 2026-07-29: ONE
+    /// setting doing two jobs — the `estimateMinutes` a task gets when the model/user didn't give
+    /// one, AND the number of minutes added to `startTime` to derive a deadline for an urgent,
+    /// no-deadline utterance (`IntentRouter.applyStartTimeDerivation`). Same number both places on
+    /// purpose, so the confirm card's estimate chip and its deadline chip can never disagree about
+    /// how long the task is meant to take. Valid range 5...480 minutes — see `setDefaultTaskDurationMinutes`
+    /// and this property's `init` read below for why out-of-range/absent values fall back to 30.
+    private(set) var defaultTaskDurationMinutes: Int
     /// FR-018 weekly triage: task id -> instant last explicitly "kept" via `triageKeep(_:)`, so
     /// `staleTasks` doesn't immediately re-offer something the user just decided to keep. Falls
     /// back to `createdAt` for any task never explicitly kept (best available staleness proxy —
     /// see `staleTasks`'s doc comment for the full seam note). Lightly persisted so a relaunch
     /// mid-week doesn't lose "just kept" state.
     private var triageKeptAt: [UUID: Date]
+    /// FR-030: task ids that have ALREADY been shown the one-time "want to split this up?"
+    /// invite (`switchBreakdownSuggestion`) — checked before ever arming it again, so a task that
+    /// crosses the switch-away threshold a second, third, ... time is never re-asked. Persisted
+    /// (same `UserDefaults`-array-of-`uuidString` shape as `triageKeptAt`'s own dictionary
+    /// persistence right above) so a relaunch can't re-ask a question the user already answered —
+    /// this is the "bền qua restart" half of the FR-030 "one-time" rule. Never surfaced to the
+    /// user in any form (no badge, no visible count) — purely an internal gate.
+    private var switchBreakdownOffered: Set<UUID>
 
     // Focus session
     var focusActive: Bool
@@ -285,15 +866,138 @@ final class AppState {
 
     var showMorningFrog = false
     var showBreakdown = false
+    /// Which task the "Break down into steps…" context-menu action (`TaskRow.swift`,
+    /// `TodayView.swift` x2, `triageBreakdown(_:)` below) was invoked on — `nil` while the sheet
+    /// is closed. Kept as a SEPARATE property rather than folding it into `showBreakdown` itself
+    /// (e.g. `showBreakdown: TaskItem?`) because `VolarApp.swift` (outside this change's allowed
+    /// files) already binds `.sheet(isPresented:)` to the bare `Bool` and constructs
+    /// `TaskBreakdownView(onSave:onClose:)` from it; changing that shape would require editing a
+    /// file this task is not permitted to touch. `TaskBreakdownView` already receives the full
+    /// `AppState` via `.environment(appState)` in that same `VolarApp.swift` wiring, so it reads
+    /// this property directly instead of needing a new init parameter — no seam is actually
+    /// missing, just routed differently than a single merged property would be.
+    ///
+    /// Every call site that sets `showBreakdown = true` MUST also set this in the same call
+    /// (`openBreakdown(for:)` below is the one place that does both, and is now the only way to
+    /// open the sheet) — the two are logically one piece of state, split only by the file-
+    /// boundary constraint above. A plain (not `private(set)`) `var`, same convention as
+    /// `captureState`/`confirmDrafts`/`textCapture` above: this codebase keeps state-machine
+    /// properties directly test-drivable rather than encapsulated behind a setter method, and
+    /// `Tests/` (this task's one other allowed location) relies on exactly that to unit-test the
+    /// breakdown state machine without awaiting a real network round trip.
+    var breakdownTask: TaskItem?
+    /// Monotonic token guarding the async breakdown fetch (`fetchBreakdown`, mirrors
+    /// `captureSession`/`textCaptureSession`'s exact shape) — bumped by every `openBreakdown(for:)`
+    /// and by `closeBreakdown()`, so a fetch already in flight when the sheet is dismissed (by
+    /// Cancel/Edit, Esc, or the system sheet-close control — `TaskBreakdownView`'s `.onDisappear`
+    /// calls `closeBreakdown()` on ALL of those paths, since `VolarApp.swift`'s `.sheet(
+    /// isPresented:)` binding only flips the bare `Bool` and cannot be taught to call back into
+    /// this file) can never land on — or worse, silently populate — a DIFFERENT task's freshly
+    /// reopened sheet.
+    private var breakdownSession = 0
+    /// State machine for the real (cloud-routed) breakdown fetch — `TaskBreakdownView` renders
+    /// directly off this instead of ever holding its own copy, same "single source of truth,
+    /// View is a pure function of AppState" convention as `confirmDrafts`/`captureState` above.
+    /// Plain `var`, same test-drivability reasoning as `breakdownTask` above.
+    var breakdownFetchState: BreakdownFetchState = .idle
     /// T034/FR-018: the weekly stale-task triage batch card (`TriageView`, sibling-owned §D).
     /// `VolarApp`'s main-window `.task` gates setting this `true` to once per ISO week (mirrors
     /// `frogLastShown`'s once-per-day pattern) and only when `staleTasks` is non-empty — this flag
     /// itself carries no additional gating so previews/tests can drive it directly.
     var showTriage = false
     var reminderBanner: ReminderBanner? = nil
-    /// The task currently shown in the detail sheet, by id — `nil` means the sheet is closed.
+    /// The task currently shown in the detail panel, by id — `nil` means the panel is closed.
     /// Kept as an id (not a snapshot) so `detailTask` below always reflects live edits/toggles.
+    /// Was a `.sheet` gate before the panel-refactor pass (specs/005-cursor-retheme/panel-
+    /// refactor.md); the signature and every call site are unchanged, only the presentation is.
     var detailTaskID: UUID?
+    /// ⌘K command bar (`Sources/Views/CommandBar.swift`, "Volar Graphite" pass §4.2) — presented as
+    /// an overlay over the main window's content in `VolarApp.swift`, not a `.sheet`. Presentation-
+    /// only, same shape as `detailTaskID`'s bare-flag convention: `CommandBar` keeps its own local
+    /// draft text and reuses the EXISTING `textCaptureInput`/`submitTextCapture()` typed-capture
+    /// pipeline (`Sources/Views/TextCapturePanel.swift`'s ⌃⌥T popup uses the same two) to actually
+    /// parse/save — this flag never forks that pipeline, it only controls whether the ⌘K overlay
+    /// itself is on screen. See `openCommandBar()`/`closeCommandBar()` below.
+    var showCommandBar = false
+
+    // MARK: - Switch ("đổi gió") state — read/written by both `Sources/Views/FocusOverlay.swift`'s
+    // "Switch" button and `Sources/Views/TodayView.swift`'s hero-card "Switch" button (see the
+    // "Switch" MARK further down for the actual behavior). Same "additive, not part of the frozen
+    // §4 surface" category as the modal/banner state directly above.
+
+    /// FR-030: task pending the one-time "want to split this up?" invite, or `nil`. Armed by
+    /// `maybeOfferBreakdown(taskID:newCount:)` the moment a task's `switchAwayCount` first crosses
+    /// `switchBreakdownThreshold`; cleared by `dismissSwitchBreakdownSuggestion()`/
+    /// `acceptSwitchBreakdownSuggestion()`. Either way `switchBreakdownOffered` has already
+    /// recorded that this task got its one chance, so it can never re-arm for the same id.
+    var switchBreakdownSuggestion: TaskItem?
+
+    /// Dashboard-only Switch override (`TodayView`'s hero card): while set to a still-open task's
+    /// id, `dashboardActiveTask` shows THAT task instead of the engine's raw `activeTask` pick.
+    /// Deliberately ephemeral — never persisted — a relaunch always starts back at the engine's
+    /// own pick, same as `activeTask` always has. `FocusOverlay`'s own separate Switch mechanism
+    /// (`focusIndex`-based) is completely independent of this and is unaffected.
+    private var dashboardSwitchOverrideID: UUID?
+
+    // MARK: - "Stuck?" state (anh Khôi, 2026-07-29) — read/written by both `FocusOverlay`'s and
+    // `TodayView`'s hero-card "Stuck?" button, same "one definition, two call sites, never allowed
+    // to drift" convention as the Switch/breakdown-invite state directly above. Three DIFFERENT
+    // reasons a task doesn't get started, three DIFFERENT responses — "chia nhỏ" (breakdown) only
+    // ever fixed the "this is too big" reason; this state machine adds the other two.
+    //
+    // Deliberately no counting/scoring anywhere in this section: how many times "Stuck?" (or any
+    // one reason under it) gets tapped is never recorded, never shown, never persisted — this
+    // whole feature is a way to get UNSTUCK, not a metric about the user.
+
+    /// Which task the "Stuck?" reason picker is open for right now — `nil` means the picker is
+    /// closed. Mirrors `breakdownTask`'s "one point of entry" shape: both Stuck buttons call
+    /// `openStuckPicker(for:)` and nothing else, neither view owns any Stuck-specific state itself.
+    var stuckPickerTask: TaskItem?
+
+    /// State machine for the "dread" reason's async message fetch ONLY. The "too_big" reason never
+    /// touches this at all — it routes straight into the existing `openBreakdown(for:)` flow (see
+    /// `chooseStuckReason` below) — and "cant_start" never touches this either (no model call, see
+    /// `startStuckCantStartTimer`).
+    enum StuckDreadState: Equatable, Sendable {
+        case idle
+        case loading
+        /// A real, model-produced message (on-device FM or Cloud — see `IntentRouter.stuckDread`).
+        case loaded(String)
+        /// No model reachable right now (no FM, not opted into Cloud, offline, quota exhausted, or
+        /// a response that failed decode/cap validation) — `Self.stuckDreadFallbackMessage` is
+        /// shown instead: a STATIC, pre-written sentence (the app's own honest words about itself
+        /// having nothing to say right now) rather than silence or an invented claim about the
+        /// task's content. Mirrors `BreakdownFetchState.failed`'s "tell the truth, never fabricate"
+        /// rule for the exact same reason.
+        case fallback
+    }
+    var stuckDreadState: StuckDreadState = .idle
+    /// Whichever task `stuckDreadState` currently describes — `nil` while idle. Kept distinct from
+    /// `stuckPickerTask`: the picker is already dismissed (`chooseStuckReason` clears it
+    /// synchronously) by the time a dread fetch is even in flight.
+    var stuckDreadTask: TaskItem?
+    /// Monotonic guard token, exact same shape as `breakdownSession`/`captureSession` — a fetch
+    /// still in flight when the user dismisses the banner (or reopens Stuck on a different task)
+    /// can never land on/populate a state that's moved on.
+    private var stuckDreadSession = 0
+
+    /// Static fallback copy for the "dread" reason when no model is reachable. This is the APP's
+    /// own pre-written sentence — never a guess about the specific task's content — so showing it
+    /// never violates the "never fabricate details about the task" rule the real (model-produced)
+    /// path follows; it only ever describes the app's own present inability to say something more
+    /// specific. Tone: no exclamation mark, no coaching, no diagnosis — matches `SweepView.swift`'s
+    /// established no-shame copy. Still points at a concrete, bounded, physical action (not "just
+    /// try harder") so tapping "Stuck?" with no network is never a dead end.
+    static let stuckDreadFallbackMessage =
+        "Nothing specific to suggest right now. Two minutes on any small physical piece of it still counts."
+
+    // "cant_start" reason: a plain 2-minute countdown, permission to do absolutely anything — NOT
+    // bound to any specific task. See `startStuckCantStartTimer`'s doc comment (further down, next
+    // to `startFocus()`) for why this is a small dedicated timer rather than reusing
+    // `startFocus()`/`focusSecondsLeft`/`focusTick()`.
+    var stuckTimerActive = false
+    var stuckTimerSecondsLeft = 0
+    private var stuckTimer: Timer?
 
     // MARK: - Guided tour (coach-mark walkthrough shown right after onboarding; `TourOverlay`,
     // `TourModel`, `TourAnchor` — `Sources/Views/Tour/*`). Same "additive, not part of the frozen
@@ -326,8 +1030,10 @@ final class AppState {
     /// Replaces the v1 `NLParser` direct call (contract "Confirm + materialize" / T025: "Replace
     /// any v1 direct-HeuristicNLParser call with the router"). `IntentRouter` is owned by the
     /// T019 agent (`Sources/Parsing/IntentParsing.swift`, landed) — constructed with its own
-    /// defaults for `foundationModel`/`heuristic`, wired here with a real `cloudGate:`
-    /// (`DefaultCloudParseGate`, bottom of this file) so the Local↔Cloud choice this file owns
+    /// default for `foundationModel` (2026-07-28: no more `heuristic:` parameter to default —
+    /// that tier was disconnected from the router; see `IntentRouter.init`'s doc comment), wired
+    /// here with a real `cloudGate:` (`DefaultCloudParseGate`, bottom of this file) so the
+    /// Local↔Cloud choice this file owns
     /// (`parseEnginePreference` / `cloudParseConsent` / `resolveCloudConsent`) reaches the router.
     /// `cloud:` is now wired with `ConfigParseCredentialProvider` (a placeholder credential source):
     /// the Cloud tier is fully connected and user-switchable from Settings, but stays inert
@@ -383,9 +1089,19 @@ final class AppState {
     // right after each one awaits its actor. `SettingsView`'s Account tab reads these directly
     // instead of awaiting an actor itself, matching how every other `SettingsView` tab only ever
     // touches plain `AppState` properties/methods.
+
     var accountEmail: String?
     var accountTier: AccountTier = .free
     var subscriptionStatus: SubscriptionStatus?
+    /// Backlog "1 free month of Pro" promo codes: set by a SUCCESSFUL `redeemPromoCode(_:)` so
+    /// `SettingsView` can show a one-line "Pro until <date>" confirmation, mirroring how
+    /// `accountError` already gives that same method's FAILURE path somewhere to land instead of
+    /// inventing a parallel notification/toast mechanism. `nil` = nothing to confirm (fresh
+    /// session, or the last redeem attempt failed/hasn't happened) — deliberately never cleared
+    /// automatically on the NEXT unrelated account action (matches `accountEmail`/`accountTier`'s
+    /// own "stays until explicitly replaced" convention elsewhere in this section), only ever
+    /// overwritten by another successful redeem.
+    var lastRedeemedUntil: Date?
     /// Inline error text for the Account tab (Apple sign-in / OTP / purchase / delete failures).
     /// Deliberately separate from any other error surface in this file — account actions are
     /// user-initiated from Settings, not part of the capture pipeline's error states.
@@ -502,9 +1218,26 @@ final class AppState {
     /// Same seam as above, for the global default `ReminderPolicy` (used when a task has no
     /// `reminderOverride`) — JSON-encoded `ReminderPolicy` (`Recurrence.swift`).
     static let globalReminderPolicyKey = "volar.globalReminderPolicy"
+    /// Same seam as `globalReminderPolicyKey` above, one level down (2026-07-29): `internal`, NOT
+    /// `private` — `IntentRouter.currentDefaultDurationMinutes()` (`Sources/Parsing/
+    /// IntentParsing.swift`) reads this exact key directly (no frozen init parameter to thread a
+    /// value through, same reasoning as `voiceDeliveryModeKey`'s doc comment above). Referenced BY
+    /// NAME from that file (`AppState.defaultTaskDurationMinutesKey`) rather than a duplicated
+    /// string literal, so the two sides can never drift apart — see `IntentParsing.swift` for the
+    /// read side. `nonisolated` for the exact reason `cloudParseConsentKey` above is: a `static let`
+    /// inside a `@MainActor` type inherits that isolation, and the reader
+    /// (`IntentRouter.currentDefaultDurationMinutes()`) is deliberately `nonisolated` so the
+    /// off-main `CloudParser`/`FoundationModelParser` side can reach it — without this the reader
+    /// fails to compile with "main actor-isolated static property ... cannot be referenced from a
+    /// nonisolated context". Unlike `voiceDeliveryModeKey`/`globalReminderPolicyKey` right above,
+    /// whose only sibling reader (`ReminderScheduler`) is itself `@MainActor` and so needs nothing.
+    nonisolated static let defaultTaskDurationMinutesKey = "volar.defaultTaskDurationMinutes"
     /// FR-018 weekly triage "keep" bookkeeping — see `triageKeptAt`'s doc comment. Local to this
     /// file; no sibling reads this one.
     private static let triageKeptAtKey = "volar.triageKeptAt"
+    /// FR-030 "already offered the breakdown invite" bookkeeping — see `switchBreakdownOffered`'s
+    /// doc comment. Local to this file; no sibling reads this one.
+    private static let switchBreakdownOfferedKey = "volar.switchBreakdownOffered"
     /// FIX 4: `accent`/`density` used to only ever be assigned from this `init`'s parameters —
     /// there was no read-back from `UserDefaults` here (unlike every other Settings → Appearance
     /// control: `ambientKey`/`customImageKey` right above both get one) and no write anywhere
@@ -524,6 +1257,15 @@ final class AppState {
     /// everyone through it again just by bumping the suffix, without touching this file's read/write
     /// call sites (`init` below / `endTour()` further down).
     private static let hasSeenTourKey = "volar.hasSeenTourV1"
+    /// 006-cues-and-waiting (design.md §2 Việc B) / backlog.md "(A) RE-ENTRY": last moment the app
+    /// genuinely became active — an APP-scoped key, deliberately NOT `lastTouchedAt` on `TaskItem`
+    /// (the re-entry/decay backlog item's own PER-TASK staleness clock, a different concern the
+    /// task brief for this feature explicitly says not to conflate). Named to match exactly what
+    /// backlog.md's "(A) RE-ENTRY" entry already proposes for its own future use ("khoá UserDefaults
+    /// `volar.lastActiveAt`"), so whichever feature lands second reads/writes the SAME key instead
+    /// of inventing a duplicate. Read+written only by `recordAppBecameActive(now:)` below — see that
+    /// method's own doc comment for the read-before-write ordering this key's correctness depends on.
+    static let lastActiveAtKey = "volar.lastActiveAt"
 
     init(
         store: TaskStore? = nil,
@@ -569,7 +1311,22 @@ final class AppState {
         // system language on first launch. "auto" lets both engines auto-detect until the user
         // picks a specific locale in Settings (see `autoRecognitionLocaleID`'s doc comment).
         self.recognitionLocaleID = UserDefaults.standard.string(forKey: Self.recognitionLocaleKey) ?? Self.autoRecognitionLocaleID
-        self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .appleOnDevice
+        // Cloud-first default (product decision, 2026-07-27): a NEVER-PERSISTED user gets `.groq`
+        // now, not `.appleOnDevice` — the server side (Groq speech, free tier at 20/day) is live,
+        // so defaulting to on-device meant it went unused. This ONLY changes the fallback on the
+        // right of `??`; `SpeechEngineChoice(rawValue:)` still parses whatever string is ACTUALLY
+        // persisted first, so a user who already picked an engine (in Settings, `setSpeechEngine`
+        // below) keeps exactly that choice on every future launch — this line only fires for a key
+        // that was never written. The existing degradation ladder is untouched: `selectedEngine`
+        // (below) still falls back to `speech` (Apple on-device) whenever Groq isn't actually usable
+        // — not configured (no signed-in session: `GroqEngine.isConfigured` requires
+        // `KeychainStore.loadSession() != nil`, and ONLY that as of 2026-07-27 — the `&&
+        // Entitlements.cachedIsPro` half was removed when cloud speech opened to the free tier at
+        // 20/day, see `GroqTranscriptionClient.swift`) or `groqDegradedThisSession` (a mid-run
+        // 403/429). So a signed-out user with this
+        // new default still transcribes 100% on-device on every capture, exactly as before — the
+        // default only changes WHICH engine gets attempted first once an account is configured.
+        self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .groq
         self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
         self.voiceDeliveryMode = VoiceDeliveryMode(
             rawValue: UserDefaults.standard.string(forKey: Self.voiceDeliveryModeKey) ?? ""
@@ -580,6 +1337,12 @@ final class AppState {
         } else {
             self.globalReminderPolicy = .defaultPolicy
         }
+        // `UserDefaults.integer(forKey:)` returns `0` for a key that has never been set — that is
+        // NOT the same claim as "the user chose 0 minutes" (0 isn't even in the valid 5...480
+        // range), so a missing key and a corrupted/out-of-range stored value both fall back to the
+        // same 30-minute default rather than persisting/using 0.
+        let storedDuration = UserDefaults.standard.integer(forKey: Self.defaultTaskDurationMinutesKey)
+        self.defaultTaskDurationMinutes = (5...480).contains(storedDuration) ? storedDuration : 30
         if let raw = UserDefaults.standard.dictionary(forKey: Self.triageKeptAtKey) as? [String: Double] {
             self.triageKeptAt = raw.reduce(into: [:]) { partial, pair in
                 guard let id = UUID(uuidString: pair.key) else { return }
@@ -587,6 +1350,15 @@ final class AppState {
             }
         } else {
             self.triageKeptAt = [:]
+        }
+        // FR-030 "already offered the breakdown invite" set — same string-array `UserDefaults`
+        // shape `hasSeenTourKey`-adjacent persisted flags use elsewhere in this file, just a
+        // collection instead of a single `Bool`. Absent/corrupt storage degrades to "never offered
+        // anyone" (empty set), never to a crash.
+        if let raw = UserDefaults.standard.array(forKey: Self.switchBreakdownOfferedKey) as? [String] {
+            self.switchBreakdownOffered = Set(raw.compactMap { UUID(uuidString: $0) })
+        } else {
+            self.switchBreakdownOffered = []
         }
         // Guided tour: read-only override, same shape as every other persisted-choice read above —
         // absent means "never run before" (the honest default for a fresh install), so `Bool` here
@@ -596,6 +1368,7 @@ final class AppState {
         self.captureState = .idle
         self.liveTranscript = ""
         self.confirmDrafts = []
+        self.confirmUpdateDrafts = []
         self.focusActive = false
         self.focusPaused = false
         self.focusSecondsLeft = 25 * 60
@@ -668,6 +1441,18 @@ final class AppState {
         // general (no public system-wide "is any app playing audio" API without an entitlement)
         // — calendar-busy (P3) + call/mic remain the real guards for that case.
         self.reminderGate.isOtherAudioPlaying = { [weak self] in self?.ambientSound.isPlaying ?? false }
+        // `ReminderContextGate.swift`'s own header comment names this same "nil means not wired
+        // yet" extension point ("mic capture belongs to Sources/Speech/SpeechCapture.swift, owned
+        // elsewhere") — `captureState == .recording` IS that local-mic-capture signal (it's driven
+        // by this same speech-capture flow), so it's wired here alongside `isOtherAudioPlaying`
+        // rather than left open.
+        self.reminderGate.isLocalMicCaptureActive = { [weak self] in self?.captureState == .recording }
+        // ReminderScheduler.swift's own doc comment on `isVolarCapturing` names this exact missing
+        // line: a full-screen takeover must never fight Volar's own capture UI. Same "assign here,
+        // after every stored property above is initialized" placement and `[weak self]` shape as
+        // `reminderGate.isOtherAudioPlaying` immediately above — `scheduler` is optional (`nil`
+        // without a store, per its own doc comment further up), so this is a no-op in that case.
+        self.scheduler?.isVolarCapturing = { [weak self] in self?.captureState == .recording }
         speech.setLocale(Self.appleRecognitionLocale(for: self.recognitionLocaleID))
         groq.languageCode = Self.groqLanguageCode(for: self.recognitionLocaleID)
         // CAPTURE SEAM (AppLinkHandler.swift's own file header): wire `volar://capture?text=...`
@@ -688,6 +1473,30 @@ final class AppState {
         // kicks off. Called last, same reasoning as `appLinkHandler?.onCapture` immediately above:
         // every stored property is settled by this point, and this call captures `self`.
         startAccountLifecycle()
+
+        // 006-cues-and-waiting (design.md §2 Việc B): registered ONCE here, in `init`, rather than
+        // `activateServices()` — that method is deliberately called TWICE (main window's `.task` +
+        // `AppDelegate.applicationDidFinishLaunching`, both documented idempotent for everything
+        // currently inside it). A `NotificationCenter` observer has no such idempotency: registering
+        // it there would attach a SECOND handler on the second call, so every real activation would
+        // fire `recordAppBecameActive` twice — two handlers racing to read the same "previous"
+        // `lastActiveAt` before either writes `now`, silently breaking that method's own
+        // read-before-write contract. `init` runs exactly once per `AppState` instance, and there is
+        // exactly one instance for the app's lifetime (`VolarApp.init()`'s own doc comment), so this
+        // is the one place a single registration is guaranteed. `@Sendable` + explicit
+        // `Task { @MainActor in ... }` hop for the same reason `AppDelegate`'s own notification
+        // closures need it (`VolarApp.swift`'s `requestAuthorization`/wake-observer comments): a
+        // MainActor-inferred closure literal invoked by a system API that doesn't itself run on
+        // `@MainActor` traps at runtime under Swift 6 isolation checking — `queue: .main` here makes
+        // that moot in practice (the callback DOES land on main), but the hop costs nothing and keeps
+        // this immune to that gotcha regardless.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor in
+                self?.recordAppBecameActive()
+            }
+        }
     }
 
     // MARK: - Account & Entitlements actions
@@ -723,25 +1532,6 @@ final class AppState {
             let status = await Entitlements.shared.refreshStatus()
             self.subscriptionStatus = status
             self.accountTier = status?.tier ?? (Entitlements.cachedIsPro ? .pro : .free)
-        }
-    }
-
-    func signInWithApple() {
-        accountBusy = true
-        accountError = nil
-        _Concurrency.Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.accountBusy = false }
-            do {
-                let user = try await AccountService.shared.signInWithApple()
-                self.accountEmail = user.email
-                await Entitlements.shared.relinkCurrentEntitlements()
-                self.refreshAccountState()
-            } catch AccountError.cancelled {
-                // Not a real failure — user dismissed the sheet. No error text shown.
-            } catch {
-                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
-            }
         }
     }
 
@@ -843,6 +1633,45 @@ final class AppState {
         }
     }
 
+    /// Backlog "1 free month of Pro" promo codes. Same shape as every other method in this
+    /// section — `accountBusy` flip, one `_Concurrency.Task`, `defer` clears the busy flag, result
+    /// mirrored into `@Observable` state, failure into `accountError`. `code` is passed straight
+    /// through to `AccountService.redeemPromoCode` UNTOUCHED (no trimming/uppercasing here) — that
+    /// method owns the ONE normalization step for the whole client (see its doc comment); this
+    /// method only trims to decide whether the field is blank, which is a UI no-op guard, not a
+    /// second normalization site feeding the network request.
+    func redeemPromoCode(_ code: String) {
+        guard !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        accountBusy = true
+        accountError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.accountBusy = false }
+            do {
+                let result = try await AccountService.shared.redeemPromoCode(code)
+                // Source of truth stays the SERVER: never hand-set `accountTier = .pro` (or
+                // anything else) from `result` directly — `refreshAccountState()` re-reads tier/
+                // quota from `subscription/status` exactly like every other successful account
+                // action above does, so a local guess about what was just granted can never drift
+                // from what the account actually has.
+                self.refreshAccountState()
+                // `lastRedeemedUntil` is purely a display convenience for the confirmation banner —
+                // reuses the SAME ISO8601-with-fractional-seconds fallback `ParsedTaskValidation`
+                // already defines (`Sources/Parsing/IntentParsing.swift`) rather than hand-rolling a
+                // second date parser, since `RedeemResult.expiresAt` is the same
+                // Supabase-timestamp-shaped string every other `expiresAt` field in this file's
+                // sibling `AccountModels.swift` already is. A parse failure just leaves the prior
+                // confirmation (or `nil`) in place — the redemption itself already succeeded
+                // (`refreshAccountState()` above is unaffected), so this is display-only best effort.
+                if let expiresAt = result.expiresAt, let date = ParsedTaskValidation.parseISO8601(expiresAt) {
+                    self.lastRedeemedUntil = date
+                }
+            } catch {
+                self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
+            }
+        }
+    }
+
     // MARK: - Derived task groupings
 
     var nowTasks: [TaskItem] { tasks.filter { !$0.done && $0.when == .now } }
@@ -851,7 +1680,7 @@ final class AppState {
     var openTasks: [TaskItem] { nowTasks + laterTasks }
     var frogTask: TaskItem? { tasks.first { $0.frog && !$0.done } }
 
-    /// The task currently shown in the detail sheet (looked up live so edits/toggles reflect).
+    /// The task currently shown in the detail panel (looked up live so edits/toggles reflect).
     var detailTask: TaskItem? { detailTaskID.flatMap { id in tasks.first { $0.id == id } } }
 
     /// THE integration point with feature 001 (VolarCore nextTask engine): recomputed from the
@@ -861,6 +1690,152 @@ final class AppState {
         let engineTasks = tasks.map { $0.snapshot() }
         guard let winner = VolarCore.nextTask(from: engineTasks, now: clock(), calendar: .current) else { return nil }
         return tasks.first { $0.id == winner.id }
+    }
+
+    /// `TodayView`'s hero card reads THIS, not `activeTask` directly — everywhere else in the app
+    /// (menu bar title, delegation-confirm targeting, guided tour gating, voice read-day) keeps
+    /// reading the engine's raw, un-overridable `activeTask` exactly as before; this property is
+    /// additive, scoped to the one screen that needs a Switch override.
+    ///
+    /// While `dashboardSwitchOverrideID` names a task that's still genuinely open, THAT task wins
+    /// over whatever the engine would otherwise pick — this is what makes "Switch" actually move
+    /// the hero card's spotlight, since nothing about the switched-away task's own data (status/
+    /// priority/deadline) ever changes, so the engine would otherwise keep re-selecting it forever.
+    /// Self-healing: once the override task is done/deleted it silently drops out of `openTasks`
+    /// and this falls straight back to `activeTask`, with no explicit teardown needed.
+    var dashboardActiveTask: TaskItem? {
+        if let overrideID = dashboardSwitchOverrideID,
+           let overridden = openTasks.first(where: { $0.id == overrideID }) {
+            return overridden
+        }
+        return activeTask
+    }
+
+    // MARK: - 006-cues-and-waiting: cue banner + waiting-mode holder (T5, wire UI)
+    //
+    // Both surfaces below follow the SAME ambient contract (design.md §3, this task's own brief):
+    // no push notification, no sound, no full-screen takeover, no badge/count. `TodayView` is the
+    // one screen that renders them (see that file's `todayScrollView`), alongside the other
+    // "renders nothing when there's nothing to show" ambient banners already living there
+    // (`SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/`DelegationAmbientSection`).
+
+    /// One cue on screen right now, or `nil`. Written ONLY by `recordAppBecameActive`/
+    /// `noteNaturalCueTouch` below — never a live computed property, because `CueFiring.firing`'s
+    /// wake-gap math is only meaningful measured against the value of `lastActiveAtKey` from
+    /// BEFORE it gets overwritten for this activation; a computed property re-reading the (by then
+    /// already-updated) key on every render would see a gap of zero forever.
+    private(set) var cueBanner: CueBanner?
+
+    /// design.md §3 ("Cue chỉ nhắc một lần mỗi lần fire. Im lặng = 'đừng hỏi nữa', không phải 'hỏi
+    /// to hơn'."): `CueFiring.firing`/`.pending` are pure functions with no memory of their own by
+    /// design (see that file's own header) — this is the caller-side bookkeeping the task brief
+    /// explicitly assigns to T5. Keyed by task id (a task carries at most one `TaskCue` —
+    /// `TaskItem.cue: TaskCue?` — so the task's own id is a sufficient identity for "already shown
+    /// this one"). In-memory only, matching every other "this session" concept already in this file
+    /// (`captureSession`/`resurfaceSession`): a fresh launch is a fresh session, on purpose — this
+    /// is NOT the same thing as `TaskCue.expiresAt` (the 48h swallow-proof floor lives in the data
+    /// itself; this is purely "don't repeat myself within one run").
+    private var shownCueTaskIDs: Set<UUID> = []
+
+    /// Every open task's cue, paired with its owning task id — the exact shape `CueFiring.firing`/
+    /// `.pending` take as their `cues:` parameter. `openTasks`, not `tasks`: a cue on a `.done`/
+    /// `.archived` task has nothing left to remind anyone about (mirrors every other ambient
+    /// surface in this file reading `openTasks` rather than the raw store).
+    private var openCues: [(taskId: UUID, cue: TaskCue)] {
+        openTasks.compactMap { task in task.cue.map { (taskId: task.id, cue: $0) } }
+    }
+
+    /// Picks the first candidate id not already shown this session — factored out as a `static`,
+    /// zero-dependency function (no `Date()`, no `UserDefaults`, no `self`) purely so it's
+    /// unit-testable on its own, per this task's own instruction to pull decision logic out of
+    /// `AppState` wherever it can be (precedent: `FullScreenEscalationDecision.swift`). Trivial by
+    /// design — the interesting logic already lives in `CueFiring`; this is only the "don't repeat"
+    /// half that has to live somewhere stateful.
+    static func firstUnshownCue(_ candidates: [UUID], alreadyShown: Set<UUID>) -> UUID? {
+        candidates.first { !alreadyShown.contains($0) }
+    }
+
+    /// The app genuinely became active (`NSApplication.didBecomeActiveNotification`, registered
+    /// once in `init` above) — the ONLY call site allowed to run `CueFiring.firing`'s wake-gap math,
+    /// and the ONLY writer of `Self.lastActiveAtKey`.
+    ///
+    /// ORDER IS LOAD-BEARING (flagged explicitly per this task's own brief, so nobody "cleans up"
+    /// the ordering later): the OLD value must be read and handed to `CueFiring.firing` BEFORE the
+    /// new value overwrites it. Write first and every gap becomes `now - now == 0`, which never
+    /// clears `CueFiring.wakeGapHours`, which means the wake cue silently never fires again — a
+    /// bug no test can catch (nothing here is wrong in isolation; only the ORDER of two correct
+    /// lines is), which is exactly why this comment exists.
+    func recordAppBecameActive() {
+        // `clock()`, never a bare `Date()` default — this file's established seam for "now" (every
+        // other action method reads it the same way, e.g. `activateServices()`'s own call sites)
+        // specifically so tests can inject a fixed clock via `AppState.init(clock:)` rather than
+        // fighting the real wall clock. A default-parameter expression can't reference `self.clock`
+        // anyway (default values may not capture `self`), which is the other reason this reads it
+        // from inside the body instead of as `now: Date = ...`.
+        let now = clock()
+        let previous = UserDefaults.standard.object(forKey: Self.lastActiveAtKey) as? Date
+        let firingIDs = CueFiring.firing(now: now, lastActiveAt: previous, cues: openCues)
+        UserDefaults.standard.set(now, forKey: Self.lastActiveAtKey)
+
+        guard let chosenID = Self.firstUnshownCue(firingIDs, alreadyShown: shownCueTaskIDs),
+              let cue = openTasks.first(where: { $0.id == chosenID })?.cue
+        else { return }
+        shownCueTaskIDs.insert(chosenID)
+        cueBanner = CueBanner(taskId: chosenID, verbatim: cue.verbatim, createdAt: cue.createdAt)
+    }
+
+    /// The "natural touch point" half of design.md §2 Việc B ("Ở điểm chạm tự nhiên (mở popover):
+    /// dùng CueFiring.pending(...), cũng ambient"). Called from `TodayView`'s `.onAppear` — the main
+    /// window becoming visible is this app's most central "the user is looking at Volar right now"
+    /// moment; `PopoverView` was deliberately NOT used for this (judgment call, flagged in this
+    /// task's final report): it is capture-flow-specific (recording/confirm cards for a brand-new
+    /// utterance), and surfacing an unrelated already-saved task's cue in the middle of capturing a
+    /// different one would read as a non-sequitur, not an ambient aside.
+    ///
+    /// Never overwrites an already-showing banner (`cueBanner != nil` guard) — a wake cue that just
+    /// fired this activation takes priority over a merely-pending one; this only fills the slot in
+    /// when nothing is on screen yet.
+    func noteNaturalCueTouch() {
+        guard cueBanner == nil else { return }
+        let now = clock() // same `clock()`-not-`Date()` seam as `recordAppBecameActive` above.
+        let pendingIDs = CueFiring.pending(now: now, cues: openCues)
+        guard let chosenID = Self.firstUnshownCue(pendingIDs, alreadyShown: shownCueTaskIDs),
+              let cue = openTasks.first(where: { $0.id == chosenID })?.cue
+        else { return }
+        shownCueTaskIDs.insert(chosenID)
+        cueBanner = CueBanner(taskId: chosenID, verbatim: cue.verbatim, createdAt: cue.createdAt)
+    }
+
+    /// `WaitingMode.decide`'s live reading, or `nil` when there's no anchor in the next 4 hours
+    /// (design.md §2 Việc C: silence is the default — an empty horizon must never be dressed up
+    /// into ambient noise). A plain computed property, unlike `cueBanner` above: `WaitingMode.decide`
+    /// has no gap-since-an-overwritten-value hazard the way `CueFiring.firing` does, so recomputing
+    /// it fresh on every render (same "no cached state that can drift" convention `activeTask`
+    /// itself already documents) is both safe and simpler than latching it.
+    var waitingModeDecision: WaitingMode.Decision? {
+        let now = clock()
+        return WaitingMode.decide(now: now, tasks: tasks, eligibleOrder: Self.eligibleOrder(from: tasks, now: now))
+    }
+
+    /// The FULL eligible-task ordering — `WaitingMode.decide`'s `eligibleOrder:` parameter contract
+    /// (design.md §2 Việc C): "phải là danh sách eligible ĐẦY ĐỦ engine trả về, KHÔNG được cắt
+    /// top-N."
+    ///
+    /// 2026-08-09 (Opus review of T5, specs/006-cues-and-waiting): this used to be a hand-copied
+    /// reimplementation of `VolarCore.eligibleTasks`'s filter rule, written because that function
+    /// (and the ordered list this needs) had no public entry point at the time. That copy was a
+    /// live silent-drift risk — a future change to `NextTask.swift`'s eligibility rule would compile
+    /// cleanly here while this file quietly kept computing the OLD rule, corrupting
+    /// `WaitingMode.Decision.anchorIsEligible` with no compiler error and no test able to catch it.
+    /// `VolarCore.eligibleTasksOrdered(from:now:calendar:)` is now public for exactly this caller
+    /// (see that function's own doc comment in `NextTask.swift`) — this is a thin wrapper, not a
+    /// second copy of the rule. `static` + taking `tasks`/`now` as plain parameters (no `self`) so
+    /// it stays unit-testable without an `AppState` instance, same reasoning as `firstUnshownCue`
+    /// above; the tests in `Volar/Tests/AppStateCueAndWaitingTests.swift` now exercise the real
+    /// engine rule through this wrapper instead of a parallel one.
+    static func eligibleOrder(from tasks: [TaskItem], now: Date) -> [UUID] {
+        let snapshot = tasks.map { $0.snapshot() }
+        return VolarCore.eligibleTasksOrdered(from: snapshot, now: now, calendar: .current).map(\.id)
     }
 
     // MARK: - Sidebar sections (Upcoming/Inbox) — 2026-07-27, port of Windows
@@ -1043,6 +2018,85 @@ final class AppState {
         syncCalendarMirror()
     }
 
+    /// T-edit-attrs (2026-07-29, manual-edit-contract.md §1.4 — anh Khôi: `TaskDetailView` becomes
+    /// sửa-tại-chỗ for an already-created task): the ONE write path for the 7 manually-editable
+    /// fields on an existing task. `TaskDetailView` (Agent C) is the only caller today, but any
+    /// future editor must route through here too, never through `TaskStore` directly, so every
+    /// side effect below (reminders/eligibility/calendar) always fires together rather than being
+    /// re-implemented (and possibly forgotten) at each call site. Mirrors `addTask`/`toggleDone`'s
+    /// own "before/now snapshot -> store mutation -> tasks = store.fetchAll() -> reminders ->
+    /// eligibility -> calendar" shape exactly — see those two immediately above for the established
+    /// convention this follows. `id` not found (task deleted out from under an open detail view,
+    /// e.g. via the notification "Done" action bypass `refreshFromStore`'s own doc comment
+    /// describes) is a silent no-op, same "can't act on what isn't there anymore" convention every
+    /// other mutator in this file (`setDraftDeadline` et al.) already follows for an unknown id.
+    func updateTask(
+        _ id: UUID,
+        title: String,
+        details: String,
+        priority: Priority,
+        startTime: Date?,
+        deadline: Date?,
+        durationMinutes: Int?,
+        remindPeriod: TimeInterval?
+    ) {
+        let before = tasks
+        let now = clock()
+        guard let index = tasks.firstIndex(where: { $0.id == id }) else { return }
+        var edited = tasks[index]
+        edited.title = title
+        // `details` AND `notes` MUST both be written to the SAME value (manual-edit-contract.md
+        // §1.4): `details` is what `TaskDetailView`/`speakDetails` actually render/read aloud;
+        // `notes` is the "did a human really author a note" signal `mergeTransform`'s notes-append
+        // path (and `effectiveNotes` elsewhere) keys off of. Writing only one leaves the other
+        // stale — either the edit never shows, or a later confirm-card merge treats a real edit as
+        // if nothing was ever typed. Empty -> `nil` for `notes`, same "blank collapses to absent"
+        // convention `effectiveNotes`/`effectiveTitle` already use elsewhere in this file, so
+        // clearing the description doesn't leave a phantom empty-string note behind.
+        edited.details = details
+        edited.notes = details.isEmpty ? nil : details
+        edited.priority = priority
+        edited.startTime = startTime
+        edited.deadline = deadline
+        edited.durationMinutes = durationMinutes
+        // `remindPeriod == nil` does NOT mean "wipe the whole override" — a task can carry a real
+        // `reminderOverride` (parser-derived offsets/fractionsRemaining, or a previous edit) that
+        // simply never had a fixed cadence set; clearing the cadence back to "not set" must leave
+        // the rest of that override alone rather than nuking it. Only when there was no override to
+        // begin with does it stay `nil` (nothing to carry forward, manual-edit-contract.md §1.4).
+        // Mirrors `ConfirmDraft.effectiveReminderOverride`'s "fold the one edited field onto a base
+        // policy" shape (§1.1) — `globalReminderPolicy` is the base here instead of `.defaultPolicy`
+        // since an already-created task's baseline behavior is the user's own configured default,
+        // not the app's hardcoded starting point.
+        if let remindPeriod {
+            var base = edited.reminderOverride ?? globalReminderPolicy
+            base.remindPeriod = remindPeriod
+            edited.reminderOverride = base
+        } else if var base = edited.reminderOverride {
+            base.remindPeriod = nil
+            edited.reminderOverride = base
+        }
+
+        if let store {
+            store.updateEditableFields(from: edited)
+            tasks = store.fetchAll()
+        } else {
+            tasks[index] = edited
+        }
+        // manual-edit-contract.md §1.4 step 5: LUÔN gọi, không điều kiện. `ReminderScheduler.
+        // scheduleReminders(taskId:)` re-reads the task fresh from the store and replaces every
+        // `.scheduled`-but-not-yet-sent row (deadline edits land here, per that method's own doc
+        // comment) while preserving `.delivered`/`.satisfied` history — so this must run even when
+        // `deadline`/`remindPeriod` didn't actually change (the call is idempotent) and even when
+        // `deadline` was just cleared to `nil` (that still needs `derive` to re-run and fall into
+        // its nudge-backoff branch instead of leaving a stale deadline-based row armed). Skipping
+        // this on a "nothing dated changed" edit would leave a notification armed for the OLD time
+        // after the user changes it, e.g. 15:00 -> 20:00 with the OS still holding the 15:00 request.
+        scheduler?.scheduleReminders(taskId: id)
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        syncCalendarMirror()
+    }
+
     /// WG-C (FR-020 gap fix): `ReminderScheduler.handleAction`'s notification "Done" action calls
     /// `store.toggle(...)` directly rather than routing through this file's `toggleDone` funnel (by
     /// design — FR-014/015/016 forbid the notification path from touching the app/AppState
@@ -1094,9 +2148,96 @@ final class AppState {
         syncCalendarMirror()
     }
 
-    // MARK: - Detail sheet (Phase 1: click a task row to see/hear its full description)
+    // MARK: - Dependency editing on an already-created task (cycle-detection-contract.md §1.3/§4)
+    //
+    // `TaskDetailView`'s "Waiting on" section (Agent 4) routes here rather than through
+    // `TaskStore` directly, same "one write path, every side effect fires together" convention
+    // `updateTask` above already establishes — validation happens INLINE, at the moment the user
+    // taps, not deferred to some later commit step, because a rejected dependency has to explain
+    // itself right there.
 
-    func openDetail(_ id: UUID) { detailTaskID = id }
+    /// Adds "task `id` waits on task `dependsOn` (via `.taskDone`)" — the dependency picker's
+    /// resolution. Returns `nil` on success, or an English message on rejection. Checks
+    /// `VolarCore.cyclePath` itself BEFORE ever calling `TaskStore.addCondition`, rather than
+    /// catching that method's own `TaskStoreError`/`DependencyError`, specifically so the message
+    /// can show the FULL closed path ("A → B → C → A") — `DependencyError.cycle(from:to:)` only
+    /// ever carries the two endpoint titles, not enough to explain a longer loop (contract's own
+    /// "vì sao phải làm" table).
+    @discardableResult
+    func addTaskDependency(_ id: UUID, dependsOn: UUID) -> String? {
+        // UNVERIFIED: no other mutator in this file returns an error string when `store` is nil
+        // (every other one either no-ops silently for the no-store preview/test fallback, or —
+        // like `confirmSave` — has its own separate in-memory branch). `TaskDetailView` only ever
+        // shows an already-persisted task, which requires a real store to exist, so this branch
+        // should be unreachable in practice; picked the most honest message over a silent no-op.
+        guard let store else { return "No task store available." }
+        guard tasks.contains(where: { $0.id == id }), tasks.contains(where: { $0.id == dependsOn }) else {
+            return "That task no longer exists."
+        }
+        let snapshot = tasks.map { $0.snapshot() }
+        if let cycle = VolarCore.cyclePath(from: id, dependsOn: dependsOn, in: snapshot) {
+            return cycleMessage(for: cycle)
+        }
+        let before = tasks
+        do {
+            try store.addCondition(.taskDone(dependsOn), to: id)
+        } catch {
+            // Defense in depth only — the `cyclePath` check above already covers every case
+            // `TaskStore.addCondition` itself would otherwise reject for a `.taskDone` payload.
+            return (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+        }
+        let now = clock()
+        // §1.3: gỡ/thêm một cạnh có thể mở khoá task khác ngay — same three-step refresh tail
+        // every other store-backed mutator in this file uses (`addTask`/`toggleDone`/`deleteTask`).
+        tasks = store.fetchAll()
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        syncCalendarMirror()
+        return nil
+    }
+
+    /// Removes the condition at `conditionIndex` from task `id` — the "×" next to a "Waiting on"
+    /// row. No-op (per `TaskStore.removeCondition`'s own contract, §1.4) if `id`/`conditionIndex`
+    /// don't resolve to anything, same "can't act on what isn't there anymore" convention every
+    /// other mutator in this file follows for an unknown id.
+    func removeTaskDependency(_ id: UUID, at conditionIndex: Int) {
+        guard let store else { return }
+        let before = tasks
+        // UNVERIFIED: `TaskStore.removeCondition(at:from:)` is Agent 4's addition
+        // (cycle-detection-contract.md §1.4) — called here exactly per its frozen signature.
+        guard store.removeCondition(at: conditionIndex, from: id) else { return }
+        let now = clock()
+        // §1.3: removing an edge can make some OTHER task newly eligible right now — this is
+        // exactly the "gỡ một cạnh có thể làm task khác đủ điều kiện chạy ngay" case the contract
+        // calls out; skipping this would silently lose that "unblocked" notification.
+        tasks = store.fetchAll()
+        notifyEligibilityAndScheduleResurface(before: before, now: now)
+        syncCalendarMirror()
+    }
+
+    /// Builds "A → B → C → A" from a closed cycle path of ids (`VolarCore.cyclePath`/`findCycle`'s
+    /// shared shape — first element == last), resolving each id against `tasks`' own titles.
+    /// Deliberately NOT `DependencyError`-based (see `addTaskDependency`'s own doc comment) — this
+    /// carries the whole loop, not just the two endpoints that would close it.
+    private func cycleMessage(for cycle: [UUID]) -> String {
+        let titles = cycle.map { taskID in
+            tasks.first(where: { $0.id == taskID })?.title ?? "Unknown task"
+        }
+        let path = titles.joined(separator: " \u{2192} ")
+        return "Can't add that dependency — it would create a loop: \(path). None of these could ever start."
+    }
+
+    // MARK: - Detail panel (Phase 1: click a task row to see/hear its full description; panel-
+    // refactor pass, specs/005-cursor-retheme/panel-refactor.md §5 item 1, turned the sheet this
+    // comment used to describe into an inspector panel — same `detailTaskID` signature throughout)
+
+    /// Toggle, not a plain setter (panel-refactor.md §4): tapping the row that is ALREADY open
+    /// closes the panel instead of re-opening it on itself. This is deliberately the panel's only
+    /// non-Esc close gesture besides the Close button (path (c) in `TaskDetailView`'s commit
+    /// mechanism) — Esc is intentionally NOT bound to the panel (§4 of the spec: it already belongs
+    /// to the capture popover's `escCancelButton` and the ⌘K command bar; a third claimant risks
+    /// closing the wrong surface). Every call site (`TaskRow`, NOW spotlight, `NextPeekRow`) keeps
+    /// calling this the same way — a second tap on the same row is the only new behavior.
+    func openDetail(_ id: UUID) { detailTaskID = (detailTaskID == id) ? nil : id }
     func closeDetail() { detailTaskID = nil }
     /// Speaks a task's description (falls back to its title when there's no description).
     func speakDetails(of task: TaskItem) {
@@ -1141,6 +2282,8 @@ final class AppState {
         captureState = .recording
         liveTranscript = ""
         confirmDrafts = []
+        confirmUpdateDrafts = []
+        confirmCycle = nil
         voiceDoneConfirm = nil
         voiceDoneNoMatchTranscript = nil
         captureErrorDetail = nil
@@ -1285,6 +2428,8 @@ final class AppState {
         captureState = .idle
         liveTranscript = ""
         confirmDrafts = []
+        confirmUpdateDrafts = []
+        confirmCycle = nil
         voiceDoneConfirm = nil
         voiceDoneNoMatchTranscript = nil
         pendingCloudConsent = false
@@ -1339,6 +2484,300 @@ final class AppState {
         }
     }
 
+    /// The REAL "user pressed the hotkey / tapped the create-task button" entry point — ⌃⌥M
+    /// (`HotkeyManager`), the sidebar mic button, and the morning-frog voice CTA all route here
+    /// instead of `toggleCapture()` above (kept as-is for whatever else still calls it directly;
+    /// see call-site notes in `HotkeyManager.swift`/`Sidebar.swift`/`MorningFrogView.swift`).
+    ///
+    /// `toggleCapture()`'s plain two-way branch (`.recording` -> stop, everything else -> start)
+    /// has no case for "a confirm card is already up": pressing the hotkey again while
+    /// `captureState == .parsed` used to blow the pending confirm away and open a brand-new
+    /// recording session instead of doing what a user pressing "the capture key" again obviously
+    /// means — save what's already parsed. This method fixes exactly that, and adds the guard the
+    /// old code never had: several other states are ALSO a pending yes/no question the hotkey must
+    /// never silently answer for the user (constitution II) —
+    /// `voiceDoneConfirm`/`voiceDoneNoMatchTranscript` (T036's glance-and-dismiss voice-done card)
+    /// and `pendingCloudConsent`/`pendingServerConsent` (the one-time privacy opt-ins, both of
+    /// which reuse `captureState == .error` as their prompt surface — see those properties' own
+    /// doc comments). None of those four are things "press capture again" should resolve, so this
+    /// bails out before even looking at `captureState` when any of them is active.
+    func handleHotkey() {
+        // Mutual exclusion with the typed-capture popup (⌃⌥T, `openTextCapture()` below): pressing
+        // ⌃⌥M while that popup is open closes it first — "whichever hotkey the user pressed wins"
+        // (task brief). Falls through to the exact same guard/switch below afterward, so ⌃⌥M's own
+        // toggle semantics are completely unchanged by this; it only ever adds "and also close the
+        // OTHER capture surface first" as a side effect when there's something to close.
+        if textCapture != .closed {
+            cancelTextCapture()
+        }
+
+        guard voiceDoneConfirm == nil,
+              voiceDoneNoMatchTranscript == nil,
+              !pendingCloudConsent,
+              !pendingServerConsent
+        else { return }
+
+        switch captureState {
+        case .recording:
+            stopCapture()
+        case .parsed:
+            confirmSave()
+        case .parsing, .saving:
+            // Mid-flight — nothing sane to toggle to; a stray hotkey press here is a no-op rather
+            // than racing `finishRecording`/`confirmSave`.
+            break
+        case .idle, .done, .error:
+            startCapture()
+        }
+    }
+
+    // MARK: - Typed capture (⌃⌥T) — "type one line, hit Add task, done."
+    //
+    // Voice capture's pipeline (unchanged, see above): `finishRecording` -> `proceedToCapture`
+    // (one-time cloud-parse consent gate) -> `runParse` (parses, builds `confirmDrafts`) ->
+    // user reviews the confirm card -> `confirmSave()` commits (batching / `store.addBatch`
+    // chunking / `tasks = store.fetchAll()` / `notifyEligibilityAndScheduleResurface` /
+    // `scheduleRemindersForSavedItems` / `syncCalendarMirror` / `finishSaveUI`). The typed flow
+    // below shares that exact same `buildConfirmDrafts`/`confirmSave()` pipeline — parse -> build
+    // `confirmDrafts` the way `runParse` does -> either save immediately (the genuinely simple
+    // case: one task, no duplicate hint, no condition of any kind) or hand off to the SAME
+    // confirm-card review the voice flow uses (2026-07-28, Việc 4 — see
+    // `applyTextCaptureParseResult`'s own doc comment for exactly which case is "simple" and why).
+    // Either way this reuses `confirmSave()` verbatim (not a parallel save path) when it does
+    // save — every side effect `confirmSave()` produces for a voice save (reminders scheduled,
+    // calendar mirror synced, eligibility/resurface diff computed, `TaskStore.maxBatchSize`-
+    // chunked `addBatch` commits) happens exactly the same way for a typed save.
+
+    /// Opens the typed-capture popup. ⌃⌥T (`HotkeyManager`) is the only real caller.
+    func openTextCapture() {
+        // Mutual exclusion (task brief: "whichever hotkey the user pressed wins" — never show
+        // both capture surfaces at once): opening the typed popup while ANY voice-side surface is
+        // pending — an in-progress recording, a parsed-but-unsaved confirm card, a voice-done
+        // confirm, or a cloud/server consent prompt — tears all of it down uniformly via the
+        // existing `cancelCapture()` (see that method's own doc comment for the exact list it
+        // clears). `captureState != .idle` is true for every one of those cases, so this single
+        // check covers all of them without re-deriving the list here.
+        if captureState != .idle {
+            cancelCapture()
+        }
+        textCaptureSession += 1
+        textCapture = .editing
+        textCaptureInput = ""
+    }
+
+    /// Esc, or ⌃⌥M stealing the surface back (`handleHotkey()` above) — closes the popup and
+    /// discards whatever was typed. Bumping `textCaptureSession` invalidates any parse still in
+    /// flight from a `submitTextCapture()` call the user is backing out of (see that method's
+    /// stale-result guard).
+    func cancelTextCapture() {
+        textCaptureSession += 1
+        textCapture = .closed
+        textCaptureInput = ""
+    }
+
+    // MARK: - ⌘K command bar (`Sources/Views/CommandBar.swift`) — a second, in-window entry point
+    // into the SAME typed-capture pipeline as ⌃⌥T above; see that file's header comment for the
+    // full reuse chain. `showCommandBar` (declared above, near `detailTaskID`) is presentation-only.
+
+    /// Opens the ⌘K overlay. Applies the same "whichever surface the user reaches for wins" mutual-
+    /// exclusion rule `openTextCapture()` above already applies between ⌃⌥M and ⌃⌥T: tears down an
+    /// in-progress voice capture or an already-open ⌃⌥T popup first, so ⌘K never has to share the
+    /// screen with a stray floating panel/confirm card it didn't ask for. In practice this is rarely
+    /// live — `CommandBar` closes itself the instant it submits (see that file) — but it's the same
+    /// defensive guard `openTextCapture()` takes for the identical reason, not new behavior invented
+    /// for this flag.
+    func openCommandBar() {
+        if captureState != .idle {
+            cancelCapture()
+        }
+        if textCapture != .closed {
+            cancelTextCapture()
+        }
+        showCommandBar = true
+    }
+
+    /// Esc, or a submit that just fired (`CommandBar.submit()`) — closes the ⌘K overlay. Deliberately
+    /// does NOT touch `textCaptureInput`/`textCapture`: `CommandBar` keeps its own local draft text
+    /// and only ever writes into `textCaptureInput` right before calling `submitTextCapture()` — see
+    /// that view's header comment for why closing this flag first (rather than lingering to show its
+    /// own Saving/Saved/Failed state) is what keeps ⌘K from fighting the existing floating ⌃⌥T panel
+    /// over the same `textCapture` transitions.
+    func closeCommandBar() {
+        showCommandBar = false
+    }
+
+    /// Parses `textCaptureInput` and saves it — the typed equivalent of the voice flow's
+    /// `finishRecording` -> `runParse` -> (review pause) -> `confirmSave()`. Skips the review
+    /// pause ONLY for the genuinely simple case (see this section's header comment and
+    /// `applyTextCaptureParseResult`'s own doc comment for exactly which case that is, 2026-07-28
+    /// Việc 4); anything more complex hands off to the same review pause the voice flow uses.
+    /// Sync entry point; the actual parse is async, so
+    /// this hops through `_Concurrency.Task { @MainActor in ... }` exactly like `runParse` does,
+    /// with the same before-the-`await` session-token capture/guard pattern (`textCaptureSession`,
+    /// mirroring `captureSession`) so a user who hits Esc mid-parse can never have a stale result
+    /// land back on a popup they've already closed/reopened.
+    ///
+    /// CLOUD-CONSENT DIFFERENCE FROM THE VOICE PATH (deliberate — task brief): voice capture routes
+    /// through `proceedToCapture`, which interrupts with the one-time cloud-parse consent prompt
+    /// (`pendingCloudConsent`/`captureState = .error`) the FIRST time a parse is ever attempted.
+    /// This method deliberately does NOT do that — a tiny "type one line" popup is the wrong
+    /// surface to interrupt with a privacy decision; the whole point of this feature is "type →
+    /// Add task → done" with no PRIVACY pause (unrelated to the separate confirm-card review pause
+    /// a complex parse can still trigger, Việc 4 above). Instead this calls `router.parse` directly.
+    /// `IntentRouter` still applies its own `cloudGate.isOptedIn()` (+ `isOnline()`) gate
+    /// internally regardless of caller (see `IntentRouter.parse` in `IntentParsing.swift`), so an
+    /// un-opted-in user simply gets on-device (Heuristic/FoundationModel) parsing here — nothing
+    /// about their text ever reaches Cloud without the SAME consent the voice flow's one-time sheet
+    /// (or the Settings parse-engine picker) already gates. The user can opt in from either of
+    /// those two existing surfaces; this popup just never asks.
+    func submitTextCapture() {
+        // Defensive: the "Add task" button/`.onSubmit` are both disabled/no-ops while `.saving`
+        // per `TextCaptureView`, but this guards the method itself against a double-submit race
+        // (e.g. Return arriving a frame after a click already started saving).
+        guard textCapture != .saving else { return }
+        let trimmed = textCaptureInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+
+        textCapture = .saving
+        textCaptureSession += 1
+        let session = textCaptureSession
+        let now = clock()
+        let titles = openTasks.map(\.title)
+
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let results = await self.router.parse(trimmed, now: now, openTaskTitles: titles)
+            self.applyTextCaptureParseResult(results, session: session)
+        }
+    }
+
+    /// The synchronous back half of `submitTextCapture()` — split out from the `await
+    /// router.parse(...)` call above SPECIFICALLY so it's directly unit-testable without awaiting
+    /// a real (async, even if not truly network-bound for the on-device tiers) parse call, same
+    /// precedent as `resolveCloudMatch` elsewhere in this file (see that method's own doc comment).
+    /// Tests can simulate "the parse came back with N results" or "the session went stale before
+    /// the parse returned" by calling this directly with a hand-built `[ParsedTask]` and/or a
+    /// stale `session` token, instead of needing a real `IntentRouter` round trip.
+    ///
+    /// Not `private` for exactly that reason — every OTHER piece of `submitTextCapture()`'s logic
+    /// (the empty-input guard, the `.saving` re-entrancy guard, the session bump, the delayed
+    /// auto-dismiss) is either trivially pure or already covered indirectly through this method,
+    /// but the stale-session guard and the zero-drafts failure path specifically live here because
+    /// they can only be exercised AFTER an (async) parse result exists.
+    func applyTextCaptureParseResult(_ results: [ParsedTask], session: Int) {
+        // Stale? Esc (`cancelTextCapture`) or a second submit happened while this parse was in
+        // flight — mirrors `runParse`'s own `captureSession`/`captureState` guard exactly, just
+        // against the text-capture counter/state instead of the voice ones.
+        guard textCaptureSession == session, textCapture == .saving else { return }
+
+        // Same construction `runParse` uses: cap to `TaskStore.maxBatchSize`, pre-resolve the
+        // "easy" `.taskDone` conditions (intra-batch included, Việc 2), and compute the conflict
+        // advisory + duplicate hint (Việc 3) ONCE against a single shared `conflictNow` clock read
+        // shared by every draft in the batch (T074 — never recomputed per draft). Shared with
+        // `runParse` via `buildConfirmDrafts` so the two entry points can't drift apart.
+        let capped = Array(results.prefix(TaskStore.maxBatchSize))
+        let conflictNow = clock()
+        let drafts = buildConfirmDrafts(from: capped, conflictNow: conflictNow)
+
+        guard !drafts.isEmpty else {
+            // Never close the popup and silently lose what the user typed (task brief) — the
+            // field stays populated (`textCaptureInput` untouched) so they can fix and retry. In
+            // practice every current `IntentParser` tier guarantees a non-empty result for
+            // non-empty input (`IntentRouter.parse`'s own floor fallback,
+            // `Sources/Parsing/IntentParsing.swift`), same as `runParse`'s analogous branch — this
+            // exists as the defensive floor for whatever a future parser tier might legitimately
+            // fail to extract anything from, not a reachable path today.
+            textCapture = .failed("Didn't catch that.")
+            return
+        }
+
+        // Việc 4 (2026-07-28, task brief: "chỉ đi qua confirm khi phức tạp"): the typed popup's
+        // whole pitch is "type -> Add task -> done" with NO review pause — but that pitch only
+        // holds for the genuinely simple case. The instant there's more than one drafted task, a
+        // possible duplicate (Việc 3), or ANY condition at all (including one only resolvable
+        // intra-batch, Việc 2) the user is facing a real decision this tiny popup has no UI for
+        // (no checkbox, no dependency picker, no merge choice) — silently auto-resolving it here
+        // would be exactly the "guess instead of ask" constitution II forbids. So: hand off to the
+        // SAME confirm-card review the voice flow already has instead.
+        let isSimpleCase = drafts.count == 1
+            && (drafts.first?.duplicateCandidates.isEmpty ?? false)
+            && (drafts.first?.task.conditions.isEmpty ?? false)
+        guard isSimpleCase else {
+            // Populate `confirmDrafts` and flip `captureState` to `.parsed` — EXACTLY what
+            // `runParse` does on a successful voice parse. `VolarApp.swift`'s existing
+            // `observeCaptureState()`/`observeTextCaptureState()` pair (already wired, no view
+            // changes needed here — see this method's header comment) reacts to both property
+            // changes: closing the typed popup (`textCapture == .closed` hides it, mirroring
+            // `cancelTextCapture()`) and presenting the voice popover's confirm-card review
+            // (`captureState != .idle` shows it). This file only needs to set the two properties;
+            // the mutual-exclusion plumbing (`syncCapturePanel()`/`syncTextCapturePanel()`)
+            // already exists and requires no changes.
+            confirmDrafts = drafts
+            // `buildConfirmDrafts` is a pure helper with no `self` to recompute against, so this
+            // call sits right where its result actually becomes the live `confirmDrafts` instead
+            // — see `recomputeConfirmCycle`'s own doc comment. Without this, `confirmCycle` would
+            // still hold whatever a PREVIOUS confirm session left it at.
+            recomputeConfirmCycle()
+            captureState = .parsed
+            textCapture = .closed
+            textCaptureInput = ""
+            return
+        }
+
+        // THE REUSE: hand the exact same drafts `runParse` would have produced straight to
+        // `confirmSave()` — no parallel materialize/save/schedule/sync logic lives here.
+        // `confirmSave()` is synchronous end-to-end except its own trailing 900ms auto-dismiss
+        // (`finishSaveUI`, guarded by `captureSession` — untouched by anything in this method), so
+        // by the time this call returns, `captureState` already reflects the real outcome: `.done`
+        // on success, or `.error` (with `captureErrorDetail` set) if `TaskStore.addBatch` rejected
+        // the batch (e.g. a dependency cycle).
+        let addedTitles = drafts.map(\.effectiveTitle)
+        confirmDrafts = drafts
+        // Same reasoning as the branch above: a lone zero-condition draft can never itself close
+        // a cycle, but `confirmCycle` could still be stale from a previous session — and
+        // `confirmSave()` (below) now refuses to save at all while `confirmCycle != nil` (§2), so
+        // this recompute is load-bearing, not just hygiene.
+        recomputeConfirmCycle()
+        confirmSave()
+
+        if captureState == .error {
+            // A genuine `TaskStore` rejection (e.g. a dependency cycle) — surface it on the TEXT
+            // popup instead, since the user never saw a voice surface for this save.
+            // `textCaptureInput` is still untouched at this point (only cleared on the success
+            // path below), so — same as the zero-drafts branch above — the field stays populated
+            // for the user to fix and retry.
+            textCapture = .failed(captureErrorDetail ?? "Couldn't save.")
+            // `captureState == .error` here is purely an artifact of routing through the shared
+            // voice-flow method — nothing about the voice popover should be left sitting in an
+            // error state for a failure that surfaced through the TEXT popup instead (see the
+            // mutual-exclusion note on `syncCapturePanel()` in `VolarApp.swift`: the voice panel
+            // is suppressed the whole time `textCapture != .closed` regardless, but there is no
+            // reason to also leave stale error state behind for whenever `textCapture` eventually
+            // closes and voice capture becomes visible again).
+            captureState = .idle
+            captureErrorDetail = nil
+            confirmDrafts = []
+            // task_refs_v1: defensive symmetry only — this text-capture path never populates
+            // `confirmUpdateDrafts` itself (only `runParse`, the voice path, does), and
+            // `openTextCapture()` already tore any prior voice session down via `cancelCapture()`
+            // before this method could even run. Cleared here anyway so this reset stays exhaustive
+            // if that ever changes.
+            confirmUpdateDrafts = []
+            return
+        }
+
+        textCaptureInput = ""
+        textCapture = .saved(titles: addedTitles)
+        // Same delayed-dismiss convention `finishSaveUI` uses for the voice popover (900ms flash
+        // before returning to the closed state), guarded by the SAME `textCaptureSession` token
+        // captured above rather than a new timer mechanism.
+        _Concurrency.Task { @MainActor [weak self] in
+            try? await _Concurrency.Task.sleep(nanoseconds: 900_000_000)
+            guard let self, self.textCaptureSession == session else { return }
+            self.textCapture = .closed
+        }
+    }
+
     /// Opens System Settings so the user can enable Dictation (which downloads the on-device
     /// speech model). Pane URL differs across macOS versions; falls back to opening System
     /// Settings generally.
@@ -1383,10 +2822,28 @@ final class AppState {
 
     /// Local↔cloud parsing switch surfaced in Settings. Reads the SAME `cloudParseConsent` the
     /// router's Cloud tier is already gated on (`DefaultCloudParseGate`), so this is purely a
-    /// friendlier presentation of that one bit — no second source of truth. A `nil` consent
-    /// (never asked) reads as `.onDevice`, matching the privacy-first "decline ⇒ never cloud" default.
+    /// friendlier presentation of that one bit — no second source of truth.
+    ///
+    /// Cloud-first default (same product decision as `speechEngineChoice`'s `init` fallback
+    /// above): `cloudParseConsent == nil` — NEVER asked, e.g. an install that predates the
+    /// onboarding cloud-consent step, or a corrupted/cleared default — now reads as `.cloud`
+    /// instead of `.onDevice`. An EXPLICIT decision is untouched either way: `false` (the user
+    /// affirmatively declined, either via the voice-capture consent popover's "no" or by picking
+    /// on-device in Settings) still reads `.onDevice`; `true` still reads `.cloud`. So this is a
+    /// three-way match, not a `== true` binary check — flip only the `nil` case.
+    ///
+    /// IMPORTANT — this is a DISPLAY default only, not a consent bypass: `parseEnginePreference`
+    /// is read by `SettingsView`'s picker, never by the actual gate. The real gate a `nil` value
+    /// still trips is `proceedToCapture`'s `guard cloudParseConsent != nil` (below) — an
+    /// un-consented user still sees the one-time cloud-parse consent prompt before the FIRST
+    /// parse, and `DefaultCloudParseGate.isOptedIn()` (bottom of file) still reads the literal
+    /// persisted `UserDefaults` bool, which defaults `false` for an unset key regardless of what
+    /// this computed property displays. So a user who has never actually answered the consent
+    /// question sees "Cloud" pre-highlighted here (matching the new onboarding default) but Cloud
+    /// is still never ATTEMPTED until they explicitly consent somewhere (onboarding's new step,
+    /// the in-flow popover, or this same Settings picker) — no opt-in principle is bypassed.
     var parseEnginePreference: ParseEnginePreference {
-        cloudParseConsent == true ? .cloud : .onDevice
+        cloudParseConsent == false ? .onDevice : .cloud
     }
 
     /// Change the parsing engine from Settings. Persists to the existing `cloudParseConsentKey` so
@@ -1423,8 +2880,16 @@ final class AppState {
         // is always exactly the user's own tasks (self-review "security" — no cross-user/global
         // data reaches `VoiceDone`).
         switch voiceDone.classify(transcript, openTasks: voiceDoneOpenTasks) {
+        case .complete(let candidates) where candidates.isEmpty:
+            // T0xx: local Jaccard matching found the "xong/done" cue but nothing above the floor —
+            // try a cloud semantic-paraphrase rescue before giving up (see
+            // `resolveCompletionViaCloud`'s header comment). Every non-empty case below this one is
+            // untouched: local matches are never second-guessed by a network round trip.
+            resolveCompletionViaCloud(action: .complete, kind: .complete, transcript: transcript)
         case .complete(let candidates):
             presentVoiceDoneConfirm(action: .complete, candidates: candidates)
+        case .clearExternal(let candidates) where candidates.isEmpty:
+            resolveCompletionViaCloud(action: .clearExternal, kind: .clearExternal, transcript: transcript)
         case .clearExternal(let candidates):
             presentVoiceDoneConfirm(action: .clearExternal, candidates: candidates)
         case .notACompletion:
@@ -1489,6 +2954,156 @@ final class AppState {
         // a hostile/corrupted matcher result — mirrors `runParse`'s own defense-in-depth cap.
         voiceDoneConfirm = VoiceDoneConfirm(action: action, candidates: Array(candidates.prefix(10)))
         captureState = .parsed
+    }
+
+    // MARK: - T0xx: cloud completion-paraphrase rescue (empty-candidate case only)
+    //
+    // `VoiceDone.classify` detects a "xong"/"done"/"hoàn thành" cue and Jaccard-matches the rest of
+    // the utterance against open-task titles. A paraphrase ("xong cái vụ report rồi" vs. the real
+    // title "Viết báo cáo Q3") shares no tokens and scores 0.0 — `VoiceDone` correctly reports
+    // "cue present, nothing matched" as EMPTY candidates (not `.notACompletion`; see
+    // `VoiceDoneIntent`'s own doc comment). `finishRecording`'s switch above routes exactly that
+    // empty-candidates outcome here instead of straight to `presentVoiceDoneConfirm`, so a cloud
+    // semantic-match gets one shot before the user has to complete the task by hand.
+    //
+    // Quota/consent (self-review point 5): this is the ONLY call site for
+    // `IntentRouter.resolveCompletion`, and it is reached ONLY from the two empty-candidates switch
+    // arms above — a local match (any non-empty candidate list) never pays a round trip or a quota
+    // unit. `IntentRouter.resolveCompletion` itself re-applies the same `cloudGate.isOptedIn()` +
+    // `isOnline()` gate `parse` uses, so an un-opted-in user never has a transcript leave the Mac
+    // here either.
+
+    /// Confidence bar for a CLOUD-resolved completion match. This is a MODEL-PROBABILITY scale (the
+    /// LLM's own reported confidence that its chosen `matchIndex` is correct) — it is deliberately
+    /// NOT `VoiceDone.highConfidenceThreshold`, which lives on the JACCARD TOKEN-OVERLAP scale (the
+    /// fraction of shared tokens between transcript and title). The two numbers measure different
+    /// things on different scales and are never comparable or interchangeable; this constant exists
+    /// specifically so nobody is tempted to reuse `VoiceDone.highConfidenceThreshold` here instead.
+    /// Not `private` — `resolveCloudMatch` below is exposed for direct unit-testing and tests
+    /// reference this constant rather than duplicating the literal.
+    static let cloudCompletionConfidenceThreshold = 0.7
+
+    /// `finishRecording`'s `.complete`/`.clearExternal` cases call this INSTEAD of
+    /// `presentVoiceDoneConfirm` directly when local Jaccard matching (`VoiceDone`) came back with
+    /// ZERO candidates. Cloud is asked to semantically match the utterance against the SAME
+    /// open-task titles the local matcher already tried and failed on. A decline/failure/low-
+    /// confidence/mismatched-echo/stale-session result all fall through to exactly today's
+    /// behavior — `presentVoiceDoneConfirm(action:candidates: [])`, i.e. "no matching task, offer
+    /// capture instead." No new UI, no new error banner, no new alert.
+    ///
+    /// Never marks a task done automatically (self-review point 4): every exit path below either
+    /// hands a SINGLE resolved `VoiceMatch` to the EXISTING `presentVoiceDoneConfirm` (same one-tap
+    /// confirm the local-match path already uses) or hands it an empty list — there is no path here
+    /// that calls `toggleDone`/`confirmVoiceDone` or otherwise mutates a task directly.
+    private func resolveCompletionViaCloud(action: VoiceDoneAction, kind: CloudParser.CompletionKind, transcript: String) {
+        // Snapshot taken ONCE, before the network call (self-review point 3): the candidate titles
+        // sent to Cloud and the task ids resolved back out of the response MUST come from the exact
+        // same read of `openTasks`. Rebuilding after the `await` would let a reminder firing or a
+        // sync landing mid-flight shift task ordering/membership, so `matchIndex` could end up
+        // pointing at a DIFFERENT task than the one the model actually saw. `snapshot` is capped at
+        // 100 entries up front (matching `CloudParser.resolveCompletion`'s own internal cap) so the
+        // bounds this method re-checks below (`1...snapshot.count`) are checking against the exact
+        // same list whose titles were actually put on the wire — not a longer, uncapped list that
+        // would let an in-range server index silently resolve against the wrong local task.
+        let snapshot: [(id: UUID, title: String)] = Array(openTasks.prefix(100)).map { ($0.id, $0.title) }
+        guard !snapshot.isEmpty else {
+            presentVoiceDoneConfirm(action: action, candidates: [])
+            return
+        }
+
+        // Concurrency (self-review point 2): `finishRecording` is synchronous but resolution is
+        // async, so this hops through `_Concurrency.Task { @MainActor in ... }` — the same pattern
+        // `runParse` uses immediately below for the analogous new-task-parse round trip.
+        // `captureState = .parsing` keeps the UI from looking frozen on a stale state during the
+        // round trip; `captureSession` is bumped and captured BEFORE the `await` (stale-result
+        // guard) so a user who cancels and immediately re-records can never have THIS utterance's
+        // cloud match presented against the NEW recording — every exit path below either calls
+        // `presentVoiceDoneConfirm` (which sets `captureState = .parsed`, a sane terminal state) or,
+        // on a stale session, returns without touching `captureState` at all (the superseding
+        // action already put it wherever it needs to be) — never leaves it stuck in `.parsing`.
+        captureState = .parsing
+        captureSession += 1
+        let session = captureSession
+        let now = clock()
+        let titles = snapshot.map(\.title)
+
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let resolution = await self.router.resolveCompletion(transcript, now: now, kind: kind, candidates: titles)
+            // Stale? Cancel/a fresh capture/anything else that bumps `captureSession` happened
+            // while the cloud round trip was in flight — drop this result entirely rather than
+            // presenting a match for an utterance the user already walked away from (mirrors
+            // `runParse`'s identical guard).
+            guard self.captureSession == session, self.captureState == .parsing else { return }
+
+            guard let match = Self.resolveCloudMatch(resolution, snapshot: snapshot) else {
+                // `.none` (model looked, found nothing), `.unavailable` (never got a trustworthy
+                // answer), or a failed local safety check — all degrade identically to today's "no
+                // matching task" outcome. See `CloudParser.CompletionResolution`'s doc comment for
+                // why the transport layer keeps `.none`/`.unavailable` distinct even though this
+                // call site does not.
+                self.presentVoiceDoneConfirm(action: action, candidates: [])
+                return
+            }
+            // Single resolved match still goes through the EXISTING one-tap confirm card — the
+            // user confirms with one tap/word exactly as they would for a local match.
+            self.presentVoiceDoneConfirm(action: action, candidates: [match])
+        }
+    }
+
+    /// Pure decision logic for `resolveCompletionViaCloud`'s safety checks — split out as a
+    /// `static` function (not `private`) so it is unit-testable directly, without spinning up a
+    /// live `AppState`/`IntentRouter`/network stack (mirrors the file's existing `nonisolated
+    /// static` helper convention, e.g. `IntentRouter.cap`/`isValidBreakdown` in
+    /// `IntentParsing.swift`, for the same testability reason).
+    ///
+    /// Off-by-one (self-review point 1): `resolution`'s `index` is the wire's 1-BASED position.
+    /// The ONLY conversion to a 0-based array index happens right here, at `snapshot[index - 1]` —
+    /// `index == 1` picks `snapshot[0]`, the FIRST candidate, matching the locked contract
+    /// ("`candidates[matchIndex - 1]` is the chosen title"). Every other touch point in this
+    /// feature (`CloudParser.resolveCompletion`, `IntentRouter.resolveCompletion`) passes `index`
+    /// through unchanged — this is deliberately the single place the arithmetic happens, so there
+    /// is exactly one place to audit for the off-by-one class of bug this task calls out by name.
+    ///
+    /// Applies TWO independent safety checks before trusting a server-reported match, plus the
+    /// confidence bar, and returns `nil` (⇒ caller treats identically to "no candidates") unless
+    /// ALL of the following hold:
+    ///   1. `confidence >= cloudCompletionConfidenceThreshold` (model-probability scale, see that
+    ///      constant's own doc comment).
+    ///   2. `index` is in `1...snapshot.count` — re-checked here even though `CloudParser` already
+    ///      validated it against the list length it sent, because `snapshot` (this call's own
+    ///      local state) is never trusted to still agree with what the server saw without a fresh,
+    ///      local bounds check (constitution II: never trust a remote response transitively).
+    ///   3. `title` (the model's verbatim echo of the title it chose) matches, after trimming,
+    ///      `snapshot[index - 1].title` exactly. A disagreement means the model hallucinated/
+    ///      misindexed — or a candidate title was UTF-16-truncated before being sent (see
+    ///      `CloudParser.resolveCompletion`'s 200-unit-per-title cap) and the model echoed back the
+    ///      truncated form. Either way this is treated as NO match, never as "trust whichever of
+    ///      the two disagreeing values looks more plausible" — the failure mode is a false
+    ///      negative (falls back to "no matching task," never wrong), not a false positive.
+    static func resolveCloudMatch(
+        _ resolution: CloudParser.CompletionResolution,
+        snapshot: [(id: UUID, title: String)]
+    ) -> VoiceMatch? {
+        guard case .resolved(let index, let title, let confidence) = resolution else { return nil }
+        guard confidence.isFinite, confidence >= cloudCompletionConfidenceThreshold else { return nil }
+        // Bounds check written as two plain comparisons, not `(1...snapshot.count).contains(index)`:
+        // `ClosedRange(1...0)` (an empty `snapshot`) TRAPS at range construction before `.contains`
+        // ever runs. `resolveCompletionViaCloud` never calls this with an empty snapshot (guarded
+        // before the network call), but this function is `static` specifically so it's exercised
+        // directly from unit tests too — it must not crash on a malicious/malformed input the caller
+        // didn't happen to pre-filter.
+        guard index >= 1, index <= snapshot.count else { return nil }
+        let expected = snapshot[index - 1] // the ONE off-by-one conversion point, see doc comment above
+        guard expected.title.trimmingCharacters(in: .whitespacesAndNewlines)
+                == title.trimmingCharacters(in: .whitespacesAndNewlines) else { return nil }
+        // `VoiceMatch.score` is documented (`VoiceDone.swift`) as a Jaccard token-overlap value in
+        // [0, 1]; there is no separate field to carry a match's provenance (local-Jaccard vs.
+        // cloud-model-confidence). Both are already bounded to [0, 1] so this never breaks any
+        // existing consumer's range assumptions, but it IS a different scale under the same field
+        // — flagged here since this is the one place that substitution happens, and `VoiceDone.swift`
+        // itself (out of scope for this change) is not touched.
+        return VoiceMatch(taskId: expected.id, title: expected.title, score: confidence)
     }
 
     // MARK: - T042: voice delegation intent (phase6-contract.md §C, US4)
@@ -1673,12 +3288,18 @@ final class AppState {
         runParse(transcript: transcript)
     }
 
-    /// The actual `IntentRouter.parse` call, split out of `finishRecording` so the one-time
-    /// consent gate above can defer it. Builds up to `TaskStore.maxBatchSize` `ConfirmDraft`s and
-    /// pre-resolves the "easy" `.taskDone` conditions (parser-confidence >= 0.7 AND a confident
-    /// fuzzy title match) so the confirm card doesn't show a picker for those — anything left
-    /// unresolved is exactly the < 0.7 / no-match case constitution II requires a picker for
-    /// (`PopoverView`'s `dependencyPicker`).
+    /// The actual parse call, split out of `finishRecording` so the one-time consent gate above can
+    /// defer it. Builds up to `TaskStore.maxBatchSize` `ConfirmDraft`s and pre-resolves the "easy"
+    /// `.taskDone` conditions (parser-confidence >= 0.7 AND a confident fuzzy title match) so the
+    /// confirm card doesn't show a picker for those — anything left unresolved is exactly the < 0.7
+    /// / no-match case constitution II requires a picker for (`PopoverView`'s `dependencyPicker`).
+    ///
+    /// task_refs_v1 (2026-08-02): swapped `router.parse` for `router.parseCapture` — the sibling
+    /// wire-layer's superset entry point, same args as `parse`, returning `ParsedCapture` (`tasks`
+    /// plus `taskRefs`/`updates`). The FM/heuristic tiers report empty `taskRefs`/`updates` (per
+    /// that method's own doc comment), so an utterance with no reference at all degrades to exactly
+    /// today's `capture.tasks`-only behavior, byte for byte — `capture.tasks` still flows into
+    /// `buildConfirmDrafts` completely unchanged, per the task brief's explicit instruction.
     private func runParse(transcript: String) {
         captureState = .parsing
         captureSession += 1
@@ -1687,24 +3308,29 @@ final class AppState {
         let titles = openTasks.map(\.title)
         _Concurrency.Task { @MainActor [weak self] in
             guard let self else { return }
-            let results = await self.router.parse(transcript, now: now, openTaskTitles: titles)
+            let capture = await self.router.parseCapture(transcript, now: now, openTaskTitles: titles)
             // Stale? The hold ended (Esc/cancel/a second capture) while the parse was in flight —
             // mirrors `startCapture`'s authorization-pending guard.
             guard self.captureSession == session, self.captureState == .parsing else { return }
             // Defense-in-depth cap (self-review "client-exploit"): the contract promises the
             // router already enforces the 10-task cap; this survives a malformed/hostile result
             // regardless.
-            let capped = Array(results.prefix(TaskStore.maxBatchSize))
+            let capped = Array(capture.tasks.prefix(TaskStore.maxBatchSize))
             // T074: conflict advisory computed ONCE per parse, right here — never per keystroke/
             // per chip-edit (self-review "performance"). `conflictNow` is a single fresh clock
             // read shared by every draft in the batch so a multi-task confirm scores consistently
             // against the same "now" instant.
             let conflictNow = self.clock()
-            self.confirmDrafts = capped.map { parsed in
-                var draft = self.preResolveConditions(ConfirmDraft(task: parsed))
-                draft.conflicts = self.computeConflicts(for: draft, now: conflictNow)
-                return draft
-            }
+            var drafts = self.buildConfirmDrafts(from: capped, conflictNow: conflictNow)
+            // task_refs_v1: `capture.taskRefs`/`.updates` resolved against THIS exact `drafts`
+            // snapshot — a `.sibling` update merges straight into its target draft in place (no
+            // card of its own; see `mergeUpdateIntoSibling`), so `drafts` can come back changed.
+            self.confirmUpdateDrafts = self.buildConfirmUpdateDrafts(from: capture, drafts: &drafts, openTasks: self.openTasks)
+            self.confirmDrafts = drafts
+            // `buildConfirmDrafts` stays a pure helper (no `self`) — see
+            // `recomputeConfirmCycle`'s own doc comment for why the call has to live at each of
+            // its call sites, here included, rather than inside it.
+            self.recomputeConfirmCycle()
             if self.confirmDrafts.isEmpty {
                 self.captureErrorDetail = "Didn't catch that."
                 self.captureState = .error
@@ -1714,46 +3340,326 @@ final class AppState {
         }
     }
 
-    /// Auto-resolves `.taskDone` conditions the router was itself confident about (>=0.7) against
-    /// a confident fuzzy title match in `openTasks` — never a guess below either bar (constitution
-    /// II); anything short of both stays unresolved for `PopoverView`'s picker.
-    private func preResolveConditions(_ draft: ConfirmDraft) -> ConfirmDraft {
-        var draft = draft
-        let candidates = openTasks
-        for (index, condition) in draft.task.conditions.enumerated() {
-            guard case .taskDone(let titleQuery, let confidence) = condition, confidence >= 0.7 else { continue }
-            if let match = Self.bestFuzzyMatch(for: titleQuery, in: candidates), match.score >= 0.7 {
-                draft.resolvedTaskDone[index] = match.id
+    /// Shared "parsed tasks -> confirm drafts" pipeline for BOTH `runParse` (voice) and
+    /// `applyTextCaptureParseResult` (typed) — kept as ONE implementation (2026-07-28) so Việc 2's
+    /// intra-batch `.taskDone` resolution and Việc 3's duplicate hint can never drift between the
+    /// two entry points. For a single-task batch with no matching duplicate/condition this reduces
+    /// to exactly the original `capped.map { preResolveConditions(ConfirmDraft(task:)) }`
+    /// pipeline — nothing else in a 1-draft batch to intra-batch-match against, and an empty
+    /// `duplicateCandidates` never changes `confirmSave()`'s outcome — so the default/simple case
+    /// is byte-for-byte unchanged.
+    private func buildConfirmDrafts(from parsed: [ParsedTask], conflictNow: Date) -> [ConfirmDraft] {
+        // Single read, reused for BOTH the duplicate hint and the intra-batch/openTasks
+        // `.taskDone` resolution below, so every draft in this batch is scored against the exact
+        // same snapshot (the previous code read `openTasks` twice, once inside
+        // `preResolveConditions` and implicitly again via `computeConflicts`'s own `tasks` read —
+        // harmless since nothing `await`s in between, but one read is simpler to reason about).
+        let existingTasks = openTasks
+        var drafts = parsed.map { ConfirmDraft(task: $0) }
+        // Việc 3.1: duplicate hint computed ONCE here, at draft-creation time — never recomputed
+        // per chip edit (self-review "performance"; see `ConfirmDraft.duplicateCandidates`'s doc
+        // comment).
+        for i in drafts.indices {
+            drafts[i].duplicateCandidates = Self.duplicateCandidates(for: drafts[i].effectiveTitle, in: existingTasks).map(\.id)
+        }
+        drafts = preResolveConditions(drafts, openTasks: existingTasks)
+        for i in drafts.indices {
+            drafts[i].conflicts = computeConflicts(for: drafts[i], now: conflictNow)
+            // T-overdue: same "computed once, against the shared `conflictNow` clock read" rule
+            // as `conflicts` immediately above — reusing `conflictNow` (rather than a fresh
+            // `clock()`/`Date()` call here) keeps every draft in a multi-task batch scored against
+            // the exact same "now" instant, same reasoning `conflictNow`'s own doc comment gives.
+            drafts[i].overdueSuggestion = OverdueSuggestion.makeIfOverdue(
+                deadline: drafts[i].task.deadline?.value, now: conflictNow
+            )
+        }
+        return drafts
+    }
+
+    /// Auto-resolves `.taskDone` conditions the router was itself confident about (>=0.7) — first
+    /// against a confident fuzzy title match in `openTasks` (exactly the original v1 behavior),
+    /// and — Việc 2 (2026-07-28, closing a real gap, not a new feature): if THAT comes up empty,
+    /// against the OTHER drafts in this SAME batch (excluding itself). "Xong task A thì tạo task
+    /// B" said in one breath makes A and B together — A is nowhere in `openTasks` yet because it
+    /// doesn't exist until `confirmSave()` creates it, so without this second lookup the condition
+    /// was silently dropped at save (see `ConfirmDraft.intraBatchTaskDone`'s doc comment). SAME
+    /// 0.7 bar for both lookups — constitution II: matching within the batch is a convenience for
+    /// what the user already said, never a reason to lower the confidence floor. A batch match is
+    /// recorded in `intraBatchTaskDone` (the OTHER DRAFT's id), never `resolvedTaskDone` (which
+    /// promises an already-persisted task id) and never a fabricated UUID.
+    ///
+    /// Takes the WHOLE batch (rather than one draft, the original signature) specifically so each
+    /// draft's condition can see every OTHER draft's stable `id`/title before any of them exist as
+    /// real tasks — a single-draft signature has no way to look sideways at its siblings. Both
+    /// call sites (`buildConfirmDrafts` above) already have the full batch in hand, so this is a
+    /// call-site-local change, not a wider API break.
+    private func preResolveConditions(_ drafts: [ConfirmDraft], openTasks: [TaskItem]) -> [ConfirmDraft] {
+        var drafts = drafts
+        for i in drafts.indices {
+            for (index, condition) in drafts[i].task.conditions.enumerated() {
+                guard case .taskDone(let titleQuery, let confidence) = condition, confidence >= 0.7 else { continue }
+                if let match = Self.bestFuzzyMatch(for: titleQuery, in: openTasks), match.score >= 0.7 {
+                    drafts[i].resolvedTaskDone[index] = match.id
+                    continue
+                }
+                let siblings: [(id: UUID, title: String)] = drafts.indices
+                    .filter { $0 != i }
+                    .map { (drafts[$0].id, drafts[$0].effectiveTitle) }
+                if let match = Self.scoredMatches(for: titleQuery, candidates: siblings).first, match.score >= 0.7 {
+                    drafts[i].intraBatchTaskDone[index] = match.id
+                }
             }
         }
-        return draft
+        return drafts
+    }
+
+    // MARK: - task_refs_v1 (2026-08-02): "update an existing task by voice"
+    //
+    // The client-side resolution + confirm-state pipeline for `ParsedCapture.taskRefs`/`.updates`
+    // (the sibling wire-layer's `Sources/Parsing/ParsedCapture.swift`) — `capture.tasks` still flows
+    // through `buildConfirmDrafts` completely unchanged (see `runParse`); this is purely additive.
+
+    /// Resolves each `ParsedTaskRef` in a fresh parse's `taskRefs` array to a `RefResolution`, ONE
+    /// time per ref — every `ParsedTaskUpdate.refIndex` sharing the same ref shares the same
+    /// resolution (task brief: "Resolve each ref ONCE"). Mirrors `preResolveConditions`'s EXACT
+    /// ladder/thresholds/scorer: step 1 is the identical `bestFuzzyMatch(for:in:)` call
+    /// `preResolveConditions` makes against `openTasks` (≥0.7, `Similarity.strict` — see that
+    /// method's own doc comment for why a wrong match here is real corruption, not a glance-and-
+    /// ignore hint, and therefore needs the STRICT scorer, never `.lenient`); step 2 is the
+    /// identical `scoredMatches(for:candidates:)` call against this batch's OTHER drafts (task
+    /// brief explicitly says "the batch's other drafts," so unlike `preResolveConditions`'s
+    /// intra-batch step, this does NOT exclude any particular draft by index — a ref legitimately
+    /// can, and typically does, match a sibling other than "self" trivially since a task-ref
+    /// query is never the referencing draft's own title).
+    ///
+    /// `ParsedTaskRef.confidence`/`.assumeExisting` are part of the pinned wire type but this
+    /// round's ladder does not gate on either — the task brief's algorithm is exactly the 3-step
+    /// ladder below, nothing more. Flagged here rather than silently ignored: if a future revision
+    /// wants low-confidence refs to skip straight to `.unresolved` (bypassing steps 1/2 entirely) or
+    /// `assumeExisting == false` to try step 2 before step 1, this is the one place that changes.
+    ///
+    /// Intentionally `internal`, not `private`, for direct testability — same exception, same
+    /// reasoning, as `AppState.mergeNotesAppending`'s own doc comment gives (`Tests/
+    /// ConfirmUpdateDraftTests.swift` calls this and the two methods below it directly rather than
+    /// only through the async `runParse` entry point, which needs a real `IntentRouter.parseCapture`
+    /// this test target cannot construct).
+    func resolveTaskRefs(
+        _ refs: [ParsedTaskRef], drafts: [ConfirmDraft], openTasks: [TaskItem]
+    ) -> [RefResolution] {
+        refs.map { ref in
+            if let match = Self.bestFuzzyMatch(for: ref.titleQuery, in: openTasks), match.score >= 0.7 {
+                return .existing(match.id)
+            }
+            let siblings: [(id: UUID, title: String)] = drafts.map { ($0.id, $0.effectiveTitle) }
+            if let match = Self.scoredMatches(for: ref.titleQuery, candidates: siblings).first, match.score >= 0.7 {
+                return .sibling(match.id)
+            }
+            return .unresolved
+        }
+    }
+
+    /// "The referenced task turned out to be one the user is creating in this same breath" (task
+    /// brief) — folds a `.sibling`-resolved `ParsedTaskUpdate` straight into its target
+    /// `ConfirmDraft` rather than becoming a separate confirm card. Mutates `drafts[i].task.
+    /// {deadline,startTime,priority}` DIRECTLY — a deliberate, narrow exception to `ConfirmDraft`'s
+    /// own "never mutate `task` in place" rule (see that struct's header comment): this runs exactly
+    /// ONCE, at draft-construction time, before the card has ever rendered or been interacted with,
+    /// so there is no live user edit to clobber — and writing straight into `task.*` (rather than
+    /// `editedDeadline`/etc, which unconditionally pins confidence to `1.0`) is what lets the
+    /// merged value flow through `DeadlineControl`/`StartTimeControl`/`PriorityControl`'s EXISTING
+    /// uncertain/dashed/accept-tap machinery completely unchanged — an update-supplied value below
+    /// the 0.7 bar still needs an explicit accept tap before it can save, exactly like any other
+    /// parsed attribute (constitution II), which an `editedX` overlay could not offer without
+    /// inventing a second confidence-tracking mechanism (self-review "reuse over invention").
+    ///
+    /// "Respecting existing chip edit precedence" (task brief) is enforced by the `== nil` guard on
+    /// each field: if the sibling's OWN parse already stated a value for that exact attribute
+    /// (`task.deadline`/`.startTime`/`.priority` already non-nil), the merge never overwrites it —
+    /// same "never second-guess what was already stated" rule `IntentRouter.
+    /// applyStartTimeDerivation` already applies one field over (never overwriting a spoken
+    /// `deadline` with a derived one).
+    ///
+    /// `notesAppend` and `addConditions` go through `ConfirmDraft.editedNotes`/`.refConditions`
+    /// instead — see each assignment below for why those two, unlike the three scalars above, are
+    /// NOT a "never overwrite what's already there" merge.
+    ///
+    /// Intentionally `internal`, not `private` — same direct-testability exception `resolveTaskRefs`
+    /// above documents.
+    func mergeUpdateIntoSibling(
+        _ update: ParsedTaskUpdate, targetDraftID: ConfirmDraft.ID, drafts: inout [ConfirmDraft]
+    ) {
+        guard let i = drafts.firstIndex(where: { $0.id == targetDraftID }) else { return }
+        if drafts[i].task.deadline == nil, let deadline = update.deadline {
+            drafts[i].task.deadline = deadline
+        }
+        if drafts[i].task.startTime == nil, let startTime = update.startTime {
+            drafts[i].task.startTime = startTime
+        }
+        if drafts[i].task.priority == nil, let priority = update.priority {
+            drafts[i].task.priority = priority
+        }
+        // `notesAppend` has no confidence gate anywhere else in this file either (`ConfirmDraft.
+        // editedNotes`/`.effectiveNotes` never check `isUncertain` — notes is free text, not a
+        // scalar chip attribute), so this merge doesn't invent one: `mergeNotesAppending` is the
+        // SAME append-or-leave-alone helper `AppState.mergeTransform`'s own notes handling already
+        // calls, reused verbatim, writing through `editedNotes` (the sibling draft's OWN existing
+        // overlay field — `NotesEditorControl` renders it with zero new UI).
+        if let notesAppend = update.notesAppend,
+           let combined = Self.mergeNotesAppending(existing: drafts[i].effectiveNotes, incoming: notesAppend.value) {
+            drafts[i].editedNotes = combined
+        }
+        // `addConditions` carries no confidence at all in the pinned `ParsedUpdateCondition` type —
+        // a deterministic index/date the router already resolved, not a fuzzy guess — so these
+        // attach unconditionally into `refConditions` (visible/dismissible on the sibling's own
+        // card via `PopoverView`'s `refConditionRows`, never silently invisible — constitution II).
+        for condition in update.addConditions {
+            switch condition {
+            case .taskDoneNewTask(let refIndex):
+                // 1-based into `ParsedCapture.tasks` == `drafts`' own order (this method runs
+                // during draft construction, before any reordering/removal is possible).
+                guard drafts.indices.contains(refIndex - 1) else { continue }
+                let referencedID = drafts[refIndex - 1].id
+                guard referencedID != drafts[i].id else { continue } // defensive: no self-reference
+                drafts[i].refConditions.append(.taskDone(referencedID))
+            case .afterDate(let date):
+                drafts[i].refConditions.append(.afterDate(date))
+            }
+        }
+    }
+
+    /// `runParse`'s task_refs_v1 step, right after `buildConfirmDrafts` (task brief: "capture.tasks
+    /// ... flow into buildConfirmDrafts unchanged" — this is a SEPARATE pass over the result, never
+    /// a change to that method's own signature/behavior). Resolves `capture.taskRefs` against this
+    /// exact `drafts`/`openTasks` snapshot, then routes each `capture.updates` entry: `.sibling` ->
+    /// merged in place via `mergeUpdateIntoSibling` (no card); `.existing`/`.unresolved` -> a
+    /// `ConfirmUpdateDraft` `PopoverView` renders.
+    ///
+    /// NOTE (self-review "known scope boundary"): `buildConfirmDrafts`'s own `conflicts`/
+    /// `overdueSuggestion` computation already ran (inside that call) BEFORE this method ever
+    /// touches `drafts`, so a deadline a `.sibling` merge fills in here will not retroactively gain
+    /// an overdue-nudge/conflict advisory this session — only a deadline the router put directly on
+    /// that task's own parse gets one. Accepted trade-off for keeping `buildConfirmDrafts` itself
+    /// completely unchanged, per the task brief's explicit instruction.
+    ///
+    /// Intentionally `internal`, not `private` — same direct-testability exception `resolveTaskRefs`
+    /// above documents.
+    func buildConfirmUpdateDrafts(
+        from capture: ParsedCapture, drafts: inout [ConfirmDraft], openTasks: [TaskItem]
+    ) -> [ConfirmUpdateDraft] {
+        let resolutions = resolveTaskRefs(capture.taskRefs, drafts: drafts, openTasks: openTasks)
+        var updateDrafts: [ConfirmUpdateDraft] = []
+        for update in capture.updates {
+            // Defense-in-depth (self-review "client-exploit"): the wire contract's own doc comment
+            // promises `refIndex` is "already bounds-validated," same as `IntentRouter.parse`'s own
+            // 10-task cap promise `runParse` still re-enforces regardless (`capped =
+            // Array(results.prefix(...))`) — this survives a malformed/hostile result either way.
+            guard resolutions.indices.contains(update.refIndex - 1) else { continue }
+            let ref = capture.taskRefs[update.refIndex - 1]
+            switch resolutions[update.refIndex - 1] {
+            case .existing(let id):
+                updateDrafts.append(ConfirmUpdateDraft(
+                    refIndex: update.refIndex, sourceTitleQuery: ref.titleQuery, resolution: .existing(id),
+                    deadline: update.deadline, startTime: update.startTime, notesAppend: update.notesAppend,
+                    priority: update.priority, addConditions: update.addConditions
+                ))
+            case .sibling(let siblingDraftID):
+                mergeUpdateIntoSibling(update, targetDraftID: siblingDraftID, drafts: &drafts)
+            case .unresolved:
+                updateDrafts.append(ConfirmUpdateDraft(
+                    refIndex: update.refIndex, sourceTitleQuery: ref.titleQuery, resolution: .unresolved,
+                    deadline: update.deadline, startTime: update.startTime, notesAppend: update.notesAppend,
+                    priority: update.priority, addConditions: update.addConditions
+                ))
+            }
+        }
+        return updateDrafts
     }
 
     private struct FuzzyMatch { let id: UUID; let score: Double }
 
-    /// Token-overlap similarity (case/diacritic-insensitive, so Vietnamese input matches
-    /// sensibly): scores each open task's title against `query` as a Jaccard index over
-    /// whitespace tokens, returning the single best match. O(n) over `openTasks` per condition —
-    /// at most ~10 conditions in a confirm batch, so this stays cheap even at hundreds of tasks
-    /// (self-review "performance"; no picker-side O(n²) — the picker itself just lists titles).
+    /// Shared token-overlap scorer (Jaccard over whitespace tokens, case/diacritic-insensitive so
+    /// Vietnamese input matches sensibly) used by `bestFuzzyMatch` (single best, threshold checked
+    /// by the caller) and `duplicateCandidates` (top-3 above a lower bar) — one formula, two
+    /// thresholds, rather than two copies of the same loop. Returns every candidate with a
+    /// nonzero-union score, sorted by score DESCENDING; `Array.sorted` is stable (Swift 5+), so
+    /// candidates tied on score keep `candidates`' original relative order — matching the original
+    /// `bestFuzzyMatch`'s "first max-scoring entry wins" behavior exactly for that caller.
     /// // UNVERIFIED: a deliberately simple placeholder heuristic — swap for a real string-
     /// distance/fuzzy library later if parsing quality demands it (backlog candidate).
-    private static func bestFuzzyMatch(for query: String, in openTasks: [TaskItem]) -> FuzzyMatch? {
+    /// Which formula `scoredMatches` uses. The two callers want opposite error profiles, so they
+    /// must NOT share one — this used to be a single Jaccard score for both, and loosening it
+    /// globally would have silently loosened dependency auto-resolution too.
+    private enum Similarity {
+        /// Jaccard only: `shared / union`. Strict, and strictness is the point for
+        /// `preResolveConditions` — a wrong match there commits a real `.taskDone` edge with no
+        /// further confirmation, so a false positive is a wrong task graph.
+        case strict
+        /// `max(jaccard, overlap)` where overlap is `shared / min(|a|, |b|)`. Overlap is the one
+        /// that handles "one title is a subset of the other" — restating a stored task more briefly
+        /// is the single most common way a real duplicate shows up, and Jaccard scores it terribly
+        /// because it counts every extra word in the longer title against the match. Concretely:
+        /// "sanitize html tag" vs "sanitize html tags this afternoon" is 2/6 = 0.33 by Jaccard —
+        /// under the 0.45 duplicate bar, so the app would silently create a second copy — but
+        /// 2/min(3,5) = 0.67 by overlap, which surfaces it.
+        case lenient
+    }
+
+    private static func scoredMatches(
+        for query: String,
+        candidates: [(id: UUID, title: String)],
+        similarity: Similarity = .strict
+    ) -> [FuzzyMatch] {
         let queryTokens = tokenize(query)
-        guard !queryTokens.isEmpty else { return nil }
-        var best: FuzzyMatch?
-        for task in openTasks {
-            let titleTokens = tokenize(task.title)
+        guard !queryTokens.isEmpty else { return [] }
+        var scored: [FuzzyMatch] = []
+        for candidate in candidates {
+            let titleTokens = tokenize(candidate.title)
             guard !titleTokens.isEmpty else { continue }
-            let shared = queryTokens.intersection(titleTokens).count
             let union = queryTokens.union(titleTokens).count
             guard union > 0 else { continue }
-            let score = Double(shared) / Double(union)
-            if score > (best?.score ?? 0) {
-                best = FuzzyMatch(id: task.id, score: score)
+            let shared = queryTokens.intersection(titleTokens).count
+            let jaccard = Double(shared) / Double(union)
+            var score = jaccard
+            if similarity == .lenient {
+                let smaller = min(queryTokens.count, titleTokens.count)
+                // `smaller >= 2` guard: with a one-token side, overlap is 1.0 the moment that single
+                // token appears anywhere in the other title — "html" would score a perfect match
+                // against every task mentioning html, burying the real candidates. Two shared tokens
+                // is the cheapest thing that means more than coincidence here.
+                if smaller >= 2 {
+                    score = max(jaccard, Double(shared) / Double(smaller))
+                }
             }
+            scored.append(FuzzyMatch(id: candidate.id, score: score))
         }
-        return best
+        return scored.sorted { $0.score > $1.score }
+    }
+
+    /// Việc 3.1 (2026-07-28): up to 3 already-persisted tasks that look like they might BE `title`
+    /// — a glance-and-decide HINT for the confirm card, never auto-applied (see
+    /// `ConfirmDraft.duplicateResolution`'s doc comment: it always starts at `.addNew`). Threshold
+    /// (0.45) is DELIBERATELY LOWER than `preResolveConditions`'s 0.7 auto-resolve bar — that's not
+    /// a bug, it's the opposite risk profile: an auto-resolved `.taskDone` that's wrong silently
+    /// commits a real, wrong dependency edge, so it needs a high bar. This is just a suggestion a
+    /// human glances at and can ignore — a false positive here costs one glance; a false negative
+    /// costs a full duplicate task silently created (exactly the gap this whole feature closes).
+    /// Bounded to 3 so the card never has to render an unbounded list (same defensive-cap
+    /// philosophy as `VoiceDoneConfirm`'s candidate list elsewhere in this file).
+    private static func duplicateCandidates(for title: String, in openTasks: [TaskItem]) -> [FuzzyMatch] {
+        Array(
+            scoredMatches(for: title, candidates: openTasks.map { ($0.id, $0.title) }, similarity: .lenient)
+                .filter { $0.score >= 0.45 }
+                .prefix(3)
+        )
+    }
+
+    /// O(n) over `openTasks` per condition — at most ~10 conditions in a confirm batch, so this
+    /// stays cheap even at hundreds of tasks (self-review "performance"; no picker-side O(n²) —
+    /// the picker itself just lists titles). Single best match; `scoredMatches`'s stable sort
+    /// means a tie keeps whichever candidate appeared first in `openTasks`, matching this
+    /// function's pre-refactor "first max-scoring entry wins" behavior exactly.
+    private static func bestFuzzyMatch(for query: String, in openTasks: [TaskItem]) -> FuzzyMatch? {
+        scoredMatches(for: query, candidates: openTasks.map { ($0.id, $0.title) }).first
     }
 
     private static func tokenize(_ text: String) -> Set<String> {
@@ -1796,10 +3702,14 @@ final class AppState {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].dismissedConditions.insert(conditionIndex)
         confirmDrafts[index].resolvedTaskDone[conditionIndex] = nil
+        // Việc 2: dismiss wins over EITHER resolution kind — a dropped condition must not linger
+        // as an intra-batch target `confirmSave()`'s second pass would otherwise still attach.
+        confirmDrafts[index].intraBatchTaskDone[conditionIndex] = nil
         logCorrection(
             kind: nil, attribute: "condition[\(conditionIndex)]",
             task: confirmDrafts[index].task, correctedValue: "dropped"
         )
+        recomputeConfirmCycle() // dropping a condition can drop the edge that closed a cycle
     }
 
     /// Explicit tap-to-accept for an uncertain (<0.7) `.afterDate`/`.external` condition chip.
@@ -1813,6 +3723,11 @@ final class AppState {
             kind: nil, attribute: "condition[\(conditionIndex)]",
             task: confirmDrafts[index].task, correctedValue: "accepted"
         )
+        // `.taskDone` never reaches this path (see this method's own doc comment — it always
+        // resolves via `resolveTaskDone`'s explicit picker instead), so this can never actually
+        // change the `.taskDone` edge set; called anyway for the same "every condition mutator
+        // recomputes" consistency the contract asks for, at negligible cost.
+        recomputeConfirmCycle()
     }
 
     /// The dependency picker's resolution (constitution II: NEVER auto-attach below 0.7 — the
@@ -1822,20 +3737,240 @@ final class AppState {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         if let taskID {
             confirmDrafts[index].resolvedTaskDone[conditionIndex] = taskID
+            // Việc 2: an explicit picker choice always overrides whatever `preResolveConditions`
+            // may have auto-matched intra-batch — the two must never both be set for one index.
+            confirmDrafts[index].intraBatchTaskDone[conditionIndex] = nil
             confirmDrafts[index].dismissedConditions.remove(conditionIndex)
         } else {
             confirmDrafts[index].dismissedConditions.insert(conditionIndex)
+            confirmDrafts[index].intraBatchTaskDone[conditionIndex] = nil
         }
         logCorrection(
             kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
             task: confirmDrafts[index].task, correctedValue: taskID?.uuidString ?? "dropped"
         )
+        recomputeConfirmCycle()
     }
 
-    /// Multi-task confirm (T024): removes one task from the batch entirely (the compact
-    /// reviewable set's per-task "x") without discarding the rest.
-    func removeDraft(_ draftID: ConfirmDraft.ID) {
-        confirmDrafts.removeAll { $0.id == draftID }
+    /// 2026-07-28 (confirm-list UI, Việc 3): the picker's OTHER group — "task done" resolved
+    /// against another DRAFT in this same batch rather than an already-persisted task (see
+    /// `ConfirmDraft.intraBatchTaskDone`'s doc comment for why that has to be a separate map).
+    /// Mirrors `resolveTaskDone`'s "taskID" branch exactly, but writes the sibling map instead and
+    /// clears whatever `resolvedTaskDone` entry might already be there for the same index — the
+    /// two must never both be set (same invariant `resolveTaskDone` enforces in the other
+    /// direction). `target == draftID` is refused defensively (`PopoverView`'s picker already
+    /// excludes the card's own draft from this group, so this should be unreachable from the UI,
+    /// but a self-reference here would be a silent no-op dependency, not a crash, if it ever did
+    /// get through).
+    func resolveTaskDoneToDraft(_ draftID: ConfirmDraft.ID, conditionIndex: Int, target: ConfirmDraft.ID) {
+        guard target != draftID else { return }
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].intraBatchTaskDone[conditionIndex] = target
+        confirmDrafts[index].resolvedTaskDone[conditionIndex] = nil
+        confirmDrafts[index].dismissedConditions.remove(conditionIndex)
+        logCorrection(
+            kind: nil, attribute: "condition[\(conditionIndex)].taskDone",
+            task: confirmDrafts[index].task, correctedValue: "intraBatch:\(target.uuidString)"
+        )
+        recomputeConfirmCycle()
+    }
+
+    /// 2026-07-28 (confirm-list UI, Việc 1): the checkbox's mutator — ticks/unticks whether this
+    /// draft is created at all (see `ConfirmDraft.isIncluded`'s doc comment and `confirmSave()`'s
+    /// `filter(\.isIncluded)`). Deliberately REVERSIBLE, unlike the destructive per-task "x" this
+    /// replaces (`removeDraft`, removed alongside this — its only call site was that button):
+    /// toggling back on restores the draft exactly as it was, since nothing is ever actually
+    /// removed from `confirmDrafts`.
+    func setDraftIncluded(_ draftID: ConfirmDraft.ID, _ included: Bool) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].isIncluded = included
+        // Unticking removes this draft's node (and every edge touching it) from the graph
+        // entirely; re-ticking restores it. Either way the batch's edge set just changed.
+        recomputeConfirmCycle()
+    }
+
+    /// 2026-07-28 (confirm-list UI, Việc 2): the duplicate-hint picker's resolution — constitution
+    /// II forbids ever choosing `.useExisting` FOR the user (see `ConfirmDraft.duplicateResolution`'s
+    /// doc comment), so this is the ONLY place that ever writes it.
+    func setDuplicateResolution(_ draftID: ConfirmDraft.ID, _ resolution: ConfirmDraft.DuplicateResolution) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].duplicateResolution = resolution
+        recomputeConfirmCycle() // changing `.useExisting` changes which node this draft's edges land on
+    }
+
+    /// task_refs_v1: dismisses a `ConfirmDraft.refConditions` entry — the sibling-merge equivalent
+    /// of `dismissCondition` above, kept as its own method rather than folded into that one because
+    /// the two arrays (`task.conditions` vs `refConditions`) have completely independent index
+    /// spaces (see `ConfirmDraft.refConditions`'s own doc comment).
+    func dismissRefCondition(at index: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let draftIndex = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[draftIndex].dismissedRefConditions.insert(index)
+    }
+
+    // MARK: - task_refs_v1 confirm-card interactions (`ConfirmUpdateDraft`, mirrors the
+    // `ConfirmDraft` chip-interaction section above field-for-field)
+
+    /// Task-level dismiss (task brief: "Card-level dismiss removes the whole update") — also how
+    /// the `.unresolved` picker's "Skip" resolves.
+    func dismissConfirmUpdateDraft(_ draftID: ConfirmUpdateDraft.ID) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[index].cardDismissed = true
+    }
+
+    /// The `.unresolved` picker's resolution — constitution II: the user always makes this choice
+    /// explicitly, same "never auto-attach below 0.7" reasoning `AppState.resolveTaskDone` already
+    /// documents for the analogous `.taskDone` picker. `taskID == nil` is "Skip" (same as
+    /// `dismissConfirmUpdateDraft` — the picker's own dismiss affordance routes through here so
+    /// `PopoverView` has one call for both its "pick a task" and "skip" rows).
+    func resolveUpdateTarget(_ draftID: ConfirmUpdateDraft.ID, to taskID: UUID?) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        if let taskID {
+            confirmUpdateDrafts[index].resolution = .existing(taskID)
+        } else {
+            confirmUpdateDrafts[index].cardDismissed = true
+        }
+    }
+
+    /// Removes an update field chip (deadline/startTime/notesAppend/priority) — mirrors
+    /// `AppState.dismissAttribute` exactly, scoped to `ConfirmUpdateDraft.Field`.
+    func dismissUpdateField(_ field: ConfirmUpdateDraft.Field, forDraft draftID: ConfirmUpdateDraft.ID) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[index].dismissed.insert(field)
+    }
+
+    /// Explicit tap-to-accept for an uncertain (<0.7) update field chip — mirrors
+    /// `AppState.acceptUncertainAttribute` exactly, scoped to `ConfirmUpdateDraft.Field`.
+    func acceptUpdateField(_ field: ConfirmUpdateDraft.Field, forDraft draftID: ConfirmUpdateDraft.ID) {
+        guard let index = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[index].accepted.insert(field)
+    }
+
+    /// Removes one `addConditions` entry — mirrors `AppState.dismissCondition`'s
+    /// `Set<Int>`-over-the-array convention, scoped to `ConfirmUpdateDraft.addConditions`' own
+    /// index space (never shared with `ConfirmDraft.dismissedConditions`/`.dismissedRefConditions`).
+    func dismissUpdateAddCondition(at index: Int, forDraft draftID: ConfirmUpdateDraft.ID) {
+        guard let draftIndex = confirmUpdateDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmUpdateDrafts[draftIndex].dismissedAddConditions.insert(index)
+    }
+
+    /// cycle-detection-contract.md §2: rebuilds `confirmCycle` from the CURRENT `confirmDrafts` +
+    /// persisted `tasks` by constructing the SAME virtual `.taskDone` graph `confirmSave()` would
+    /// actually commit, then asking `VolarCore.findCycle`. Must be called after EVERY mutation
+    /// that can change the batch's edge set: wherever a fresh `buildConfirmDrafts(...)` result
+    /// becomes the live `confirmDrafts` (`runParse`'s completion handler and both branches of
+    /// `applyTextCaptureParseResult` — `buildConfirmDrafts` itself stays a pure `[ConfirmDraft]`-
+    /// returning helper with no `self` to recompute against, so the call has to sit at each of
+    /// its call sites instead of inside it), `dismissCondition`, `acceptUncertainCondition`,
+    /// `resolveTaskDone`, `resolveTaskDoneToDraft`, `setDraftIncluded`, and `setDuplicateResolution`
+    /// immediately above (changing `.useExisting` changes which node a draft's edges land on, so
+    /// it's just as edge-set-changing as the condition mutators). A skipped call site leaves
+    /// `confirmCycle` stale — either wrongly blocking a now-clean Save or wrongly letting a
+    /// still-cyclic one through.
+    private func recomputeConfirmCycle() {
+        let includedDrafts = confirmDrafts.filter(\.isIncluded)
+        guard !includedDrafts.isEmpty else {
+            confirmCycle = nil
+            return
+        }
+
+        // Step 1 (⚠️ contract's own flag for "the easy place to get this wrong"): the SAME id map
+        // `confirmSave()` builds. `.addNew` -> a virtual node keyed by the draft's OWN `id` (safe:
+        // this snapshot is thrown away the instant this method returns, so there's no real post-
+        // save id to mint yet, and `ConfirmDraft.id` is already a stable `UUID`). `.useExisting(x)`
+        // -> `x` itself, so this draft's edges MERGE into the ALREADY-EXISTING node `x` — never a
+        // second node sharing that id, which would make `findCycle` read a corrupt graph and
+        // miss/invent cycles.
+        let currentTaskIDs = Set(tasks.map(\.id))
+        func effectiveResolution(_ draft: ConfirmDraft) -> ConfirmDraft.DuplicateResolution {
+            if case .useExisting(let id) = draft.duplicateResolution, !currentTaskIDs.contains(id) {
+                return .addNew
+            }
+            return draft.duplicateResolution
+        }
+        var targetID: [ConfirmDraft.ID: UUID] = [:]
+        for draft in includedDrafts {
+            switch effectiveResolution(draft) {
+            case .addNew: targetID[draft.id] = draft.id
+            case .useExisting(let existingID): targetID[draft.id] = existingID
+            }
+        }
+
+        // Step 2: every draft's `.taskDone` edges, filtered by the EXACT same rules `confirmSave()`
+        // applies when it builds `intraBatchAttachments` (dismissed index dropped, self-edge
+        // dropped, an edge to a draft that isn't in `targetID` — unticked, or never existed —
+        // dropped) plus `resolvedConditions`'s own dismissed-index filter for the already-
+        // resolved-to-a-real-task case. `.sorted(by:)` only makes ONE draft's own edges
+        // deterministic relative to each other (`resolvedTaskDone`/`intraBatchTaskDone` are
+        // `[Int: UUID]` dictionaries, unordered) — it does not reconstruct the original
+        // `task.conditions` array order across different drafts, so when a cycle admits more than
+        // one description, exactly WHICH edge is offered as removable can still vary run to run;
+        // removing either one breaks the same cycle, so this doesn't affect correctness, only
+        // which button happens to be shown.
+        struct DraftEdge { let from: UUID; let to: UUID; let draftID: ConfirmDraft.ID; let conditionIndex: Int }
+        var draftEdges: [DraftEdge] = []
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id] else { continue }
+            for (index, resolvedID) in draft.resolvedTaskDone.sorted(by: { $0.key < $1.key }) {
+                guard !draft.dismissedConditions.contains(index), resolvedID != ownID else { continue }
+                draftEdges.append(DraftEdge(from: ownID, to: resolvedID, draftID: draft.id, conditionIndex: index))
+            }
+            for (index, referencedDraftID) in draft.intraBatchTaskDone.sorted(by: { $0.key < $1.key }) {
+                guard !draft.dismissedConditions.contains(index) else { continue }
+                guard let refID = targetID[referencedDraftID], refID != ownID else { continue }
+                draftEdges.append(DraftEdge(from: ownID, to: refID, draftID: draft.id, conditionIndex: index))
+            }
+        }
+
+        // Step 3: snapshot = every persisted task (its OWN existing conditions kept intact) with
+        // the batch's virtual edges layered ON TOP of whichever node they target — a `.useExisting`
+        // draft's edges are ADDED to that task's real conditions, never replacing them, since its
+        // already-persisted edges are just as real for cycle purposes. Whatever's left after that
+        // targets a brand-new `.addNew` node that isn't in `tasks` yet, so it becomes a fresh
+        // virtual `VolarCore.Task` (priority/deadline/etc. don't matter here — `findCycle` only
+        // ever reads `conditions`).
+        var edgesByNode: [UUID: [UUID]] = [:]
+        for edge in draftEdges { edgesByNode[edge.from, default: []].append(edge.to) }
+        var snapshot = tasks.map { $0.snapshot() }
+        for i in snapshot.indices {
+            guard let extra = edgesByNode.removeValue(forKey: snapshot[i].id) else { continue }
+            snapshot[i].conditions.append(contentsOf: extra.map { VolarCore.Condition.taskDone($0) })
+        }
+        // Titles for nodes that are NOT already-persisted tasks (i.e. `.addNew` virtual nodes) —
+        // needed below for the human-readable cycle path regardless of whether this particular
+        // draft ended up with any outgoing edge of its own (it may still be the TARGET of one).
+        var virtualTitles: [UUID: String] = [:]
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id], !currentTaskIDs.contains(ownID) else { continue }
+            virtualTitles[ownID] = draft.effectiveTitle
+            if let extra = edgesByNode[ownID] {
+                snapshot.append(VolarCore.Task(
+                    id: ownID, title: draft.effectiveTitle, status: .todo, priority: nil,
+                    deadline: nil, conditions: extra.map { VolarCore.Condition.taskDone($0) },
+                    estimateMinutes: nil, parentId: nil, createdAt: Date()
+                ))
+            }
+        }
+
+        guard let cycle = VolarCore.findCycle(in: snapshot) else {
+            confirmCycle = nil
+            return
+        }
+
+        func title(for id: UUID) -> String {
+            tasks.first(where: { $0.id == id })?.title ?? virtualTitles[id] ?? "Unknown task"
+        }
+        var removableEdges: [ConfirmCycle.RemovableEdge] = []
+        for i in 0..<(cycle.count - 1) {
+            let from = cycle[i]
+            let to = cycle[i + 1]
+            guard let edge = draftEdges.first(where: { $0.from == from && $0.to == to }) else { continue }
+            removableEdges.append(ConfirmCycle.RemovableEdge(
+                draftID: edge.draftID,
+                conditionIndex: edge.conditionIndex,
+                label: "\(title(for: from)) waits on \(title(for: to))"
+            ))
+        }
+        confirmCycle = ConfirmCycle(titles: cycle.map { title(for: $0) }, removableEdges: removableEdges)
     }
 
     /// T074: dismisses the (at most one) conflict advisory line for one draft — never re-derives
@@ -1844,6 +3979,103 @@ final class AppState {
     func dismissConflictAdvisory(forDraft draftID: ConfirmDraft.ID) {
         guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
         confirmDrafts[index].conflictDismissed = true
+    }
+
+    /// T-overdue: the overdue advisory row's ONE tap-to-act affordance ("Move to tomorrow HH:mm",
+    /// `PopoverView.overdueAdvisoryRow`) — writes `editedDeadline`, never `task.deadline` directly
+    /// (see that field's own doc comment), so `effectiveDeadline` — and everything that reads
+    /// through it (`confirmSave`/`materialize`/`mergeTransform`/`computeConflicts`/the deadline
+    /// chip) — picks up the new instant. Clears `overdueSuggestion` right after so the advisory
+    /// row disappears once acted on (there's nothing left to suggest — the deadline IS the
+    /// suggestion now). Deliberately does NOT touch `dismissed`/`overdueDismissed`: constitution II
+    /// says dismiss always wins, and there is no dismiss here to "undo" — if the deadline CHIP
+    /// itself was already dismissed, `PopoverView.overdueAdvisoryRow`'s own render guard keeps this
+    /// row hidden regardless of what this method does to `overdueSuggestion`.
+    func applyOverdueSuggestion(forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }),
+              let suggestion = confirmDrafts[index].overdueSuggestion
+        else { return }
+        confirmDrafts[index].editedDeadline = suggestion.suggestedDeadline
+        confirmDrafts[index].overdueSuggestion = nil
+    }
+
+    /// T-overdue: dismisses the overdue advisory row WITHOUT changing the deadline — same one-way,
+    /// never-re-surfaces-this-session convention as `dismissConflictAdvisory` immediately above.
+    func dismissOverdueSuggestion(forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].overdueDismissed = true
+    }
+
+    /// The confirm card's editable title `TextField` (`PopoverView.taskDraftCard`) calls this on
+    /// every keystroke. `ConfirmDraft` is a VALUE type (`struct`, unlike the Windows port's
+    /// `ConfirmDraft` class) — mutating a local copy of the draft would silently lose the edit the
+    /// instant that copy goes out of scope, so this MUST reach through `confirmDrafts[index]` the
+    /// same way every other chip mutator in this section already does (self-review "value-type
+    /// trap": the array is the only thing `PopoverView`/`materialize` actually read back from).
+    /// Deliberately does NOT call `logCorrection` — a title edit isn't a chip attribute correction,
+    /// it's free-text authorship, same reason `task.title` itself was never a `ChipKind`.
+    func updateDraftTitle(_ title: String, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedTitle = title
+    }
+
+    /// T-edit-deadline (2026-07-28, anh Khôi: manual in-place time edit on the confirm card): the
+    /// deadline `DatePicker`'s (`PopoverView.DeadlineControl`) write side — sets `editedDeadline`,
+    /// never `task.deadline` directly, same "never mutate the parser's `ParsedTask`" contract
+    /// `updateDraftTitle` above already follows for the title. Works identically whether the draft
+    /// already had a deadline (editing it) or had none at all (`DeadlineControl`'s "Add time"
+    /// affordance) — either way this is the ONLY write path, so `effectiveDeadline` picks it up
+    /// the same way in both cases; there is no separate "first time" branch to keep in sync.
+    func setDraftDeadline(_ date: Date, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedDeadline = date
+    }
+
+    /// T-edit-attrs (2026-07-29, manual-edit-contract.md §1.2): the priority chip's `Menu` write
+    /// side (`PopoverView.attributeChips`) — sets `editedPriority`, never `task.priority` directly,
+    /// same "never mutate the parser's `ParsedTask`" contract `setDraftDeadline` above already
+    /// follows. MUST reach through `confirmDrafts[index]`, never a local copy — `ConfirmDraft` is a
+    /// `struct`, so mutating a copy silently loses the edit the instant it goes out of scope (same
+    /// value-type trap `updateDraftTitle`'s doc comment warns about). Does NOT touch `dismissed` —
+    /// constitution II: dismiss always wins, same as `setDraftDeadline`.
+    func setDraftPriority(_ raw: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedPriority = raw
+    }
+
+    /// Same shape/reasoning as `setDraftPriority` immediately above, for the start-time chip's
+    /// `.popover` `DatePicker` write side.
+    func setDraftStartTime(_ date: Date, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedStartTime = date
+    }
+
+    /// Same shape/reasoning as `setDraftPriority` above, for the estimate/duration chip's preset
+    /// list write side.
+    func setDraftEstimateMinutes(_ minutes: Int, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedEstimateMinutes = minutes
+    }
+
+    /// Same shape/reasoning as `setDraftPriority` above, for the reminder-cadence chip's preset
+    /// list write side. Stores the RAW period only — `ConfirmDraft.effectiveReminderOverride` is
+    /// where that gets folded into a full `ReminderPolicy` at read time, same "normalize once, at
+    /// read time" split `updateDraftNotes`'s doc comment documents for notes below.
+    func setDraftRemindPeriod(_ seconds: TimeInterval, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedRemindPeriod = seconds
+    }
+
+    /// T-edit-notes (2026-07-28, same request as `setDraftDeadline` above): the notes editor's
+    /// write side, same value-type/array-mutation-trap reasoning `updateDraftTitle`'s own doc
+    /// comment already gives (`confirmDrafts[index]`, never a local copy). Deliberately does NOT
+    /// trim/flatten here — `effectiveNotes` (see `ConfirmDraft`) is where that normalization
+    /// happens, exactly once, at read time; storing the raw in-progress text here (including a
+    /// trailing newline mid-edit) is what lets a multi-line `TextField`/`TextEditor` keep working
+    /// normally while the user is still typing.
+    func updateDraftNotes(_ notes: String, forDraft draftID: ConfirmDraft.ID) {
+        guard let index = confirmDrafts.firstIndex(where: { $0.id == draftID }) else { return }
+        confirmDrafts[index].editedNotes = notes
     }
 
     /// Constitution V / FR-044: every chip edit is logged locally (never egressed) as the signal
@@ -1871,6 +4103,7 @@ final class AppState {
         case .recurrence: return task.recurrence.map { "\($0.value)" } ?? ""
         case .kind: return task.kind.rawValue
         case .followUpReview: return "\(task.followUpReview)"
+        case .startTime: return task.startTime.map { "\($0.value)" } ?? ""
         case nil: return "" // condition corrections describe themselves via `attribute`
         }
     }
@@ -1880,7 +4113,56 @@ final class AppState {
     /// `addBatch` itself). Preserves glance-and-dismiss + Enter-to-save (`PopoverView`'s
     /// `.keyboardShortcut(.defaultAction)` on the Save button, unchanged) and the frozen
     /// zero-argument signature.
+    ///
+    /// 2026-07-28 (confirm-list data layer): now a THREE-part save rather than a flat map —
+    ///
+    /// 1. Việc 1: `confirmDrafts.filter(\.isIncluded)` first. An unticked draft is saved nowhere,
+    ///    isn't a candidate to merge into, and can't be an intra-batch `.taskDone` target (handled
+    ///    below by simply never appearing in `targetID`).
+    /// 2. Việc 3: every included draft gets its post-save IDENTITY decided up front — a freshly
+    ///    minted id for `.addNew` (explicit, not left to `TaskItem.init`'s own default, so this
+    ///    method can look it up again below), or the ALREADY-PERSISTED id for `.useExisting` (that
+    ///    draft creates nothing; it merges into the existing task instead, see `mergeTransform`).
+    ///    A `.useExisting` target that no longer exists in `before` (deleted between the confirm
+    ///    card appearing and Save — this data layer has no live re-poll yet) degrades to `.addNew`
+    ///    rather than merging into a dangling id or losing the draft (self-review "no crash/no
+    ///    dangling id").
+    /// 3. Việc 2: intra-batch `.taskDone` conditions are resolved to real ids via that SAME
+    ///    `targetID` map — which is exactly why it has to exist before anything is created: the
+    ///    referenced draft can appear later in `confirmDrafts` than the one depending on it. A
+    ///    reference to a draft that isn't in `targetID` (unticked, or never existed) is simply
+    ///    dropped, never attached to a nonexistent id (self-review "explicit handling of both
+    ///    branches", task brief Việc 2.4).
+    ///
+    /// The store path commits in THREE ordered steps — new tasks (`addBatch`, chunked exactly as
+    /// before), then merges (`TaskStore.mergeIntoExisting`), then intra-batch conditions
+    /// (`TaskStore.addCondition`) — because step 3 needs every id from steps 1 and 2 to already be
+    /// real. A failure in step 1 aborts before steps 2/3 ever run (same "leave `confirmDrafts`
+    /// intact, let the user retry" contract the pre-existing catch block already had); a rejected
+    /// edge in step 3 (should not happen — see the `confirmCycle == nil` guard and step 3's own
+    /// comment below for why, per cycle-detection-contract.md §2) now surfaces through the shared
+    /// `catch` below rather than being silently dropped via `try?`, same as every other failure in
+    /// this method.
+    ///
+    /// task_refs_v1 (2026-08-02) adds a FOURTH step, threaded in between steps 2 and 3 above: every
+    /// surviving `.existing`-target `ConfirmUpdateDraft` (`self.confirmUpdateDrafts`, snapshotted as
+    /// `updateDrafts` right after `includedDrafts` below) writes its scalar fields
+    /// (deadline/startTime/priority/notesAppend) onto the ALREADY-persisted target task, and its
+    /// `addConditions` fold into the SAME `attachments` list step 3 already builds — both AFTER
+    /// `targetID` exists (a `taskDoneNewTask` reference needs a just-minted new-task id, same
+    /// "why this can't run any earlier" reasoning step 3 itself documents) but BEFORE the store's
+    /// single post-mutation refresh, so one `tasks = store.fetchAll()` picks up everything. See the
+    /// update-draft loops themselves (search `task_refs_v1`) for exactly why they call `TaskStore.
+    /// updateEditableFields(from:)` directly rather than `AppState.updateTask` (duplicate-
+    /// notification risk) and fold their target ids into `remindersTargetIDs` instead.
     func confirmSave() {
+        // cycle-detection-contract.md §2: safety net. `PopoverView` already locks the Save button
+        // (and its `.keyboardShortcut(.defaultAction)`) while `confirmCycle != nil`, but this
+        // guard is the one place that's actually load-bearing — Enter/hotkey routes here directly
+        // (`handleHotkey`'s `.parsed` case) without going through any button `.disabled` state at
+        // all, so a stale/missed `recomputeConfirmCycle()` call must not be the only thing
+        // standing between a cyclic batch and the store.
+        guard confirmCycle == nil else { return }
         guard !confirmDrafts.isEmpty else { return }
         captureState = .saving
         let now = clock()
@@ -1889,25 +4171,215 @@ final class AppState {
         // this whole method runs synchronously on @MainActor).
         let before = tasks
 
-        var itemsToSave: [TaskItem] = []
-        for draft in confirmDrafts {
-            let item = materialize(draft, now: now)
-            itemsToSave.append(item)
-            // Mi-1: the "+ review after done" chip is dismissible (defaults on, per
-            // `ChipKind.followUpReview`'s doc comment) — only materialize the derived `.review`
-            // task when the user hasn't dismissed it.
-            if draft.task.followUpReview, !draft.dismissed.contains(.followUpReview) {
-                itemsToSave.append(materializeFollowUpReview(for: item, now: now))
+        // Việc 1: unticked drafts are saved nowhere and can never be an intra-batch target —
+        // simply excluding them from every list below (`targetID`, `itemsToSave`, merges) is
+        // enough; nothing downstream needs a separate "is this included?" check.
+        let includedDrafts = confirmDrafts.filter(\.isIncluded)
+        guard !includedDrafts.isEmpty else {
+            // Every draft was unticked (unreachable today — no UI sets `isIncluded = false` yet,
+            // see that field's doc comment — but handled explicitly rather than left to crash or
+            // silently misbehave once lượt 2b's checkbox exists). Nothing to persist; close out
+            // quietly rather than announcing "0 tasks saved" via `finishSaveUI`.
+            confirmDrafts = []
+            // task_refs_v1: the user backed all the way out of this batch's new tasks, so any
+            // pending update card goes with it too — see this method's doc comment addendum for why
+            // this specific (today-unreachable) branch takes the conservative "whole batch" reading
+            // rather than trying to keep a same-session update card alive with nothing left to
+            // anchor its batch-order guarantees to.
+            confirmUpdateDrafts = []
+            captureState = .idle
+            liveTranscript = ""
+            return
+        }
+
+        // task_refs_v1: snapshot once, same "everything below reads THIS snapshot, never
+        // `self.confirmUpdateDrafts` live" discipline `includedDrafts` above already follows.
+        let updateDrafts = confirmUpdateDrafts
+        // self-review "nothing user-said silently lost": an update still `.unresolved` at Save — the
+        // picker (`PopoverView`'s `.unresolved` card) was on screen the whole time and the user
+        // neither picked a target nor dismissed it — is dropped below (never attached to a guess,
+        // constitution II), but RECORDED as a drop first, same local-telemetry convention
+        // `dismissCondition`/`resolveTaskDone`'s "dropped" correctedValue already uses for every
+        // other silent-ish drop in this file (`AppState.logCorrection`) — this one goes straight to
+        // `TaskStore.recordCorrection` instead of through that helper because `ConfirmUpdateDraft`
+        // has no `ParsedTask` to describe (see that struct's own doc comment on `sourceTitleQuery`).
+        for draft in updateDrafts where !draft.cardDismissed && draft.resolution == .unresolved {
+            store?.recordCorrection(
+                attribute: "taskRef[\(draft.refIndex)]",
+                parsed: draft.sourceTitleQuery,
+                corrected: "unresolved-dropped-at-save",
+                transcript: draft.sourceTitleQuery
+            )
+        }
+
+        // Việc 3 self-review: a `.useExisting` target that vanished since the draft was built
+        // (deleted from `before` — this confirm-list has no live re-poll) degrades to `.addNew`
+        // rather than merging into a dangling id.
+        let currentTaskIDs = Set(before.map(\.id))
+        func effectiveResolution(_ draft: ConfirmDraft) -> ConfirmDraft.DuplicateResolution {
+            if case .useExisting(let id) = draft.duplicateResolution, !currentTaskIDs.contains(id) {
+                return .addNew
+            }
+            return draft.duplicateResolution
+        }
+
+        // Việc 2/3: every included draft's post-save identity, decided BEFORE anything is created
+        // so intra-batch `.taskDone` conditions (which may reference a draft appearing later in
+        // `confirmDrafts`) always have a real id to resolve against.
+        var targetID: [ConfirmDraft.ID: UUID] = [:]
+        for draft in includedDrafts {
+            switch effectiveResolution(draft) {
+            case .addNew: targetID[draft.id] = UUID()
+            case .useExisting(let existingID): targetID[draft.id] = existingID
             }
         }
+
+        var itemsToSave: [TaskItem] = []
+        var mergeDrafts: [ConfirmDraft] = []
+        for draft in includedDrafts {
+            guard let id = targetID[draft.id] else { continue } // unreachable: built from includedDrafts above
+            let parentTitle: String
+            let parentSourceTranscript: String?
+            switch effectiveResolution(draft) {
+            case .addNew:
+                let item = materialize(draft, id: id, now: now)
+                itemsToSave.append(item)
+                parentTitle = item.title
+                parentSourceTranscript = item.sourceTranscript
+            case .useExisting:
+                mergeDrafts.append(draft)
+                // No new `TaskItem` for a merge — but the followUpReview chip below still needs
+                // something to name the derived review after; the utterance's own resolved title
+                // reads fine even though the merge itself may keep the OLDER task's title.
+                parentTitle = draft.effectiveTitle
+                parentSourceTranscript = draft.task.sourceTranscript
+            }
+            // Mi-1: the "+ review after done" chip is dismissible (defaults on, per
+            // `ChipKind.followUpReview`'s doc comment) — only materialize the derived `.review`
+            // task when the user hasn't dismissed it. `id` here is the SAME post-save identity
+            // (fresh or merge-target) an intra-batch condition elsewhere in this batch would also
+            // resolve to — a follow-up review is just as valid a dependent either way.
+            if draft.task.followUpReview, !draft.dismissed.contains(.followUpReview) {
+                itemsToSave.append(materializeFollowUpReview(
+                    parentID: id, parentTitle: parentTitle, sourceTranscript: parentSourceTranscript, now: now
+                ))
+            }
+        }
+
+        // Việc 2, pass two's payload: every intra-batch `.taskDone` this batch resolved, translated
+        // from "the OTHER draft's id" into "the other draft's REAL post-save id" via `targetID`.
+        // Computed once here (pure — no store/`tasks` mutation yet) so both the store and no-store
+        // branches below can apply the identical list.
+        var intraBatchAttachments: [(ownID: UUID, condition: VolarCore.Condition)] = []
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id] else { continue }
+            for (index, referencedDraftID) in draft.intraBatchTaskDone {
+                // Dismiss always wins (constitution II) — same guard `resolvedConditions` applies
+                // to every other condition kind.
+                guard !draft.dismissedConditions.contains(index) else { continue }
+                // The referenced draft is unticked, was removed from the batch, or (defensively)
+                // never existed: Việc 2.4 says drop the condition rather than point at nothing.
+                guard let refID = targetID[referencedDraftID], refID != ownID else { continue }
+                intraBatchAttachments.append((ownID: ownID, condition: .taskDone(refID)))
+            }
+        }
+
+        // task_refs_v1: fold in the two OTHER sources of a same-batch condition attachment —
+        // (a) `ConfirmDraft.refConditions`, added by `mergeUpdateIntoSibling` when a reference
+        // resolved to a SIBLING draft (see that field's own doc comment), and (b) a surviving
+        // `.existing`-target `ConfirmUpdateDraft`'s own `addConditions`, whose `taskDoneNewTask`
+        // needs `targetID` to resolve the 1-based index into a REAL, just-minted id — which is
+        // exactly why neither can be computed any earlier than here (self-review "save-order
+        // correctness"). One combined list so the SAME try-loop (store path) / append loop
+        // (no-store path) below attaches every kind identically.
+        //
+        // UNVERIFIED / known scope boundary (self-review "known scope boundary"): unlike
+        // `intraBatchTaskDone`/`resolvedTaskDone`, neither of these two sources feeds
+        // `recomputeConfirmCycle()` — a cycle introduced ONLY through a reference update will not
+        // show the pre-save `PopoverView` warning row, but is still caught here: `store.
+        // addCondition` below re-validates every `.taskDone` attachment (including these) and
+        // throws, surfacing through the SAME `catch` block as any other rejected edge (see that
+        // catch's own comment). The no-store fallback has no such backstop (previews/tests only,
+        // never a real save) — flagged as a follow-up, not fixed in this round.
+        var attachments = intraBatchAttachments
+        for draft in includedDrafts {
+            guard let ownID = targetID[draft.id] else { continue }
+            for (index, ref) in draft.refConditions.enumerated() {
+                guard !draft.dismissedRefConditions.contains(index) else { continue }
+                guard case .taskDone(let referencedDraftID) = ref else { continue }
+                guard let refID = targetID[referencedDraftID], refID != ownID else { continue }
+                attachments.append((ownID: ownID, condition: .taskDone(refID)))
+            }
+        }
+        for draft in updateDrafts where !draft.cardDismissed {
+            // `.unresolved` was already logged and is dropped here (no target to attach to);
+            // `.sibling` never reaches `confirmUpdateDrafts` at all (see `ConfirmUpdateDraft`'s doc
+            // comment) — either way, only `.existing` has anything to attach.
+            guard case .existing(let existingID) = draft.resolution else { continue }
+            for (index, condition) in draft.addConditions.enumerated() where !draft.dismissedAddConditions.contains(index) {
+                switch condition {
+                case .taskDoneNewTask(let refIndex):
+                    // 1-based into `ParsedCapture.tasks` == `confirmDrafts`' own order — both were
+                    // built from the SAME `capture.tasks` array, 1:1 (`ParsedUpdateCondition.
+                    // taskDoneNewTask`'s own pinned doc comment states this indexing convention).
+                    guard confirmDrafts.indices.contains(refIndex - 1) else { continue }
+                    guard let refID = targetID[confirmDrafts[refIndex - 1].id] else { continue } // unticked/never existed — dropped, never attached to nothing
+                    attachments.append((ownID: existingID, condition: .taskDone(refID)))
+                case .afterDate(let date):
+                    attachments.append((ownID: existingID, condition: .afterDate(date)))
+                }
+            }
+        }
+
+        let mergedTitles = mergeDrafts.map(\.effectiveTitle)
+        let mergedIDs = mergeDrafts.compactMap { targetID[$0.id] }
+        let savedTitles = itemsToSave.map(\.title) + mergedTitles
+        // task_refs_v1: every surviving `.existing`-target update draft's id, folded into the SAME
+        // list `scheduleRemindersForSavedItems` already processes at this method's single batched
+        // tail — this is how "deadline/startTime changes MUST re-derive reminders" (task brief) is
+        // satisfied WITHOUT calling `AppState.updateTask` per draft (see the scalar-field-write
+        // comment further down for why that would double-fire a real notification).
+        let updateTargetIDs = updateDrafts.compactMap { draft -> UUID? in
+            guard !draft.cardDismissed, case .existing(let id) = draft.resolution else { return nil }
+            return id
+        }
+        let remindersTargetIDs = itemsToSave.map(\.id) + mergedIDs + updateTargetIDs
 
         guard let store else {
             // No-store fallback (previews/tests without a TaskStore) — mirrors `addTask`'s own
             // no-store branch: in-memory only, no validation (there is no store to validate against).
             tasks.insert(contentsOf: itemsToSave.reversed(), at: 0)
+            // Việc 3: apply each merge directly onto its `tasks` entry — same "no validation, this
+            // is the no-store fallback" convention the rest of this branch already follows.
+            for draft in mergeDrafts {
+                guard let existingID = targetID[draft.id],
+                      let index = tasks.firstIndex(where: { $0.id == existingID })
+                else { continue }
+                tasks[index] = mergeTransform(for: draft)(tasks[index])
+            }
+            // task_refs_v1: apply each surviving `.existing`-target update draft's scalar fields
+            // directly — no-store fallback, same "no validation" convention as the merge loop right
+            // above. Must run BEFORE the attachments loop below for no particular ordering reason
+            // (the two touch disjoint parts of a `TaskItem`), but grouped here to mirror the store
+            // branch's own step order exactly.
+            for draft in updateDrafts where !draft.cardDismissed {
+                guard case .existing(let existingID) = draft.resolution,
+                      let index = tasks.firstIndex(where: { $0.id == existingID })
+                else { continue } // deleted between parse and Save — no-op, matches `TaskStore.updateEditableFields`'s own guard for the store path below
+                tasks[index] = updatedTaskItem(applying: draft, to: tasks[index])
+            }
+            // Việc 2 pass two, in-memory: append each resolved intra-batch/ref/update condition
+            // directly (task_refs_v1: `attachments` now also carries `ConfirmDraft.refConditions`
+            // and `ConfirmUpdateDraft.addConditions` — see that combined list's own comment above).
+            for attachment in attachments {
+                guard let index = tasks.firstIndex(where: { $0.id == attachment.ownID }) else { continue }
+                if !tasks[index].conditions.contains(attachment.condition) {
+                    tasks[index].conditions.append(attachment.condition)
+                }
+            }
             notifyEligibilityAndScheduleResurface(before: before, now: now)
-            scheduleRemindersForSavedItems(itemsToSave) // no-op: `scheduler` is nil without a store
-            finishSaveUI(titles: itemsToSave.map(\.title))
+            scheduleRemindersForSavedItems(remindersTargetIDs) // no-op: `scheduler` is nil without a store
+            finishSaveUI(titles: savedTitles)
             // FIX 6: membership change (new tasks, possibly with new deadlines).
             syncCalendarMirror()
             return
@@ -1932,11 +4404,60 @@ final class AppState {
             for chunk in chunks {
                 try store.addBatch(chunk)
             }
+            // Việc 3: merges only ever touch an ALREADY-persisted task, so they never depend on
+            // anything the chunk loop above just created — but doing them right after keeps every
+            // store mutation for this `confirmSave()` grouped before the single refresh below.
+            for draft in mergeDrafts {
+                guard let existingID = targetID[draft.id] else { continue }
+                store.mergeIntoExisting(existingID, applying: mergeTransform(for: draft))
+            }
+            // task_refs_v1: same "after new tasks/merges, before the attachments loop" placement as
+            // the no-store branch above — deliberately NOT `AppState.updateTask` (which would call
+            // `scheduler?.scheduleReminders`/`notifyEligibilityAndScheduleResurface`/
+            // `syncCalendarMirror` a SECOND time per draft, on top of this method's own single
+            // batched tail below). `ReminderScheduler.notifyUnblocked` is NOT idempotent — it
+            // inserts and immediately DELIVERS a new `ReminderRecord`/notification every call — so
+            // calling it once per update draft AND again for the whole batch would double-fire a
+            // real, user-visible alert. Reminders still re-derive correctly: `existingID` is folded
+            // into `remindersTargetIDs` above, which `scheduleRemindersForSavedItems` (this
+            // method's existing single tail call, unchanged) re-derives for every id it's handed —
+            // satisfying "deadline/startTime changes MUST re-derive reminders" without a second
+            // reminder/eligibility/calendar pass.
+            //
+            // `mergeIntoExisting`, NOT `updateEditableFields(from:)` built off the in-memory
+            // `tasks` snapshot (Opus review, 2026-08-02): `updateEditableFields` copies EVERY
+            // editable field from the item it's handed, and the in-memory snapshot is stale by
+            // this point whenever the merge loop right above already committed to this SAME target
+            // id (a duplicate-merge appending notes to X while this update only moves X's deadline
+            // — a stale-base copy would silently revert those notes). The closure receives the
+            // FRESH post-merge row straight from the DB, and `updatedTaskItem` only touches the
+            // fields this update actually resolved, so nothing else can be dragged backwards.
+            // Unknown id (deleted between parse and Save) is `mergeIntoExisting`'s own documented
+            // no-op — same convention as before.
+            for draft in updateDrafts where !draft.cardDismissed {
+                guard case .existing(let existingID) = draft.resolution else { continue }
+                store.mergeIntoExisting(existingID) { self.updatedTaskItem(applying: draft, to: $0) }
+            }
+            // Việc 2, pass two: attach every intra-batch/ref/update `.taskDone`/`.afterDate` now
+            // that every end (new, merged, OR already-existing) has a real, persisted id.
+            // cycle-detection-contract.md §2: this USED to be `try?`, silently dropping a rejected
+            // edge — but `recomputeConfirmCycle()` (called after every edit) plus the
+            // `confirmCycle == nil` guard at the top of this method mean a batch that reaches here
+            // should already be acyclic FOR THE EDGES IT COVERS. task_refs_v1's `refConditions`/
+            // `addConditions` edges are NOT among those (see `attachments`'s own comment above) — so
+            // for THOSE two specifically, this `try` is the first and only cycle check, not a "should
+            // not happen" backstop. Either way, a throw here surfaces through the shared `catch`
+            // below rather than being silently dropped — a task that's already committed by the time
+            // this throws stays committed either way (this loop runs strictly after the `addBatch`/
+            // merge/update steps above), just without the one edge that failed.
+            for attachment in attachments {
+                try store.addCondition(attachment.condition, to: attachment.ownID)
+            }
             // Phase-2 refresh-from-store convention (auto-advance + menu bar stay correct).
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
-            scheduleRemindersForSavedItems(itemsToSave)
-            finishSaveUI(titles: itemsToSave.map(\.title))
+            scheduleRemindersForSavedItems(remindersTargetIDs)
+            finishSaveUI(titles: savedTitles)
             // FIX 6: membership change (new tasks, possibly with new deadlines) — every chunk
             // committed successfully by this point.
             syncCalendarMirror()
@@ -1947,9 +4468,18 @@ final class AppState {
             // A failure on a LATER chunk (after earlier chunks already committed) is refreshed
             // from the store here too, so the UI never shows stale/duplicate state for the part
             // that did save — the user only re-confirms what's genuinely still outstanding.
+            // Merges/task_refs_v1 update-field-writes/intra-batch conditions never ran (they're only
+            // reached after the `do` block's `addBatch` chunk loop finishes without throwing), so
+            // there is nothing further to unwind here. If instead the `attachments` loop itself is
+            // what throws (reachable now that it also carries task_refs_v1's `refConditions`/
+            // `addConditions` edges — see that loop's own comment), everything ABOVE it in the `do`
+            // block — new tasks, merges, AND update-field writes — has already committed and stays
+            // committed; only the one failing edge (and any after it in `attachments`) is lost, same
+            // "partial success on this one edge, not a full rollback" behavior this catch already
+            // documented for merges before task_refs_v1 added a second source of a throwing edge.
             tasks = store.fetchAll()
             notifyEligibilityAndScheduleResurface(before: before, now: now)
-            scheduleRemindersForSavedItems(itemsToSave)
+            scheduleRemindersForSavedItems(itemsToSave.map(\.id))
             captureErrorDetail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
             captureState = .error
             // FIX 6: an earlier chunk may have committed successfully before this failure (see the
@@ -1959,50 +4489,215 @@ final class AppState {
         }
     }
 
-    /// WG-1 (constitution IV): schedules reminders for exactly the drafts that actually made it
-    /// into `tasks` — filtering against the just-refreshed `tasks` snapshot (rather than assuming
-    /// every item in `items` saved) so a partial-chunk failure in `confirmSave`'s catch branch
-    /// never schedules a reminder for a task that was never actually persisted.
-    private func scheduleRemindersForSavedItems(_ items: [TaskItem]) {
+    /// Việc 3: the merge-into-existing overlay, as a PURE `TaskItem -> TaskItem` transform so it
+    /// can be shared verbatim between the store path (`TaskStore.mergeIntoExisting`, which applies
+    /// it via `VolarTask.apply(_:)` behind its own cycle/rule-2 guards) and the no-store fallback
+    /// (which applies it directly to a `tasks` element, matching that branch's existing "no
+    /// validation" convention). Scalar attributes overwrite the existing value ONLY when
+    /// `AppState.resolvedValue` says this draft actually resolved one (present, not dismissed, and
+    /// accepted if uncertain — the SAME gate a brand-new task's `materialize(_:id:now:)` already
+    /// applies) — `nil` from `resolvedValue` here means "this utterance said nothing about this
+    /// attribute," so the existing task's value is left exactly as it was, never cleared. Anh Khôi
+    /// deliberately did NOT ask for `title`/`kind` to be touched by a merge, so this leaves those
+    /// alone — merging `title` would mean renaming an already-existing task, a different and
+    /// unrequested feature. `notes` is DIFFERENT (anh Khôi chốt 2026-07-29): it used to sit in this
+    /// same "left alone" group, but that was only ever true because notes couldn't be edited on the
+    /// confirm card at all — once T-edit-notes (2026-07-28) added `PopoverView.NotesEditorControl`,
+    /// picking "use existing" + typing a note started silently discarding whatever the user just
+    /// typed on Save, with no warning. So `notes` now merges too, via `mergeNotesAppending` below —
+    /// see that function's own doc comment for why it APPENDS rather than overwrites like every
+    /// scalar attribute in this method, and why it writes through to `details` as well as `notes`.
+    /// Conditions are UNIONED (de-duplicated), never replaced — anh Khôi: "có thể merge tất
+    /// cả condition vào" — intra-batch `.taskDone` entries are excluded from this union on purpose
+    /// (same as a brand-new task, `resolvedConditions` never includes them) since they're attached
+    /// separately, after every draft's real/merge-target id is known (`confirmSave`'s second pass).
+    private func mergeTransform(for draft: ConfirmDraft) -> (TaskItem) -> TaskItem {
+        // `[self]` rather than six `self.` prefixes: this closure escapes (it is handed to
+        // `TaskStore.mergeIntoExisting`), so the compiler requires the capture to be spelled out,
+        // and the capture list says it once at the top instead of repeating it at every call. A
+        // STRONG capture is deliberate and safe here — the closure is applied during the same
+        // `confirmSave()` call and never stored on `self`, so there is no cycle to break; a
+        // `[weak self]` would only add an optional to unwrap on a path that cannot outlive `self`.
+        { [self] existing in
+            var merged = existing
+            // T-overdue (self-review "save path"): reads through `effectiveDeadline`, NOT
+            // `draft.task.deadline` directly — a merge that resolved from a "Move to tomorrow" tap
+            // must carry the EDITED deadline into the existing task, same as a brand-new task's
+            // `materialize` below.
+            if let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft) {
+                merged.deadline = deadline
+            }
+            // T-disposition (self-review "save path"): `startTime` is a SCALAR overlay, same shape
+            // as `deadline`/`priority`/`estimate`/`reminder`/`recurrence` right around it — NOT in
+            // the title/kind group this method's own doc comment says anh Khôi deliberately
+            // excluded from merges. It's a plain "when did they mean to start" instant, not
+            // free-text authorship, so it follows the scalar convention: present, not dismissed,
+            // and confident (or explicitly accepted) overwrites the existing task's value exactly
+            // like every other attribute here.
+            // T-edit-attrs (manual-edit-contract.md §2): reads through `draft.effective*`, NOT
+            // `draft.task.*` directly — same "everywhere this attribute is read" reasoning
+            // `effectiveDeadline`'s call sites already document above, applied to the 4 fields
+            // T-edit-attrs added. A merge that resolved from a manual chip edit must carry the
+            // EDITED value into the existing task, same as a brand-new task's `materialize` below.
+            if let startTime = resolvedValue(draft.effectiveStartTime, kind: .startTime, draft: draft) {
+                merged.startTime = startTime
+            }
+            if let priorityRaw = resolvedValue(draft.effectivePriority, kind: .priority, draft: draft) {
+                merged.priority = Self.uiPriority(from: priorityRaw)
+            }
+            if let estimate = resolvedValue(draft.effectiveEstimateMinutes, kind: .estimate, draft: draft) {
+                merged.durationMinutes = estimate
+            }
+            if let reminder = resolvedValue(draft.effectiveReminderOverride, kind: .reminder, draft: draft) {
+                merged.reminderOverride = reminder
+            }
+            if let recurrence = resolvedValue(draft.task.recurrence, kind: .recurrence, draft: draft) {
+                merged.recurrence = recurrence
+            }
+            // T-notes-merge (self-review "save path", anh Khôi chốt 2026-07-29): notes APPEND
+            // rather than overwrite — the one deliberate exception to every scalar attribute
+            // above. Base is `existing.notes` (not `existing.details`): `materialize` always
+            // writes the SAME `effectiveNotes` value into both fields whenever the user actually
+            // authored a note, so `existing.notes == existing.details` in that case and either
+            // would do; but when a task has never had a real note, `existing.notes` is `nil`
+            // while `existing.details` may still hold the sourceTranscript read-back copy
+            // `materialize` falls back to for brand-new tasks — that fallback text is filler, not
+            // authorship, so `notes` (the one field that is `nil` unless a human actually typed
+            // something) is the correct "does this already have a real note" signal to append
+            // onto. The result is written to BOTH fields so they stay in the same lockstep
+            // `materialize` established — `details` is what `TaskDetailView`/`speakDetails`
+            // actually show the user, so writing only `notes` would merge data nobody ever sees.
+            if let mergedNotes = Self.mergeNotesAppending(existing: existing.notes, incoming: draft.effectiveNotes) {
+                merged.notes = mergedNotes
+                merged.details = mergedNotes
+            }
+            for condition in resolvedConditions(draft) where !merged.conditions.contains(condition) {
+                merged.conditions.append(condition)
+            }
+            // 006-cues-and-waiting (design.md §2 Việc B, task brief: "Cue phải sống sót qua cả
+            // đường tạo mới lẫn đường merge"): same scalar-overwrite convention as `deadline`/
+            // `startTime`/`priority`/`estimate`/`reminder` above (present wins outright) — NOT
+            // the `notes` append exception, since a cue is a single if-then utterance, not
+            // free-text that accumulates. Only overwrites when the new draft actually carries one;
+            // "xong task A" (an update utterance with no fresh cue) never blanks out a cue the
+            // existing task already had.
+            if let cue = draft.task.cue {
+                merged.cue = cue
+            }
+            return merged
+        }
+    }
+
+    /// Combines an existing (already-persisted) task's notes with a confirm draft's incoming
+    /// notes for a merge-into-existing save — pure so it can be unit-tested directly without
+    /// standing up an `AppState`/`ConfirmDraft` (see `mergeTransform` above for the one call site
+    /// and the reasoning for why `notes` appends here while every OTHER attribute in that method
+    /// overwrites). Intentionally `internal`, not `private`, for exactly that direct testability —
+    /// every other helper around it is `private` because nothing needs to reach them from outside
+    /// `mergeTransform`; this one is the deliberate exception.
+    ///
+    /// Returns `nil` — "leave `notes`/`details` exactly as they are" — when:
+    ///   - `incoming` is `nil`, or blank after trimming (the most common case: the user never
+    ///     touched the notes field on this draft at all, so `ConfirmDraft.effectiveNotes` is
+    ///     whatever the parser produced or nothing; either way there is nothing new to add).
+    ///   - `incoming` (trimmed) is already contained verbatim inside `existing` (trimmed) — most
+    ///     often because the two are flatly equal (the user re-typed something very close to what
+    ///     was already there), but a substring match is caught too so re-reading back a fragment
+    ///     of a longer existing note doesn't duplicate it either.
+    /// Otherwise returns the combined text: `existing` verbatim if there was none (or it was
+    /// blank), else `existing` + `"\n"` + `incoming`, both trimmed of only their leading/trailing
+    /// whitespace — same "trim ends, keep internal newlines" contract `ConfirmDraft.effectiveNotes`
+    /// already documents, so a multi-line existing note is never mangled by this concatenation.
+    static func mergeNotesAppending(existing: String?, incoming: String?) -> String? {
+        guard let incoming else { return nil }
+        let trimmedIncoming = incoming.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedIncoming.isEmpty else { return nil }
+
+        guard let existing else { return trimmedIncoming }
+        let trimmedExisting = existing.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedExisting.isEmpty else { return trimmedIncoming }
+
+        guard !trimmedExisting.contains(trimmedIncoming) else { return nil }
+        return trimmedExisting + "\n" + trimmedIncoming
+    }
+
+    /// WG-1 (constitution IV): schedules reminders for exactly the ids that actually made it into
+    /// `tasks` — filtering against the just-refreshed `tasks` snapshot (rather than assuming every
+    /// id in `ids` saved) so a partial-chunk failure in `confirmSave`'s catch branch never
+    /// schedules a reminder for a task that was never actually persisted. Takes bare ids (rather
+    /// than `[TaskItem]`, the pre-2026-07-28 signature) since `ReminderScheduler.scheduleReminders
+    /// (taskId:)` re-reads the task fresh from the store anyway — this lets `confirmSave` pass a
+    /// MERGED task's id (whose deadline/reminderOverride may have just changed) alongside brand-new
+    /// ones without needing a `TaskItem` for something that was never newly materialized.
+    private func scheduleRemindersForSavedItems(_ ids: [UUID]) {
         guard let scheduler else { return }
         let savedIds = Set(tasks.map(\.id))
-        for item in items where savedIds.contains(item.id) {
-            scheduler.scheduleReminders(taskId: item.id)
+        for id in ids where savedIds.contains(id) {
+            scheduler.scheduleReminders(taskId: id)
         }
     }
 
     /// One draft -> one `TaskItem`, resolving every `ParsedValue`/`ParsedCondition` per the
     /// contract's "Confirm + materialize" rules. `sourceTranscript` is ALWAYS persisted (closes
     /// the backlog item where `confirmSave` used to hardcode `deadline: nil` for voice tasks —
-    /// deadlines, like every other attribute, now come resolved from `ParsedTask`).
-    private func materialize(_ draft: ConfirmDraft, now: Date) -> TaskItem {
+    /// deadlines, like every other attribute, now come resolved from `ParsedTask`). `id` is now an
+    /// explicit parameter (2026-07-28, was `TaskItem.init`'s own default `UUID()`) so
+    /// `confirmSave` can mint it BEFORE calling this, record it in `targetID`, and have an
+    /// intra-batch `.taskDone` condition elsewhere in the same batch resolve to the exact id this
+    /// task ends up with.
+    private func materialize(_ draft: ConfirmDraft, id: UUID, now: Date) -> TaskItem {
         let task = draft.task
-        let deadline = resolvedValue(task.deadline, kind: .deadline, draft: draft)
-        let estimate = resolvedValue(task.estimateMinutes, kind: .estimate, draft: draft)
-        let priorityInt = resolvedValue(task.priority, kind: .priority, draft: draft)
-        let reminder = resolvedValue(task.reminderOverride, kind: .reminder, draft: draft)
+        // T-overdue (self-review "save path" — THE call site a "Move to tomorrow" tap must reach
+        // for the button to do anything at all): `draft.effectiveDeadline`, never `task.deadline`
+        // directly, so an applied overdue suggestion actually gets persisted.
+        let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft)
+        // T-disposition: same `resolvedValue` gate as every other scalar attribute here — dismissed
+        // or unaccepted-uncertain `startTime` is simply absent, never persisted. No "+30 min" math
+        // happens here or anywhere else in this file — that derivation already happened at the
+        // router/parse layer BEFORE this draft existed (`ParsedTask.deadline` already carries it);
+        // this file only ever reads the two values through, never recomputes either.
+        // T-edit-attrs (manual-edit-contract.md §2 — THIS is the call site that decides whether a
+        // manual chip edit actually gets saved, exactly like `effectiveDeadline` above already is
+        // for the deadline chip): reads through `draft.effective*`, never `task.*` directly, or a
+        // chip that visually shows the user's edit would still materialize the parser's old value.
+        let startTime = resolvedValue(draft.effectiveStartTime, kind: .startTime, draft: draft)
+        let estimate = resolvedValue(draft.effectiveEstimateMinutes, kind: .estimate, draft: draft)
+        let priorityInt = resolvedValue(draft.effectivePriority, kind: .priority, draft: draft)
+        let reminder = resolvedValue(draft.effectiveReminderOverride, kind: .reminder, draft: draft)
         let recurrence = resolvedValue(task.recurrence, kind: .recurrence, draft: draft)
         let kind = draft.dismissed.contains(.kind) ? .task : task.kind
 
         return TaskItem(
-            title: task.title,
+            id: id,
+            title: draft.effectiveTitle,
             // `details` is the voice read-back copy (`AppState.speakDetails`'s frozen-field
             // meaning, distinct from `notes` — see TaskItem.swift) — prefer explicit notes, else
-            // fall back to the verbatim transcript so read-back is never empty.
-            details: task.notes ?? task.sourceTranscript,
+            // fall back to the verbatim transcript so read-back is never empty. T-edit-notes:
+            // `draft.effectiveNotes`, not `task.notes` directly — same "everywhere notes is read"
+            // reasoning `effectiveDeadline`'s call sites already document (self-review "save path").
+            details: draft.effectiveNotes ?? task.sourceTranscript,
             priority: Self.uiPriority(from: priorityInt),
             status: .todo,
             deadline: deadline,
+            startTime: startTime,
             conditions: resolvedConditions(draft),
             createdAt: now,
             when: .now,
             durationMinutes: estimate,
             frog: false,
-            notes: task.notes,
+            notes: draft.effectiveNotes,
             sourceTranscript: task.sourceTranscript,
             kind: kind,
             recurrence: recurrence,
-            reminderOverride: reminder
+            reminderOverride: reminder,
+            // 006-cues-and-waiting (design.md §2 Việc B): straight pass-through, never resolved/
+            // gated the way `deadline`/`priority`/etc. are above — `TaskCue` carries no
+            // `ParsedValue`/confidence wrapper (unlike every other scalar attribute here) and no
+            // confirm-card chip exists to dismiss/accept it this round, so there is nothing to
+            // gate on. `nil` when the parse didn't produce one (no `task_cues_v1` cap, or no real
+            // event anchor in the utterance — see `IntentParsing.validateCue`'s own doc comment),
+            // exactly like every other optional field here that's simply absent when unparsed.
+            cue: task.cue
         )
     }
 
@@ -2012,6 +4707,44 @@ final class AppState {
         guard let value, !draft.dismissed.contains(kind) else { return nil }
         guard !value.isUncertain || draft.accepted.contains(kind) else { return nil }
         return value.value
+    }
+
+    /// task_refs_v1: `resolvedValue`'s exact same gate (present, not dismissed, confident-or-
+    /// accepted), scoped to `ConfirmUpdateDraft.Field` instead of `ChipKind` — see that enum's own
+    /// doc comment for why it's a separate small type rather than a `ChipKind` reuse.
+    private func resolvedUpdateValue<T>(
+        _ value: ParsedValue<T>?, field: ConfirmUpdateDraft.Field, draft: ConfirmUpdateDraft
+    ) -> T? {
+        guard let value, !draft.dismissed.contains(field) else { return nil }
+        guard !value.isUncertain || draft.accepted.contains(field) else { return nil }
+        return value.value
+    }
+
+    /// task_refs_v1: pure `TaskItem -> TaskItem` transform for one `ConfirmUpdateDraft`'s surviving
+    /// fields onto its `.existing` target — same "pure transform shared by the store and no-store
+    /// branches" shape `mergeTransform` above already establishes (see that method's own doc
+    /// comment for the precedent). `deadline`/`startTime`/`priority` OVERWRITE (present-and-resolved
+    /// wins outright, same as a brand-new task's own `materialize`); `notesAppend` reuses
+    /// `mergeNotesAppending` VERBATIM — the exact function `mergeTransform`'s own notes handling
+    /// already calls — so this is the SAME append-never-overwrite contract, not a second copy of it
+    /// (task brief: "notesAppend appends to existing notes... never overwrites").
+    private func updatedTaskItem(applying draft: ConfirmUpdateDraft, to existing: TaskItem) -> TaskItem {
+        var updated = existing
+        if let deadline = resolvedUpdateValue(draft.deadline, field: .deadline, draft: draft) {
+            updated.deadline = deadline
+        }
+        if let startTime = resolvedUpdateValue(draft.startTime, field: .startTime, draft: draft) {
+            updated.startTime = startTime
+        }
+        if let priorityRaw = resolvedUpdateValue(draft.priority, field: .priority, draft: draft) {
+            updated.priority = Self.uiPriority(from: priorityRaw)
+        }
+        if let notesValue = resolvedUpdateValue(draft.notesAppend, field: .notesAppend, draft: draft),
+           let combined = Self.mergeNotesAppending(existing: existing.notes, incoming: notesValue) {
+            updated.notes = combined
+            updated.details = combined
+        }
+        return updated
     }
 
     /// Resolves `task.conditions` into `VolarCore.Condition`s per the contract: `.afterDate`/
@@ -2052,23 +4785,28 @@ final class AppState {
         }
     }
 
-    /// `followUpReview` (contract): a second `.review`-kind task depending on the just-created
-    /// one via `.taskDone`. Appended immediately after its parent in `confirmSave`'s batch, so
+    /// `followUpReview` (contract): a second `.review`-kind task depending on `parentID` via
+    /// `.taskDone`. Appended immediately after its parent in `confirmSave`'s batch, so
     /// `TaskStore.addBatch`'s intra-batch snapshot (documented to grow as earlier items in the
-    /// SAME batch are accepted) validates the edge without a second pass.
-    private func materializeFollowUpReview(for parent: TaskItem, now: Date) -> TaskItem {
+    /// SAME batch are accepted) validates the edge without a second pass — and for a Việc 3 merge
+    /// target, `parentID` already refers to an ALREADY-persisted task, so the edge validates
+    /// trivially against the store's existing snapshot regardless. Takes `parentID`/`parentTitle`/
+    /// `sourceTranscript` directly (2026-07-28, was a full `parent: TaskItem`) so `confirmSave` can
+    /// call this the same way whether the parent is a brand-new item it just materialized OR an
+    /// existing task being merged into (which never gets its own `TaskItem` from this save).
+    private func materializeFollowUpReview(parentID: UUID, parentTitle: String, sourceTranscript: String?, now: Date) -> TaskItem {
         TaskItem(
-            title: "Review: \(parent.title)",
+            title: "Review: \(parentTitle)",
             details: "",
             priority: .medium,
             status: .todo,
             deadline: nil,
-            conditions: [.taskDone(parent.id)],
+            conditions: [.taskDone(parentID)],
             createdAt: now,
             when: .later,
             durationMinutes: nil,
             frog: false,
-            sourceTranscript: parent.sourceTranscript,
+            sourceTranscript: sourceTranscript,
             kind: .review
         )
     }
@@ -2079,6 +4817,11 @@ final class AppState {
     private func finishSaveUI(titles: [String]) {
         captureState = .done
         confirmDrafts = []
+        // task_refs_v1: every surviving update draft has already been applied by `confirmSave`
+        // (both its store and no-store branches) by the time this runs — cleared here the same way
+        // `confirmDrafts` itself is, since there is nothing left pending either way.
+        confirmUpdateDrafts = []
+        confirmCycle = nil
         runningEngine?.stop()
         voice.speak(titles.count == 1 ? (titles.first ?? "Saved") : "\(titles.count) tasks saved.")
         captureSession += 1
@@ -2145,6 +4888,65 @@ final class AppState {
         focusPaused.toggle()
     }
 
+    // MARK: - "Stuck?" — "cant_start" reason's 2-minute timer (anh Khôi, 2026-07-29)
+    //
+    // Deliberately its OWN small timer, NOT a reuse of `startFocus()`/`focusSecondsLeft`/
+    // `focusTick()` right above, even though the `Timer` construction below is copied from it
+    // verbatim for consistency. Reasons this reuse was rejected (self-review requirement: explain
+    // why, not just do something different):
+    //   1. Different semantics entirely. `startFocus()` is "spend a session ON THIS SPECIFIC TASK";
+    //      "cant_start" is explicitly the OPPOSITE — "the problem isn't which task, it's that I
+    //      can't get moving at all, so do absolutely anything for two minutes." Forcing the second
+    //      concept through the first would either misrepresent a task-agnostic permission slip as
+    //      "focusing on the stuck task" (defeating the whole point) or require a task parameter
+    //      `startFocus()` doesn't take and whose callers (`FocusOverlay`, `TodayView`, existing
+    //      tests) all assume is absent.
+    //   2. `startFocus()` hardcodes `25 * 60` and picks a task out of `openTasks` (frog-first) for
+    //      `FocusOverlay` to display in its title/priority/duration chip row — none of that applies
+    //      here; there is no task to show, no chip row, just a plain countdown + "stop."
+    //   3. `focusActive`/`focusIndex` additionally drive `FocusOverlay`'s full prev/next task-
+    //      navigation chrome. Reusing them would either force this timer to also render/behave
+    //      like the full task-focus overlay (wrong UI for "do anything") or require carving new
+    //      conditionals into `FocusOverlay`'s existing, already-shipped Focus-session rendering —
+    //      out of scope here and a real regression risk to a feature this task must not touch.
+    // So: a second, independent `Timer`, same construction shape as `startFocus()`'s for
+    // consistency, entirely separate state (`stuckTimerActive`/`stuckTimerSecondsLeft`/`stuckTimer`
+    // — never touches `focusActive`/`focusSecondsLeft`/`focusTimer` and vice versa).
+    func startStuckCantStartTimer() {
+        stuckTimerSecondsLeft = 120
+        stuckTimerActive = true
+        stuckTimer?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor [weak self] in
+                self?.stuckTimerTick()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        stuckTimer = timer
+    }
+
+    private func stuckTimerTick() {
+        guard stuckTimerActive else { return }
+        guard stuckTimerSecondsLeft > 0 else {
+            endStuckCantStartTimer()
+            return
+        }
+        stuckTimerSecondsLeft -= 1
+        if stuckTimerSecondsLeft <= 0 {
+            endStuckCantStartTimer()
+        }
+    }
+
+    /// Ends the "cant_start" timer early ("Stop") or on its own natural expiry — either way, no
+    /// record of it is kept anywhere (no completion count, no "did you actually do something"
+    /// follow-up question): the permission was the entire point, not a task to grade.
+    func endStuckCantStartTimer() {
+        stuckTimer?.invalidate()
+        stuckTimer = nil
+        stuckTimerActive = false
+        stuckTimerSecondsLeft = 0
+    }
+
     /// Completes the given task and advances the focus index, clamping into range — mirrors the
     /// prototype's `completeFocusTask`. If that was the last open task, ends the session.
     func completeFocusTask(_ id: UUID) {
@@ -2172,6 +4974,386 @@ final class AppState {
         // Mirrors `readDay` in volar-mac.jsx: announces open task count + up to 3 titles, or
         // "All clear" when empty. `VoicePlayback.readDay` reads `openTasks` off this instance.
         voice.readDay(self)
+    }
+
+    // MARK: - Switch ("đổi gió") — first-class, non-judgmental alternative to `completeFocusTask`
+    // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain available here — none of this
+    // section (through `switchDashboardActiveTask()` below) has been compiled or run. Needs a Mac
+    // build + `FocusSwitchTests` pass before shipping (see this session's final report for the
+    // exact verify checklist).
+
+    /// Anh Khôi's explicit framing (backlog 2026-07-15 (l)): an ADHD brain runs on novelty —
+    /// changing what you're working on isn't giving up, it's how the brain actually works. Focus
+    /// Lock was already a SOFT lock (`goToPrevious`/`goToNext` in `FocusOverlay` already let you
+    /// move off the current task); this makes leaving-on-purpose a first-class action with its own
+    /// name, equal in standing to `completeFocusTask`/`toggleDone`, instead of an unlabeled side-
+    /// effect of the arrow keys or something that only lives in `FocusOverlay`.
+    ///
+    /// Pure: the ONE replacement task Switch should hand the focus slot to, given the full
+    /// still-open snapshot and the id of whatever currently occupies it. Filters `currentID` OUT
+    /// of the snapshot and re-runs `VolarCore.nextTask` on what's left — this app layer never
+    /// reimplements the engine's own eligibility/ordering rules, it only excludes one task before
+    /// asking again. Returns `nil` when nothing else is eligible (the excluded task was the only
+    /// one open, or every remaining task is blocked/ineligible), so the caller can leave the slot
+    /// alone instead of "switching" into nothing.
+    ///
+    /// `now`/`calendar` are parameters, never read internally (repo convention — see
+    /// `VolarCore.nextTask`'s own doc comment and `TaskSections.swift`'s file header), so this
+    /// stays a pure, deterministic, directly-testable function.
+    static func nextSwitchTarget(
+        excluding currentID: UUID,
+        from openTasks: [TaskItem],
+        now: Date,
+        calendar: Calendar
+    ) -> TaskItem? {
+        let remaining = openTasks.filter { $0.id != currentID }
+        guard !remaining.isEmpty else { return nil }
+        let engineTasks = remaining.map { $0.snapshot() }
+        guard let winner = VolarCore.nextTask(from: engineTasks, now: now, calendar: calendar) else { return nil }
+        return remaining.first { $0.id == winner.id }
+    }
+
+    /// FR-030: once a task's `switchAwayCount` first reaches this many, it earns the one-time
+    /// breakdown invite (`switchBreakdownSuggestion`).
+    private static let switchBreakdownThreshold = 3
+
+    /// Shared tail of EVERY Switch action, wherever it was triggered from (`FocusOverlay`'s
+    /// fullscreen Switch or `TodayView`'s hero-card Switch) — the one and only place
+    /// `switchAwayCount` is written, so the two call sites can never drift on how counting works.
+    /// Bumps `left`'s `switchAwayCount` by exactly 1 (store-backed when a real `TaskStore` exists,
+    /// via the EXISTING `mergeIntoExisting` — no new `TaskStore` method needed; in-memory fallback
+    /// otherwise, same convention `toggleDone`'s own `guard let store else { … }` branch uses), then
+    /// checks the FR-030 threshold. Deliberately the ONLY field this touches: no `status` change,
+    /// no other mutation, on `left` or anyone else.
+    private func recordSwitchAway(from left: TaskItem) {
+        guard let store else {
+            var newCount = left.switchAwayCount + 1
+            if let index = tasks.firstIndex(where: { $0.id == left.id }) {
+                tasks[index].switchAwayCount = newCount
+            } else {
+                // Unknown id (shouldn't happen — `left` always comes from a live `tasks` read just
+                // above the call site) — still evaluate the threshold off the value we WOULD have
+                // written, rather than silently skipping the FR-030 check.
+                newCount = left.switchAwayCount + 1
+            }
+            maybeOfferBreakdown(taskID: left.id, newCount: newCount)
+            return
+        }
+        let updated = store.mergeIntoExisting(left.id) { task in
+            var updated = task
+            updated.switchAwayCount += 1
+            return updated
+        }
+        tasks = store.fetchAll()
+        maybeOfferBreakdown(taskID: left.id, newCount: updated?.switchAwayCount ?? (left.switchAwayCount + 1))
+    }
+
+    /// FR-030: arms the one-time breakdown invite for `taskID` the FIRST time `newCount` crosses
+    /// `switchBreakdownThreshold` — `switchBreakdownOffered` (persisted, see its own doc comment)
+    /// is checked and updated in the SAME call, so a task that keeps getting switched away from
+    /// (4th, 5th, ... time) is never asked twice. `switchAwayCount`/this check never appear in any
+    /// UI copy — see `dismissSwitchBreakdownSuggestion`/`acceptSwitchBreakdownSuggestion` and
+    /// `SwitchBreakdownSuggestionBanner` (`FocusOverlay.swift`) for the one place the RESULT of
+    /// crossing the threshold is shown, which is a plain invite, never the count itself.
+    private func maybeOfferBreakdown(taskID: UUID, newCount: Int) {
+        guard newCount >= Self.switchBreakdownThreshold, !switchBreakdownOffered.contains(taskID) else { return }
+        switchBreakdownOffered.insert(taskID)
+        UserDefaults.standard.set(switchBreakdownOffered.map(\.uuidString), forKey: Self.switchBreakdownOfferedKey)
+        switchBreakdownSuggestion = tasks.first { $0.id == taskID }
+    }
+
+    /// Declining the FR-030 invite: closes it, permanently (`switchBreakdownOffered` was already
+    /// updated the moment it was armed, in `maybeOfferBreakdown` above — there is nothing left to
+    /// persist here, this is purely dismissing the banner).
+    func dismissSwitchBreakdownSuggestion() {
+        switchBreakdownSuggestion = nil
+    }
+
+    /// Accepting the FR-030 invite: routes straight into the EXISTING breakdown flow
+    /// (`openBreakdown(for:)`, unchanged) rather than inventing a second one — this is a shortcut
+    /// into "Break down into steps…", the same feature already reachable from the hero card's/
+    /// `TaskRow`'s own context menu.
+    func acceptSwitchBreakdownSuggestion() {
+        guard let task = switchBreakdownSuggestion else { return }
+        switchBreakdownSuggestion = nil
+        openBreakdown(for: task)
+    }
+
+    // MARK: - "Stuck?" (anh Khôi, 2026-07-29) — one button, three plainly-worded reasons, three
+    // deliberately different responses. See the state doc comments above (`stuckPickerTask`
+    // onward) for why "chia nhỏ" (breakdown) alone doesn't cover all three.
+
+    /// Opens the reason picker for `task`. Both Stuck buttons (`FocusOverlay`, `TodayView`'s hero
+    /// card) call this and nothing else — mirrors `openBreakdown(for:)`'s single-entry-point shape.
+    func openStuckPicker(for task: TaskItem) {
+        stuckPickerTask = task
+    }
+
+    /// Declining the picker without choosing a reason (tapping elsewhere / closing the popover).
+    func dismissStuckPicker() {
+        stuckPickerTask = nil
+    }
+
+    /// Routes a chosen reason to its own fix. Closes the picker synchronously in every case (the
+    /// three branches below diverge on what happens NEXT, not on whether the picker stays open).
+    ///
+    /// `.tooBig` REDESIGNED (anh Khôi, 2026-07-29, same day as the first version, after he
+    /// challenged it directly): used to route straight into `openBreakdown(for:)` (a full 3-9 step
+    /// plan). Rejected because Volar has no real context for a task beyond a short spoken title —
+    /// asking for a full plan under that blindness meant steps 3+ were fabrication dressed as
+    /// advice. Now fetches exactly ONE next physical action instead (`fetchStuckNextAction`); the
+    /// full plan is still one tap away via that banner's own "See full plan" button
+    /// (`openFullPlanFromStuck`), which is the ONLY place `openBreakdown(for:)` is still reached
+    /// from this feature.
+    func chooseStuckReason(_ reason: StuckReason, for task: TaskItem) {
+        stuckPickerTask = nil
+        switch reason {
+        case .tooBig:
+            fetchStuckNextAction(for: task)
+        case .dread:
+            fetchStuckDread(for: task)
+        case .cantStart:
+            // No task binding, no model call at all — see `startStuckCantStartTimer`'s doc comment
+            // (next to `startFocus()`) for why "cant_start" needs neither.
+            startStuckCantStartTimer()
+        }
+    }
+
+    /// The async "dread" fetch, split out so `chooseStuckReason` stays synchronous — same
+    /// "synchronous state flip before the async hop" shape `fetchBreakdown` documents.
+    /// `sourceTranscript`/`deadline`/`existingSubtasks` (anh Khôi, 2026-07-29 "richer context"
+    /// addendum) are computed synchronously here, same "read `self.tasks` before the async hop,
+    /// not inside it" reasoning `fetchBreakdown` documents for the identical pattern.
+    private func fetchStuckDread(for task: TaskItem) {
+        stuckDreadSession += 1
+        let session = stuckDreadSession
+        stuckDreadTask = task
+        stuckDreadState = .loading
+        let context = existingSubtaskContext(for: task)
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let message = await self.router.stuckDread(
+                title: task.title,
+                notes: task.notes,
+                sourceTranscript: task.sourceTranscript,
+                deadline: task.deadline,
+                existingSubtasks: context
+            )
+            self.applyStuckDreadResult(message, session: session)
+        }
+    }
+
+    /// The synchronous tail of `fetchStuckDread`, split out for the same direct-unit-testability
+    /// reason `applyBreakdownFetchResult` documents: a test can simulate "the router came back
+    /// with this" (or came back with `nil`) without a real FM/network round trip. Not `private`
+    /// for that reason.
+    func applyStuckDreadResult(_ message: String?, session: Int) {
+        // Stale? The banner was dismissed, or Stuck was reopened for a different task, while this
+        // fetch was in flight — same `captureSession`/`breakdownSession` guard shape.
+        guard stuckDreadSession == session else { return }
+        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stuckDreadState = .loaded(message)
+        } else {
+            // Neither tier produced anything usable — the STATIC fallback sentence takes over
+            // (`Self.stuckDreadFallbackMessage`), never silence, never an invented claim about the
+            // task.
+            stuckDreadState = .fallback
+        }
+    }
+
+    /// Dismissing the dread message/fallback banner without acting on it.
+    func dismissStuckDread() {
+        stuckDreadSession += 1 // invalidate any fetch still in flight for this task
+        stuckDreadState = .idle
+        stuckDreadTask = nil
+    }
+
+    /// Accepting the dread message's proposed 2-minute action. Deliberately lands on the EXACT
+    /// same task-agnostic timer `chooseStuckReason(.cantStart, for:)` starts — both are, at bottom,
+    /// "do one small physical thing for up to two minutes, no judgment either way," so there is no
+    /// reason for a second timer implementation here.
+    func acceptStuckDreadAction() {
+        stuckDreadState = .idle
+        stuckDreadTask = nil
+        startStuckCantStartTimer()
+    }
+
+    // MARK: - "Stuck?" — "too_big" reason's single next-action fetch (anh Khôi, 2026-07-29
+    // REDESIGN). See `chooseStuckReason`'s doc comment above for why this reason no longer opens
+    // `TaskBreakdownView` directly.
+
+    /// State machine for the "too_big" reason's async single-next-action fetch. Deliberately a
+    /// SEPARATE state machine from `StuckDreadState` above, not a shared/generalized one: the two
+    /// reasons' failure modes are NOT the same shape (see `.unavailable` below), and forcing them
+    /// through one enum would either give `too_big` a fabricated-content fallback case it must
+    /// never have, or strip `dread`'s legitimate static fallback — either way, blurring a
+    /// distinction anh Khôi drew deliberately.
+    enum StuckNextActionState: Equatable, Sendable {
+        case idle
+        case loading
+        /// A real, model-produced single next action (on-device FM or Cloud — see
+        /// `IntentRouter.stuckNextAction`).
+        case loaded(String)
+        /// Neither FM nor Cloud produced anything usable. Deliberately NOT the same shape as
+        /// `StuckDreadState.fallback`: that case carries a STATIC SUGGESTED ACTION, which is safe
+        /// because it is the app's own generic words, not a claim about the task; a next-action
+        /// equivalent would have to claim SOME specific-sounding physical action, which would
+        /// misrepresent a guess as something the app actually determined for THIS task — exactly
+        /// the fabrication this reason's redesign exists to avoid. So this case carries NO
+        /// suggested content at all, only the fact that nothing was found — mirrors
+        /// `BreakdownFetchState.failed`'s "tell the truth, never fabricate" rule.
+        case unavailable
+    }
+    var stuckNextActionState: StuckNextActionState = .idle
+    /// Whichever task `stuckNextActionState` currently describes — `nil` while idle. Same role as
+    /// `stuckDreadTask` for the sibling state machine above.
+    var stuckNextActionTask: TaskItem?
+    /// Monotonic guard token, exact same shape as `stuckDreadSession`/`breakdownSession`.
+    private var stuckNextActionSession = 0
+
+    /// The async "too_big" fetch, split out so `chooseStuckReason` stays synchronous — same shape
+    /// as `fetchStuckDread` right above, including computing `existingSubtaskContext` synchronously
+    /// before the async hop.
+    private func fetchStuckNextAction(for task: TaskItem) {
+        stuckNextActionSession += 1
+        let session = stuckNextActionSession
+        stuckNextActionTask = task
+        stuckNextActionState = .loading
+        let context = existingSubtaskContext(for: task)
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let message = await self.router.stuckNextAction(
+                title: task.title,
+                notes: task.notes,
+                sourceTranscript: task.sourceTranscript,
+                deadline: task.deadline,
+                existingSubtasks: context
+            )
+            self.applyStuckNextActionResult(message, session: session)
+        }
+    }
+
+    /// The synchronous tail of `fetchStuckNextAction`, split out for the same direct-
+    /// unit-testability reason `applyStuckDreadResult`/`applyBreakdownFetchResult` document. Not
+    /// `private` for that reason.
+    func applyStuckNextActionResult(_ message: String?, session: Int) {
+        guard stuckNextActionSession == session else { return }
+        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            stuckNextActionState = .loaded(message)
+        } else {
+            // No static fallback here — see `StuckNextActionState.unavailable`'s own doc comment
+            // for why a fabricated-sounding "do something" claim would misrepresent a guess as a
+            // real answer for THIS task, unlike `dread`'s legitimately app-authored fallback text.
+            stuckNextActionState = .unavailable
+        }
+    }
+
+    /// Dismissing the next-action banner without acting on it.
+    func dismissStuckNextAction() {
+        stuckNextActionSession += 1 // invalidate any fetch still in flight for this task
+        stuckNextActionState = .idle
+        stuckNextActionTask = nil
+    }
+
+    /// Accepting the next action's proposed 2-minute action. Lands on the EXACT same task-agnostic
+    /// timer every other "start the small thing" acceptance uses (`acceptStuckDreadAction`,
+    /// `cant_start`) — same reasoning as that method's own doc comment.
+    func acceptStuckNextActionAction() {
+        stuckNextActionState = .idle
+        stuckNextActionTask = nil
+        startStuckCantStartTimer()
+    }
+
+    /// The next-action banner's secondary "See full plan" action (anh Khôi, 2026-07-29 REDESIGN) —
+    /// the ONLY place this feature still reaches the full existing breakdown flow
+    /// (`openBreakdown(for:)`, entirely unchanged) — never a second implementation of it. Available
+    /// regardless of whether the quick single-action fetch succeeded, is still loading, or came
+    /// back `.unavailable`: this is a deliberate escape hatch to the full plan, not conditioned on
+    /// the quick answer's own outcome.
+    func openFullPlanFromStuck(for task: TaskItem) {
+        stuckNextActionState = .idle
+        stuckNextActionTask = nil
+        openBreakdown(for: task)
+    }
+
+    /// Shared plumbing for `switchFocusTask()`/`canSwitchFocusTask` (the `FocusOverlay` path): the
+    /// task currently in the focus slot, the task `nextSwitchTarget` would hand focus to next, and
+    /// that replacement's own index in `openTasks` — `nil` whenever there is nothing to switch TO
+    /// (focus not active, `openTasks` empty, or every other open task is currently ineligible).
+    /// Kept side-effect-free so the view can poll `canSwitchFocusTask` on every render without
+    /// accidentally mutating anything.
+    private func focusSwitchCandidate() -> (current: TaskItem, replacement: TaskItem, newIndex: Int)? {
+        guard focusActive else { return nil }
+        let openNow = openTasks
+        guard !openNow.isEmpty else { return nil }
+        let clampedIndex = min(max(focusIndex, 0), openNow.count - 1)
+        let current = openNow[clampedIndex]
+        guard
+            let replacement = Self.nextSwitchTarget(excluding: current.id, from: openNow, now: clock(), calendar: .current),
+            let newIndex = openNow.firstIndex(where: { $0.id == replacement.id })
+        else { return nil }
+        return (current, replacement, newIndex)
+    }
+
+    /// Drives the Switch button's disabled state (mirrors `bottomNav`'s existing prev/next
+    /// disabled-at-the-bound convention in `FocusOverlay`) — false when there is genuinely nowhere
+    /// else to send focus right now (e.g. exactly one open task left).
+    var canSwitchFocusTask: Bool { focusSwitchCandidate() != nil }
+
+    /// Hands the focus slot to a different open task. The task being left gets exactly ONE thing
+    /// written to it — `switchAwayCount + 1`, via `recordSwitchAway` (never shown anywhere, purely
+    /// an internal FR-030 signal) — and nothing else: no `status` change, no negative flag. It
+    /// simply stops being the one shown, and re-enters normal `nextTask()` contention exactly where
+    /// it already sat. Next time it wins selection again it comes back with its existing
+    /// `sourceTranscript`/`resumeNote`/step progress intact (`FocusOverlay` re-displays those as-is
+    /// via `stepProgress(for:)`), because nothing else about the task itself ever changed.
+    ///
+    /// Recomputes the replacement's index AFTER `recordSwitchAway` (rather than reusing
+    /// `focusSwitchCandidate()`'s pre-mutation index) — same "refresh, then recompute" discipline
+    /// `completeFocusTask` above already uses, since a store-backed `recordSwitchAway` reloads
+    /// `tasks` from the store. A no-op when there is nowhere else to switch to
+    /// (`canSwitchFocusTask == false`) — the UI disables the button for that same state, this guard
+    /// is just the backstop.
+    func switchFocusTask() {
+        guard let candidate = focusSwitchCandidate() else { return }
+        recordSwitchAway(from: candidate.current)
+        if let refreshedIndex = openTasks.firstIndex(where: { $0.id == candidate.replacement.id }) {
+            focusIndex = refreshedIndex
+        }
+        if voiceFeedback {
+            voice.speak("Switched. \(candidate.replacement.title)")
+        }
+    }
+
+    /// Shared plumbing for `switchDashboardActiveTask()`/`canSwitchDashboardActiveTask` (the
+    /// `TodayView` hero-card path): today's dashboard-spotlit task (`dashboardActiveTask`) plus the
+    /// task `nextSwitchTarget` would hand the spotlight to next — `nil` when there's nothing spotlit
+    /// or nothing else eligible.
+    private func dashboardSwitchCandidate() -> (current: TaskItem, replacement: TaskItem)? {
+        guard let current = dashboardActiveTask else { return nil }
+        guard let replacement = Self.nextSwitchTarget(excluding: current.id, from: openTasks, now: clock(), calendar: .current) else {
+            return nil
+        }
+        return (current, replacement)
+    }
+
+    /// Drives the hero card's Switch button disabled state — same "false when nothing else is
+    /// eligible" contract as `canSwitchFocusTask`, just against `dashboardActiveTask` instead of
+    /// `focusIndex`.
+    var canSwitchDashboardActiveTask: Bool { dashboardSwitchCandidate() != nil }
+
+    /// Hands the dashboard hero card's spotlight to a different open task — same non-mutation
+    /// contract as `switchFocusTask()` above (only `switchAwayCount` changes on the task being
+    /// left, via the same shared `recordSwitchAway`). Sets `dashboardSwitchOverrideID` so
+    /// `dashboardActiveTask` picks the replacement up immediately; self-heals back to the engine's
+    /// own `activeTask` once the replacement itself is done/deleted/switched away from in turn.
+    func switchDashboardActiveTask() {
+        guard let candidate = dashboardSwitchCandidate() else { return }
+        recordSwitchAway(from: candidate.current)
+        dashboardSwitchOverrideID = candidate.replacement.id
+        if voiceFeedback {
+            voice.speak("Switched. \(candidate.replacement.title)")
+        }
     }
 
     // MARK: - Appearance controls (Settings → Appearance)
@@ -2296,9 +5478,165 @@ final class AppState {
         showMorningFrog = false
     }
 
-    /// Task-breakdown sheet: "Save all as tasks" — persists each step title as a real `TaskItem`
-    /// (medium priority, `.later`, no deadline/duration — the breakdown generator doesn't produce
-    /// those yet), then dismisses.
+    /// Task-breakdown sheet entry point: EVERY "Break down into steps…" call site (`TaskRow.swift`,
+    /// `TodayView.swift` x2, `triageBreakdown` below) routes through here now, instead of the old
+    /// bare `showBreakdown = true` that opened the sheet onto 5 hard-coded sample rows
+    /// ("Open Framer", "Draft headline + subhead", …) regardless of which task — or whether ANY
+    /// task — was actually clicked. Kicks off the real fetch immediately so the sheet opens
+    /// straight into `.loading` rather than needing a second explicit trigger from the View.
+    func openBreakdown(for task: TaskItem) {
+        breakdownTask = task
+        showBreakdown = true
+        fetchBreakdown(for: task)
+    }
+
+    /// title+done snapshot of `task`'s existing children (anh Khôi, 2026-07-29 "richer context"
+    /// addendum) — the extra grounding this app can offer `breakdown`/`stuck` calls beyond a bare
+    /// title, so a repeat call never regenerates/repeats a step already finished. `nil` when there
+    /// are no children yet, matching the wire's own "omit the field entirely" convention for an
+    /// absent/empty `existingSubtasks` (see `TaskContextSubtask`'s doc comment,
+    /// `Sources/Parsing/IntentParsing.swift`, for the shared type both this and the transport layer
+    /// use). Shared by `fetchBreakdown`, `fetchStuckDread`, and `fetchStuckNextAction` below — one
+    /// definition, so the three call sites can never compute "which children count" three
+    /// different ways.
+    private func existingSubtaskContext(for task: TaskItem) -> [TaskContextSubtask]? {
+        let children = tasks.filter { $0.parentId == task.id }
+        guard !children.isEmpty else { return nil }
+        return children.map { TaskContextSubtask(title: $0.title, done: $0.done) }
+    }
+
+    /// `TaskBreakdownView`'s `.onDisappear` calls this on EVERY dismissal path (Cancel, Edit-as-
+    /// cancel, Esc, the system sheet-close control) — not just the `onClose()` closure
+    /// `VolarApp.swift` wires to the Cancel/Edit buttons, since SwiftUI can tear a sheet down
+    /// without that closure ever running. Bumping `breakdownSession` here is what stops a fetch
+    /// already in flight for the task just dismissed from landing on — or silently populating —
+    /// whichever task's sheet opens next: same stale-token shape as `captureSession`/
+    /// `textCaptureSession` elsewhere in this file.
+    func closeBreakdown() {
+        breakdownSession += 1
+        breakdownTask = nil
+        breakdownFetchState = .idle
+    }
+
+    /// The actual async breakdown fetch, split out of `openBreakdown(for:)` so the session bump +
+    /// `.loading` assignment happen SYNCHRONOUSLY before the `_Concurrency.Task` hop — exactly
+    /// `runParse`'s own shape (`captureSession`/`captureState = .parsing` set synchronously, THEN
+    /// the async router call, further down this file). Routes through the SAME `IntentRouter` the
+    /// rest of cloud parsing already uses — `router.breakdownWithContext(...)` (anh Khôi, 2026-07-29
+    /// "richer context" addendum; see that method's own doc comment for why it's a separate method
+    /// from the frozen `router.breakdown(title:notes:)` protocol witness), alongside the existing
+    /// `router.parse`/`router.resolveCompletion` — rather than a second networking path opened
+    /// directly from a View.
+    ///
+    /// `router.breakdownWithContext` itself tries FM (on-device, macOS 26+) -> Cloud -> `[]`.
+    ///
+    /// (2026-07-28, anh Khôi chốt: `router.breakdown` USED to fall through, unconditionally, to a
+    /// hard-coded heuristic floor — `HeuristicNLParser.breakdown`, `Sources/Model/NLParser.swift`:
+    /// literally "Gather what's needed for X" / "Start the first small piece" / … / "Wrap up X",
+    /// a fixed template, not real per-task content. That call is now removed from
+    /// `IntentRouter.breakdown` itself (see the doc comment on `IntentRouter.init` in
+    /// `IntentParsing.swift`) — `HeuristicNLParser`'s code is untouched, just no longer wired in.
+    /// So `steps` below is now genuinely `[]`, not a disguised template, whenever neither FM nor
+    /// Cloud produced a valid breakdown.)
+    ///
+    /// This method still adds two safeguards on top of `router.breakdown`:
+    ///   1. A pre-flight check of the same two cloud preconditions the rest of the app already
+    ///      surfaces (`cloudParseConsent == true` — the opt-in flag both the onboarding consent
+    ///      toggle and the Settings parse-engine picker write — AND `ConfigParseCredentialProvider
+    ///      .isConfigured`, i.e. signed in; mirrors `SettingsView`'s own "Cloud parsing status"
+    ///      hint). Not signed in, or never opted in, -> `.unavailable` WITHOUT ever calling the
+    ///      router.
+    ///   2. Even when both preconditions hold, the live network call can still fail right now
+    ///      (offline, quota just exhausted server-side) — `router.breakdown` now returns `[]` in
+    ///      that case (no more hard-coded floor to fall through to), which `applyBreakdownFetchResult`
+    ///      below maps to `.failed` via its plain "steps is empty" guard. The `heuristicFloor`
+    ///      parameter/comparison further down is kept ONLY because `applyBreakdownFetchResult` is
+    ///      also called directly by `CloudFirstDefaultsAndBreakdownTests.swift` to exercise that
+    ///      exact disguised-floor scenario in isolation — from THIS call site it is now passed `[]`
+    ///      and the comparison is dead weight (never true, since `steps` is non-empty by the time
+    ///      it's reached). Left in place rather than reworking that test's signature, which is out
+    ///      of scope for this change (see backlog.md).
+    private func fetchBreakdown(for task: TaskItem) {
+        breakdownSession += 1
+        let session = breakdownSession
+        breakdownFetchState = .loading
+
+        guard cloudParseConsent == true, ConfigParseCredentialProvider.isConfigured else {
+            breakdownFetchState = .unavailable
+            return
+        }
+
+        // anh Khôi, 2026-07-29 "richer context" addendum: `task.sourceTranscript`/`task.deadline`
+        // plus a snapshot of any existing children now ride along with the request — computed
+        // synchronously here (pure reads off `self.tasks`, no `await` needed) rather than inside
+        // the `_Concurrency.Task` below, so a mutation to `tasks` between now and the network
+        // response can't change which snapshot this particular fetch reports.
+        let context = existingSubtaskContext(for: task)
+
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            let steps = await self.router.breakdownWithContext(
+                title: task.title,
+                notes: task.notes,
+                sourceTranscript: task.sourceTranscript,
+                deadline: task.deadline,
+                existingSubtasks: context
+            )
+            // No more `HeuristicNLParser().breakdown(...)` floor to diff against (removed
+            // 2026-07-28 — see doc comment above): pass `[]` for `heuristicFloor` so
+            // `applyBreakdownFetchResult`'s legacy disguised-floor comparison is a no-op from this
+            // call site, while keeping that parameter's signature intact for the existing tests in
+            // `CloudFirstDefaultsAndBreakdownTests.swift` that call it directly with real values.
+            self.applyBreakdownFetchResult(steps, heuristicFloor: [], session: session)
+        }
+    }
+
+    /// The synchronous tail of `fetchBreakdown` above, split out SPECIFICALLY so it's directly
+    /// unit-testable without awaiting a real `IntentRouter.breakdown` round trip — same precedent
+    /// as `applyTextCaptureParseResult(_:session:)` (`TextCaptureTests.swift` already documents
+    /// this pattern for the typed-capture flow) and `resolveCloudMatch` elsewhere in this file.
+    /// Tests can simulate "the router came back with these steps" (optionally identical to what
+    /// the old heuristic floor would have produced, to exercise the `.failed` branch below) and/or
+    /// "the session went stale before the fetch returned" by calling this directly with hand-built
+    /// `[String]` arrays and/or a stale `session` token, instead of needing a real network round
+    /// trip or a real `HeuristicNLParser` call.
+    ///
+    /// (2026-07-28: `IntentRouter.breakdown` no longer has a heuristic floor to disguise itself as
+    /// — see `fetchBreakdown` above — so from the real call site `heuristicFloor` always arrives
+    /// as `[]` and the `steps == heuristicFloor` check below is unreachable dead weight in
+    /// production. It stays because `CloudFirstDefaultsAndBreakdownTests.swift` still calls this
+    /// method directly with non-empty `heuristicFloor` values to test that exact comparison in
+    /// isolation, and reworking that test's signature is out of scope for this change.)
+    ///
+    /// Not `private` for exactly that reason.
+    func applyBreakdownFetchResult(_ steps: [String], heuristicFloor: [String], session: Int) {
+        // Stale? The sheet was dismissed (`closeBreakdown()`) or reopened on a different task
+        // while this request was in flight — mirrors `runParse`'s own `captureSession` guard.
+        guard breakdownSession == session else { return }
+        guard !steps.isEmpty else {
+            // No steps at all -> `.failed` ("Couldn't reach the breakdown service", TaskBreakdownView).
+            // This is now the ONLY path that matters from the real `fetchBreakdown` call site: FM
+            // and Cloud both failed/unavailable, and there is no heuristic floor left to fall back
+            // to (2026-07-28) — never invent step titles, tell the user honestly instead.
+            breakdownFetchState = .failed
+            return
+        }
+        // Legacy check, kept for the direct-call tests only (see doc comment above) — same content
+        // as the hard-coded heuristic floor would mean "this WAS that floor in disguise," but the
+        // real call site can no longer produce that situation since the floor itself is gone.
+        if steps == heuristicFloor {
+            breakdownFetchState = .failed
+            return
+        }
+        breakdownFetchState = .loaded(
+            steps.enumerated().map { BreakdownStep(id: $0.offset, title: $0.element) }
+        )
+    }
+
+    /// Task-breakdown sheet: "Save all as tasks" — persists each REAL step title `fetchBreakdown`
+    /// produced as its own `TaskItem` (medium priority, `.later`, no deadline/duration — the
+    /// breakdown generator doesn't produce those yet), then dismisses and resets the breakdown
+    /// state so the next `openBreakdown(for:)` starts clean.
     func saveBreakdown(_ titles: [String]) {
         for t in titles {
             addTask(TaskItem(
@@ -2315,6 +5653,9 @@ final class AppState {
             ))
         }
         showBreakdown = false
+        breakdownTask = nil
+        breakdownSession += 1
+        breakdownFetchState = .idle
     }
 
     /// Menu-bar "Preview reminder": surfaces the in-app notification banner for the current
@@ -2437,9 +5778,19 @@ final class AppState {
     /// as a stable placeholder. `busyIntervals: []` until the P3 calendar integration lands
     /// (contract C); `frogId` comes from today's frog if one is set, else `nil`.
     private func computeConflicts(for draft: ConfirmDraft, now: Date) -> [VolarCore.TaskConflict] {
-        let deadline = resolvedValue(draft.task.deadline, kind: .deadline, draft: draft)
-        let estimate = resolvedValue(draft.task.estimateMinutes, kind: .estimate, draft: draft)
-        let priorityInt = resolvedValue(draft.task.priority, kind: .priority, draft: draft)
+        // T-overdue: `effectiveDeadline` rather than `task.deadline` directly, for the same
+        // "everywhere the deadline is read" reasoning as `materialize`/`mergeTransform` — a no-op
+        // change in practice today (this only ever runs from `buildConfirmDrafts`, before any edit
+        // exists, so `effectiveDeadline == task.deadline` at every actual call site right now), but
+        // keeps the invariant true regardless of call order, rather than depending on it.
+        let deadline = resolvedValue(draft.effectiveDeadline, kind: .deadline, draft: draft)
+        // T-edit-attrs: `draft.effective*` rather than `draft.task.*` directly, same "everywhere
+        // this attribute is read" reasoning as the `effectiveDeadline` line right above (and
+        // `materialize`/`mergeTransform`'s own copies of this same note) — a no-op in practice
+        // today (this only ever runs from `buildConfirmDrafts`, before any edit exists), but keeps
+        // the invariant true regardless of call order rather than depending on it.
+        let estimate = resolvedValue(draft.effectiveEstimateMinutes, kind: .estimate, draft: draft)
+        let priorityInt = resolvedValue(draft.effectivePriority, kind: .priority, draft: draft)
         let candidate = VolarCore.Task(
             id: draft.id,
             title: draft.task.title,
@@ -2501,16 +5852,12 @@ final class AppState {
         dismissBatchSheetsIfEmpty()
     }
 
-    /// Triage "Break down": opens the existing breakdown sheet.
-    ///
-    /// NOTE (self-review "conflict"/seam, flagged in final report): the current `TaskBreakdownView`
-    /// sheet (mounted in `VolarApp.swift`, pre-existing Phase-3 wiring, `backlog.md` ~line 50) has
-    /// no per-task target yet — it always shows its fixed sample content regardless of which task
-    /// triggered it, exactly like the existing context-menu "Break down into steps…" entry point.
-    /// This reuses that same limitation rather than fixing it (fixing it touches
-    /// `TaskBreakdownView.swift`, not one of this task's 5 owned files).
+    /// Triage "Break down": opens the real per-task breakdown sheet for `item` via
+    /// `openBreakdown(for:)` (Change 3 fix — this call site used to just set `showBreakdown =
+    /// true` with no per-task target, same bug the context-menu entry points had; see
+    /// `openBreakdown(for:)`'s doc comment for the full fix).
     func triageBreakdown(_ item: TaskItem) {
-        showBreakdown = true
+        openBreakdown(for: item)
         dismissBatchSheetsIfEmpty()
     }
 
@@ -2677,10 +6024,20 @@ final class AppState {
         }
     }
 
+    /// Persists the default task duration at `defaultTaskDurationMinutesKey` (2026-07-29). Out of
+    /// range (including the `0` `UserDefaults.integer(forKey:)` would report for an unset key —
+    /// see this same guard in `init` above) falls back to 30 rather than persisting/using a bogus
+    /// value; never clamped to the nearest bound, since a caller passing e.g. `2` or `9000` almost
+    /// certainly has a bug, and silently clamping would hide it behind a plausible-looking number.
+    func setDefaultTaskDurationMinutes(_ minutes: Int) {
+        defaultTaskDurationMinutes = (5...480).contains(minutes) ? minutes : 30
+        UserDefaults.standard.set(defaultTaskDurationMinutes, forKey: Self.defaultTaskDurationMinutesKey)
+    }
+
     // MARK: - Service activation (Phase 3: call once from the main window's `.task`)
 
     /// Starts the global ⌃⌥M toggle-capture hotkey. `HotkeyManager.start` already calls
-    /// `appState.toggleCapture()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`);
+    /// `appState.handleHotkey()` directly on key-down (see `Sources/Speech/HotkeyManager.swift`);
     /// toggle mode has no use for key-up, so neither `onKeyDown` nor `onKeyUp` needs wiring here.
     /// `HotkeyManager` registers the hotkey via Carbon's `RegisterEventHotKey` — a sandbox-legal
     /// Carbon Event Manager API that needs no Accessibility permission and has no local-monitor

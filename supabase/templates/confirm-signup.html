@@ -1,0 +1,63 @@
+<!--
+  Supabase Auth ▸ "Confirm signup" template — Volar AI
+
+  WHICH EMAIL IS THIS? Supabase picks the template by whether the address already exists:
+  a brand-new address hitting `/auth/v1/otp` gets THIS one, an existing address gets
+  "Magic Link" (magic-link.html, same folder). Volar's client only ever asks for a 6-digit
+  code, so BOTH templates must render `{{ .Token }}` — a signup template left at Supabase's
+  default ships a confirmation LINK instead, and the very first user to ever sign up gets an
+  email that does not contain the code the app is asking them for.
+
+  No `{{ .ConfirmationURL }}` on purpose: Volar is a Mac app, not a website. A link would land
+  the user in a browser with nowhere useful to go.
+
+  Table layout + inline styles: Gmail strips <style> blocks in some clients, and Outlook's
+  Word renderer ignores modern CSS layout entirely. This is deliberately boring HTML.
+-->
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f6f9;margin:0;padding:32px 12px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Helvetica,Arial,sans-serif;">
+  <tr>
+    <td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="max-width:440px;background-color:#ffffff;border-radius:14px;border:1px solid #e3e8ef;">
+
+        <tr>
+          <td style="padding:32px 32px 0 32px;">
+            <div style="font-size:17px;font-weight:600;color:#0f172a;letter-spacing:-0.2px;">Volar AI</div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:20px 32px 0 32px;">
+            <div style="font-size:15px;line-height:1.55;color:#334155;">
+              Here is your sign-in code. Enter it in Volar to finish setting up your account.
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:24px 32px 0 32px;">
+            <div style="background-color:#f1f5f9;border:1px solid #e2e8f0;border-radius:10px;padding:18px 0;text-align:center;">
+              <span style="font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:30px;font-weight:600;letter-spacing:7px;color:#0f172a;">{{ .Token }}</span>
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:16px 32px 0 32px;">
+            <div style="font-size:13px;line-height:1.55;color:#64748b;">
+              The code expires in one hour and can only be used once.
+            </div>
+          </td>
+        </tr>
+
+        <tr>
+          <td style="padding:24px 32px 32px 32px;">
+            <div style="border-top:1px solid #eef2f7;padding-top:16px;font-size:12.5px;line-height:1.55;color:#94a3b8;">
+              If you didn't try to sign in to Volar, you can ignore this email — nothing was created and no one can use this code without it.
+            </div>
+          </td>
+        </tr>
+
+      </table>
+    </td>
+  </tr>
+</table>

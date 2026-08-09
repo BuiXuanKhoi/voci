@@ -101,10 +101,55 @@ extension ParsedCondition: Codable {
 /// authoritative (constitution II). Replaces the v1 `ParsedTask` (title/details/when/priority/
 /// durationMinutes/context) — every v1 call site (`AppState`, `PopoverView`, `SampleData`) needs
 /// updating by its owning agent; see this feature's final report for the full break list.
-struct ParsedTask: Sendable, Equatable, Codable {
+struct ParsedTask: Sendable, Equatable {
     var title: String // required; only guaranteed field
     var notes: String?
     var deadline: ParsedValue<Date>? // resolved absolute instant
+    /// When the speaker said they'd START working, as distinct from `deadline` (when it must be
+    /// DONE). Populated only for utterances that actually name a starting moment — above all the
+    /// urgent case ("làm task X ngay lập tức" -> `startTime` = the instant of speaking, `priority`
+    /// 1, and NO deadline, because "urgent" describes when work begins, not when it is due). A
+    /// bare clock time stays a `deadline`, exactly as before this field existed.
+    ///
+    /// `IntentRouter.applyStartTimeDerivation` turns a `startTime`-without-`deadline` task into one
+    /// with a derived deadline (`startTime` + `estimateMinutes`, defaulting to 30 minutes). 2026-07-29
+    /// (anh Khôi chốt): that derived deadline now carries 0.75 confidence — ABOVE `ParsedValue.
+    /// isUncertain`'s 0.7 bar — so it auto-commits on Save instead of requiring a confirm-card tap
+    /// first; see `deadlineIsEstimated` right below for how the UI still marks it as a guess without
+    /// gating it behind an explicit accept.
+    ///
+    /// Carried through to `TaskItem.startTime` and persisted, but INERT: it drives no ordering, no
+    /// eligibility, no reminders. An urgent task reaches the top of the list purely through its
+    /// derived deadline landing today — `VolarCore.NextTask`'s tier 2 (near-term deadline) already
+    /// outranks tier 3 (priority), which is why this feature needs no new task kind or engine tier.
+    ///
+    /// DEFAULTED (`= nil`) on purpose: the synthesized memberwise init is called from many call
+    /// sites that predate this field (`HeuristicNLParser.parseOne` twice in this file,
+    /// `IntentRouter.titleOnlyTask`, test fixtures), and a default keeps every one of them
+    /// compiling untouched. Same reason `Codable` used to stay synthesized for the whole struct — an
+    /// `Optional` stored property decodes via `decodeIfPresent`, so payloads written before this
+    /// field still decode. (`ParsedTask`'s `Codable` conformance is now hand-rolled below, for
+    /// `deadlineIsEstimated`'s sake — see that field's own comment — but this property still keeps
+    /// exactly that same `decodeIfPresent` treatment in the new `init(from:)`.)
+    var startTime: ParsedValue<Date>? = nil
+    /// True only when THIS deadline was machine-DERIVED by `IntentRouter.applyStartTimeDerivation`
+    /// from `startTime` (plus an estimate or the 30-minute default) — never true for a deadline the
+    /// user actually spoke; a spoken deadline always leaves this `false`. Confidence alone can't
+    /// carry this distinction anymore: the derived deadline's confidence is now 0.75 (see
+    /// `startTime`'s comment above for why), so `PopoverView.DeadlineControl` needs an explicit
+    /// signal — separate from confidence/uncertain styling — to still show the user "this time is
+    /// a guess" (its "· est" chip label) even though the value auto-commits on Save. Never drives
+    /// dashed/uncertain rendering itself (that would wrongly imply the value needs an accept tap
+    /// before it saves, which is no longer true).
+    ///
+    /// DEFAULTED (`= false`) for the same "many pre-existing call sites" reason `startTime` above
+    /// is defaulted. Unlike `startTime`, this is a non-`Optional` `Bool`, so it does NOT get the
+    /// free `decodeIfPresent` treatment synthesized `Decodable` gives `Optional` properties — a
+    /// payload encoded before this field existed would fail to decode outright if `Codable` were
+    /// still left to the compiler. That's why `ParsedTask`'s `Codable` conformance is hand-rolled in
+    /// the extension below (same convention as `Recurrence`/`ReminderPolicy`/`ParsedCondition` in
+    /// this file/`Recurrence.swift`), decoding this key with `decodeIfPresent(...) ?? false`.
+    var deadlineIsEstimated: Bool = false
     var estimateMinutes: ParsedValue<Int>?
     var priority: ParsedValue<Int>? // 1...4
     var reminderOverride: ParsedValue<ReminderPolicy>?
@@ -113,7 +158,82 @@ struct ParsedTask: Sendable, Equatable, Codable {
     var conditions: [ParsedCondition] = [] // taskDone(by fuzzy title ref) / afterDate / external
     var subtasks: [String] = [] // breakdown step titles (may be empty)
     var followUpReview: Bool = false // "when done, review it" → a second .review task
+    /// task_cues_v1 (`specs/006-cues-and-waiting/design.md`): populated only when the utterance
+    /// anchored this task to a real EVENT in the user's day ("ngủ dậy thì...", "sau khi ăn trưa
+    /// thì...") rather than a clock time. A SURFACING signal only (design.md §1) — carries no
+    /// eligibility/gating meaning, and MUST NEVER be turned into `deadline`/a `.afterDate`
+    /// condition anywhere in this codebase; that exact conflation (forcing an event-anchored
+    /// utterance into a fabricated clock time) is the live bug this feature exists to fix.
+    /// `TaskCue`/`CueKind` are owned by a parallel agent (`Model/TaskCue.swift`) — referenced
+    /// here by name only, never redefined.
+    ///
+    /// DEFAULTED (`= nil`) for the same "many pre-existing call sites" reason `startTime` above
+    /// is defaulted — every call site that predates this field (`HeuristicNLParser.parseOne`
+    /// twice in this file, `IntentRouter.titleOnlyTask`, every hand-built test fixture across
+    /// `Volar/Tests/`) keeps compiling untouched, and a payload encoded before this field existed
+    /// still decodes via `decodeIfPresent` below (same treatment `startTime`/`deadline` get).
+    var cue: TaskCue? = nil
     var sourceTranscript: String // verbatim utterance, ALWAYS retained
+}
+
+extension ParsedTask: Codable {
+    /// Hand-rolled (2026-07-29, same convention `Recurrence`/`ReminderPolicy`/`ParsedCondition`
+    /// already use in this file/`Recurrence.swift`) instead of leaving `Codable` to compiler
+    /// synthesis. The trigger is `deadlineIsEstimated`: it's a non-`Optional` `Bool` with a default
+    /// value, and synthesized `Decodable` does NOT consult a stored property's default when a key is
+    /// missing — it only skips missing keys for `Optional` properties (via an implicit
+    /// `decodeIfPresent`). A payload encoded before this field existed would fail to decode outright
+    /// under synthesis, exactly the trap `ReminderPolicy.init(from:)`'s own comment documents for
+    /// the same reason (see `Recurrence.swift`, READ-ONLY reference for this agent).
+    ///
+    /// Written explicitly for every field (not just `deadlineIsEstimated`) so this doesn't rely on
+    /// the compiler still synthesizing `encode(to:)` around a hand-written `init(from:)` — this also
+    /// closes the SAME pre-existing gap for `kind`/`conditions`/`subtasks`/`followUpReview`, which
+    /// already had default values before this change and were exposed to the identical risk for any
+    /// payload predating THEM (not something this task asked for, but a free correctness fix once
+    /// this extension exists at all).
+    private enum CodingKeys: String, CodingKey {
+        case title, notes, deadline, startTime, deadlineIsEstimated, estimateMinutes, priority,
+             reminderOverride, recurrence, kind, conditions, subtasks, followUpReview, cue, sourceTranscript
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        title = try container.decode(String.self, forKey: .title)
+        notes = try container.decodeIfPresent(String.self, forKey: .notes)
+        deadline = try container.decodeIfPresent(ParsedValue<Date>.self, forKey: .deadline)
+        startTime = try container.decodeIfPresent(ParsedValue<Date>.self, forKey: .startTime)
+        deadlineIsEstimated = try container.decodeIfPresent(Bool.self, forKey: .deadlineIsEstimated) ?? false
+        estimateMinutes = try container.decodeIfPresent(ParsedValue<Int>.self, forKey: .estimateMinutes)
+        priority = try container.decodeIfPresent(ParsedValue<Int>.self, forKey: .priority)
+        reminderOverride = try container.decodeIfPresent(ParsedValue<ReminderPolicy>.self, forKey: .reminderOverride)
+        recurrence = try container.decodeIfPresent(ParsedValue<Recurrence>.self, forKey: .recurrence)
+        kind = try container.decodeIfPresent(TaskKind.self, forKey: .kind) ?? .task
+        conditions = try container.decodeIfPresent([ParsedCondition].self, forKey: .conditions) ?? []
+        subtasks = try container.decodeIfPresent([String].self, forKey: .subtasks) ?? []
+        followUpReview = try container.decodeIfPresent(Bool.self, forKey: .followUpReview) ?? false
+        cue = try container.decodeIfPresent(TaskCue.self, forKey: .cue)
+        sourceTranscript = try container.decode(String.self, forKey: .sourceTranscript)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(title, forKey: .title)
+        try container.encodeIfPresent(notes, forKey: .notes)
+        try container.encodeIfPresent(deadline, forKey: .deadline)
+        try container.encodeIfPresent(startTime, forKey: .startTime)
+        try container.encode(deadlineIsEstimated, forKey: .deadlineIsEstimated)
+        try container.encodeIfPresent(estimateMinutes, forKey: .estimateMinutes)
+        try container.encodeIfPresent(priority, forKey: .priority)
+        try container.encodeIfPresent(reminderOverride, forKey: .reminderOverride)
+        try container.encodeIfPresent(recurrence, forKey: .recurrence)
+        try container.encode(kind, forKey: .kind)
+        try container.encode(conditions, forKey: .conditions)
+        try container.encode(subtasks, forKey: .subtasks)
+        try container.encode(followUpReview, forKey: .followUpReview)
+        try container.encodeIfPresent(cue, forKey: .cue)
+        try container.encode(sourceTranscript, forKey: .sourceTranscript)
+    }
 }
 
 // MARK: - NLParser protocol
@@ -583,21 +703,27 @@ struct HeuristicNLParser: NLParser {
 /// `IntentRouter`'s always-available floor route (`IntentParsing.swift`'s `heuristic: IntentParser`
 /// default arg + `heuristic.breakdown(...)` call).
 extension HeuristicNLParser: IntentParser {
-    /// Template floor for breakdown mode: no real step-by-step reasoning (this parser is pure
-    /// keyword/regex text-in/`ParsedTask`-out, per its own header comment — it has no model to ask
-    /// "what are the steps?"), just a generic 5-step scaffold shaped to satisfy the contract's
-    /// "3…9 step titles" bound so the confirm card always has SOMETHING to show even when FM and
-    /// Cloud both fell through. Never crashes; an empty/whitespace-only title yields `[]` rather
-    /// than fabricating steps for nothing (constitution II — never silently guess).
+    /// DEAD-CODE CLEANUP (`specs/006-cues-and-waiting/design.md` §0.1, 2026-08-08): this used to
+    /// return a hard-coded 5-step English scaffold ("Gather what's needed for X", "Start the
+    /// first small piece", "Work through the middle of it", "Check the result", "Wrap up X") so
+    /// the confirm card always had SOMETHING to show even when FM and Cloud both fell through.
+    /// It never actually reached a user: `IntentRouter.breakdown`/`.breakdownWithContext` stopped
+    /// calling into `HeuristicNLParser` entirely on 2026-07-28 (anh Khôi chốt — see
+    /// `IntentParsing.swift`'s `IntentRouter` class doc comment), and the one real app call site
+    /// (`AppState.fetchBreakdown`) passes `heuristicFloor: []`. Repo-wide grep before this change
+    /// confirmed there is no remaining production call site for this method — `design.md` §0.1
+    /// verified this precisely so this cleanup wouldn't be a guess.
+    ///
+    /// Returning `[]` instead of deleting the method (still required for `IntentParser`
+    /// conformance, which `IntentRouter`'s dormant reconnect path — see that class's doc comment
+    /// — depends on `HeuristicNLParser` still satisfying) follows the SAME reasoning anh Khôi
+    /// already applied 2026-07-29 when he rejected a hard-coded 3-to-9-step `too_big` floor: a
+    /// pure keyword/regex parser with no model has no honest way to know what the physical steps
+    /// of an arbitrary task actually are, so a fixed English template dressed up as "the plan" is
+    /// fabrication, not a floor (constitution II — never silently guess). `[]` is the honest
+    /// answer; a caller that ever reconnects this tier is responsible for telling the user
+    /// breakdown needs a real model, never for showing invented steps.
     func breakdown(title: String, notes: String?) async -> [String] {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return [] }
-        return [
-            "Gather what's needed for \(trimmedTitle)",
-            "Start the first small piece",
-            "Work through the middle of it",
-            "Check the result",
-            "Wrap up \(trimmedTitle)"
-        ]
+        []
     }
 }

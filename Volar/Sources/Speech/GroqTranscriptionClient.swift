@@ -59,11 +59,12 @@ protocol GroqCredentialProvider: Sendable {
     func authorization() async throws -> String?
 }
 
-/// Production provider (UPDATED per specs/002-workflow-command-center/contracts/account-auth.md,
-/// 2026-07-26): Groq is **Pro-only** (contract §1 — free tier has a 0 speech quota server-side
-/// too, but this client gates BEFORE ever sending a request, same "code first, key later" spirit
-/// as before). Returns the account's Supabase access token as the bearer credential ONLY when (a)
-/// an account session exists in the Keychain AND (b) the cached entitlement tier says Pro.
+/// Production provider. UPDATED 2026-07-27: cloud speech is **available to BOTH tiers** (free 20
+/// requests/day, Pro 500 — `SPEECH_LIMIT_FREE`/`SPEECH_LIMIT_PRO` in
+/// `supabase/functions/_shared/quota.ts`). It was Pro-only until then; the server's
+/// `403 upgrade_required` tier gate is gone. Returns the account's Supabase access token as the
+/// bearer credential whenever an account session exists in the Keychain — being signed in is the
+/// only client-side requirement, and the daily cap is enforced server-side.
 ///
 /// Previously this read a hand-typed dev token from `GROQ_PROXY_TOKEN`/`GROQ_API_KEY` env vars or
 /// `volar.groqToken` UserDefaults — that whole mechanism is REMOVED (mirrors the contract's own
@@ -81,24 +82,29 @@ protocol GroqCredentialProvider: Sendable {
 struct EnvironmentGroqCredentialProvider: GroqCredentialProvider {
     /// Direct Groq endpoint — kept only as a documented opt-in for local smoke-testing via
     /// `volar.groqBaseURL`; NOT the default anymore (see doc comment above). Note this path STILL
-    /// requires `isConfigured`/`authorization()` below to pass (signed in + Pro) — there is no
-    /// longer any way to bypass the account/entitlement check even when pointing at Groq directly.
+    /// requires `isConfigured`/`authorization()` below to pass (a signed-in session) — there is
+    /// no longer any way to bypass the account check even when pointing at Groq directly.
     static let groqDirectBaseURLForSmokeTesting = URL(string: "https://api.groq.com/openai/v1")!
     /// Default: Volar's Supabase edge-function proxy for Groq Speech-to-Text (holds the real Groq
     /// key server-side; see `supabase/functions/groq/index.ts`). Force-unwrap is safe: fixed,
     /// hand-verified literal, never user input.
     static let groqProxyBaseURL = URL(string: "https://nuzrpipwacravfgsiacv.supabase.co/functions/v1/groq")!
 
-    /// `true` iff signed in AND the cached tier is Pro. `Entitlements.cachedIsPro` is a
-    /// UserDefaults SNAPSHOT (NOT a secret — just the string "free"/"pro", see
-    /// `Sources/Model/Entitlements.swift`) kept fresh by `refreshStatus()`/`purchase()`/
-    /// `relinkCurrentEntitlements()`; reading it here (rather than awaiting the network) is what
-    /// lets `AppState.selectedEngine` gate Groq SYNCHRONOUSLY before a capture even starts — the
-    /// same "pick on-device before a key/entitlement exists" fallback this codebase already had,
-    /// now driven by account/entitlement state instead of an env token. Mirrors
-    /// `ConfigParseCredentialProvider.isConfigured`'s Keychain-read shape.
+    /// `true` iff there is a signed-in session. Reading Keychain here (rather than awaiting the
+    /// network) is what lets `AppState.selectedEngine` gate Groq SYNCHRONOUSLY before a capture
+    /// even starts — the same "pick on-device before credentials exist" fallback this codebase
+    /// already had. Mirrors `ConfigParseCredentialProvider.isConfigured`'s Keychain-read shape.
+    /// 2026-07-27: the `&& Entitlements.cachedIsPro` half was REMOVED. Cloud speech is no longer
+    /// Pro-only — the `/groq` route now serves both tiers with different daily caps (free 20,
+    /// Pro 500, `SPEECH_LIMIT_FREE`/`SPEECH_LIMIT_PRO`), the same two-tier shape `/parse` always
+    /// had. Leaving the Pro check here would have made the client refuse to use an engine the
+    /// server was perfectly willing to serve — and since cloud is now the DEFAULT speech engine,
+    /// every free user would have silently fallen back to on-device forever while believing they
+    /// were on cloud. Being signed in is the only client-side requirement now; quota is the
+    /// server's job to enforce, and a free user who exhausts it gets a 429 that
+    /// `AppState.handleCloudSpeechUnavailable` already degrades quietly to on-device.
     static var isConfigured: Bool {
-        KeychainStore.loadSession() != nil && Entitlements.cachedIsPro
+        KeychainStore.loadSession() != nil
     }
 
     func baseURL() async throws -> URL {
@@ -110,22 +116,22 @@ struct EnvironmentGroqCredentialProvider: GroqCredentialProvider {
         return Self.groqProxyBaseURL
     }
 
-    /// Re-checks the same two conditions as `isConfigured` (does not just trust it) — a session
-    /// that expired or failed to refresh, or a tier that dropped back to free, BETWEEN engine
-    /// selection (`AppState.selectedEngine`, evaluated once at `startCapture()`) and this
-    /// upload-time call must also degrade to `.missingCredentials` here, never send a stale/
-    /// unauthorized request.
+    /// Re-checks the session (does not just trust `isConfigured`) — a session that expired or
+    /// failed to refresh BETWEEN engine selection (`AppState.selectedEngine`, evaluated once at
+    /// `startCapture()`) and this upload-time call must degrade to `.missingCredentials` here,
+    /// never send a stale/unauthorized request. Tier is deliberately NOT re-checked: both tiers
+    /// may call this route now.
     ///
-    /// KNOWN RESIDUAL GAP (self-review, flagged rather than fixed): this method is the client's
-    /// only pre-flight gate. If the CACHED tier is stale (e.g. a subscription just expired and
-    /// `Entitlements.refreshStatus()` hasn't run since) this can still return a bearer token the
-    /// server rejects with `403 upgrade_required` mid-flight. `GroqEngine.swift` (NOT in this
-    /// task's owned files) is what decides how a thrown `GroqTranscriptionError.http(403, _)`
-    /// surfaces from there (today: `onError`, a visible capture error) — this file has no path to
-    /// convert that into a silent on-device fallback without editing that out-of-scope file.
-    /// Logged to `backlog.md`.
+    /// The old "stale cached tier can earn a mid-flight `403 upgrade_required`" gap recorded here
+    /// is GONE as of 2026-07-27 — that 403 was the server's tier gate, which no longer exists.
+    /// What remains is a 429 once the day's cap is spent (free 20 / Pro 500), which is not a gap
+    /// at all: `GroqEngine.onCloudUnavailable` -> `AppState.handleCloudSpeechUnavailable` already
+    /// treats 403 AND 429 as "degrade quietly to on-device", salvaging the recorded audio through
+    /// WhisperKit when it's ready rather than surfacing an error.
     func authorization() async throws -> String? {
-        guard Entitlements.cachedIsPro else { throw GroqTranscriptionError.missingCredentials }
+        // No tier check — see `isConfigured` above for why the Pro gate was removed on 2026-07-27.
+        // A signed-in session is the whole client-side requirement; the server decides the daily
+        // cap by tier and answers 429 when it's spent.
         guard let token = try? await AccountService.shared.validAccessToken() else {
             throw GroqTranscriptionError.missingCredentials
         }

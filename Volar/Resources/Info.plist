@@ -4,12 +4,19 @@
 <dict>
 	<key>CFBundleIdentifier</key>
 	<string>tech.kioh.Volar</string>
+	<!--
+	  CFBundleName / CFBundleDisplayName carry the marketing brand "Volar AI" (App Store listing,
+	  under the Dock icon, About box). CFBundleExecutable below is deliberately left as `Volar`,
+	  unrelated to branding — it is the actual binary filename on disk, and it is frozen alongside
+	  CFBundleIdentifier (`tech.kioh.Volar`) for code-signing / path stability. Do not "fix" this
+	  split by renaming the executable to match the display name.
+	-->
 	<key>CFBundleName</key>
-	<string>Volar</string>
+	<string>Volar AI</string>
 	<key>CFBundleDisplayName</key>
-	<string>Volar</string>
+	<string>Volar AI</string>
 	<key>CFBundleShortVersionString</key>
-	<string>0.1.0</string>
+	<string>1.0.0</string>
 	<key>CFBundleVersion</key>
 	<string>1</string>
 	<key>CFBundlePackageType</key>
@@ -32,10 +39,17 @@
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<!--
+	  Fix (2026-07-27): both strings below used to promise the audio never leaves the device — true
+	  when this app only had an on-device engine, but no longer true once Groq (cloud) became the
+	  DEFAULT speech engine (see AppState.swift's speech-engine default). Rewritten to describe what
+	  actually happens by default, without promising "unlimited" or "never leaves your device" —
+	  see MicrophonePermission.swift and Speech/GroqEngine.swift for the engine this now describes.
+	-->
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Volar listens while you hold the capture hotkey so it can turn what you say into a task. Audio is transcribed entirely on this Mac and never leaves your device.</string>
+	<string>Volar listens while you hold the capture hotkey so it can turn what you say into a task. By default, audio is sent to Volar's cloud speech service to be transcribed; you can switch to fully on-device recognition in Settings.</string>
 	<key>NSSpeechRecognitionUsageDescription</key>
-	<string>Volar uses on-device speech recognition to turn what you say into a task title, due date, priority, and duration. Nothing is sent to a server.</string>
+	<string>When you choose on-device recognition in Settings, Volar uses Apple's on-device speech recognizer to turn what you say into a task title, due date, priority, and duration — this recognition itself runs entirely on your Mac.</string>
 	<!--
 	  Calendar access — read AND write (updated: Volar now mirrors scheduled tasks into a calendar
 	  it creates; it used to be read-only, this key's string changed accordingly, keep it truthful).
@@ -85,5 +99,12 @@
 			</array>
 		</dict>
 	</array>
+	<!--
+	  Volar only ever talks HTTPS (Supabase Auth/Edge Functions, App Store/StoreKit) — no custom or
+	  proprietary encryption. Declaring that here means every TestFlight/App Store Connect upload
+	  skips the manual export-compliance questionnaire instead of asking every single time.
+	-->
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 </dict>
 </plist>

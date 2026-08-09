@@ -1,18 +1,22 @@
 // Sources/Views/SettingsView.swift — Settings window: 5 tabs (General/Hotkeys/Notifications/
 // Appearance/About), ported from `design/volar-extras.jsx`'s `VolarSettings`. Native-first: a
 // custom top tab strip (icon + label, accent-tinted when selected) switches a `@State tab` with
-// the tab content below. Most rows here are local, cosmetic `@State` (Launch at login, reminder
-// defaults, notification toggles, etc.) — the frozen `AppState` (spec §4) does not own these
-// preferences, only `accent` and `density`, which this view binds for real via `@Bindable`.
+// the tab content below. Most rows here are local, cosmetic `@State` (reminder defaults,
+// notification toggles, etc.) — the frozen `AppState` (spec §4) does not own these preferences,
+// only `accent` and `density`, which this view binds for real via `@Bindable`. "Launch at login"
+// is the one exception below that list: it's wired for real to `SMAppService` via `LoginItem.swift`,
+// not local `@State` at all.
 import SwiftUI
 import AppKit
+import AVFoundation
+import ServiceManagement
 import Speech
-import StoreKit
 import UniformTypeIdentifiers
+import UserNotifications
 
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
-        case general, hotkeys, notifications, appearance, integrations, account, about
+        case general, hotkeys, notifications, permissions, appearance, integrations, account, about
         var id: String { rawValue }
 
         var icon: VolarIconName {
@@ -20,6 +24,12 @@ struct SettingsView: View {
             case .general: return .settings
             case .hotkeys: return .cmd
             case .notifications: return .bell
+            // Same "no dedicated glyph" situation as `.account` below — `VolarIconName` has no
+            // lock/shield icon, and adding one is out of scope for this fix (would mean editing
+            // `Design/VolarIcon.swift`, which this task deliberately leaves alone). `.check` reads
+            // reasonably as "permission granted/verified", even though it now doubles up with
+            // `.account`'s use of the same glyph below.
+            case .permissions: return .check
             case .appearance: return .sparkle
             case .integrations: return .bolt
             // No dedicated "person/account" glyph exists in `VolarIconName` (`Design/VolarIcon.swift`,
@@ -36,6 +46,7 @@ struct SettingsView: View {
             case .general: return "General"
             case .hotkeys: return "Hotkeys"
             case .notifications: return "Notifications"
+            case .permissions: return "Permissions"
             case .appearance: return "Appearance"
             case .integrations: return "Integrations"
             case .account: return "Account"
@@ -47,8 +58,9 @@ struct SettingsView: View {
     @State private var tab: Tab = .general
 
     // Cosmetic-only local settings state (not part of the frozen AppState API).
-    @State private var launchAtLogin = true
-    @State private var defaultDuration = 30
+    // `defaultDuration` used to live here too — 2026-07-29: promoted to a real `AppState` setting
+    // (`appState.defaultTaskDurationMinutes`/`setDefaultTaskDurationMinutes`), see the "Default task
+    // duration" row below, so it no longer needs a local `@State` mirror.
     @State private var hyperfocusInterrupt = 90
     @State private var showMorningFrog = true
     @State private var captureAppContext = true
@@ -59,14 +71,45 @@ struct SettingsView: View {
 
     @State private var themeChoice = "dark"
 
-    // Account tab (Task 4, account-auth.md contract) — purely local UI state for the sign-in
-    // forms; the actual session/tier/quota state lives on `AppState` (`accountEmail`,
-    // `accountTier`, `subscriptionStatus`, `accountBusy`, `accountError`), same split as every
-    // other tab's cosmetic `@State` vs. the frozen `AppState` API.
-    @State private var accountEmailInput = ""
-    @State private var accountCodeInput = ""
-    @State private var accountCodeSent = false
+    // "Launch at login" — unlike every `@State` above this line, this is NOT cosmetic/local: it
+    // mirrors the REAL `SMAppService.mainApp.status` (`LoginItem.swift`), re-read fresh in
+    // `.onAppear` below rather than cached across app launches, since the user can flip it from
+    // System Settings behind Volar's back at any time (see `LoginItem.swift`'s header comment).
+    @State private var loginItemStatus: SMAppService.Status = .notFound
+    @State private var loginItemError: String?
+
+    // Permissions tab (Việc 3, 2026-07-27) — live OS-level authorization statuses. Unlike most
+    // `@State` above, these mirror real system state rather than app preferences: they exist so a
+    // user who denied/allowed something can SEE the current truth and, if needed, be routed to
+    // System Settings — see `refreshPermissionStatuses()`. `EventKit`'s own status lives on
+    // `appState.calendarAccess` already (no local copy needed for that one).
+    @State private var micAuthStatus: AVAuthorizationStatus = MicrophonePermission.status
+    @State private var speechAuthStatus: SFSpeechRecognizerAuthorizationStatus = SFSpeechRecognizer.authorizationStatus()
+    @State private var notifAuthStatus: UNAuthorizationStatus = .notDetermined
+
+    // Account tab (Task 4, account-auth.md contract) — purely local UI state; the actual
+    // session/tier/quota state lives on `AppState` (`accountEmail`, `accountTier`,
+    // `subscriptionStatus`, `accountBusy`, `accountError`), same split as every other tab's
+    // cosmetic `@State` vs. the frozen `AppState` API. The sign-in FORM's own field state
+    // (email/code text, "code sent?" flag) used to live here too, but moved to `EmailSignInForm`
+    // (Sign-in-entry-point fix, 2026-07-28) so it exists in exactly one place in the codebase —
+    // `signedOutAccountBody` below just embeds that view now.
     @State private var showDeleteAccountConfirm = false
+    /// Backlog "1 free month of Pro" promo codes (Task 3, redeem contract). Local `@State`, same
+    /// convention `EmailSignInForm`'s own field state now follows — the FIELD text is view-local,
+    /// the actual redeem call + success/failure state lives on `appState` (`redeemPromoCode(_:)`/
+    /// `lastRedeemedUntil`/`accountError`).
+    @State private var promoCodeInput = ""
+    /// Drives the `PaywallView` sheet — the ONE purchase surface in the app (replaces the old bare
+    /// `productRow` pair that used to live directly in `upgradeSection`).
+    @State private var showPaywall = false
+    /// Drives `SignInSheet` when `PaywallView`'s "Sign in to subscribe" CTA fires `onNeedSignIn`
+    /// from within this tab (main-window Sign-in entry point fix, 2026-07-28).
+    @State private var showSignInSheet = false
+    /// Set by the paywall's sign-in CTA and read back in the paywall sheet's `onDismiss` — the two
+    /// sheets are handed off across a full dismissal rather than swapped in one update. See the
+    /// `.sheet(isPresented: $showPaywall, onDismiss:)` on `accountTab` for the whole reasoning.
+    @State private var pendingSignInAfterPaywall = false
 
     @Environment(AppState.self) private var appState
     // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
@@ -87,6 +130,7 @@ struct SettingsView: View {
                     case .general: generalTab
                     case .hotkeys: hotkeysTab
                     case .notifications: notificationsTab
+                    case .permissions: permissionsTab
                     case .appearance: appearanceTab(appState: appState)
                     case .integrations: integrationsTab
                     case .account: accountTab
@@ -98,6 +142,12 @@ struct SettingsView: View {
         }
         .frame(minWidth: 560, minHeight: 460)
         .background(VolarColor.bg)
+        .onAppear {
+            // Real status, re-read every time Settings opens — never trust a stale value left
+            // over from the last time this view appeared, since the user may have toggled Login
+            // Items from System Settings while Settings was closed. See `LoginItem.swift`.
+            loginItemStatus = LoginItem.status
+        }
     }
 
     // MARK: - Tab strip
@@ -191,7 +241,7 @@ struct SettingsView: View {
                 }
             }
             if appState.speechEngineChoice == .groq, !GroqEngine.isConfigured {
-                SettingsRow(label: "Groq status", hint: "Groq cloud transcription is a Pro feature — sign in and upgrade in the Account tab to enable it. Until then Volar uses Apple on-device recognition.") {
+                SettingsRow(label: "Groq status", hint: "Cloud transcription needs an account, free or Pro — sign in in the Account tab to enable it (Pro just raises your daily quota). Until then Volar uses Apple on-device recognition.") {
                     Text("Not configured — using Apple on-device")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(VolarColor.textSec)
@@ -240,17 +290,31 @@ struct SettingsView: View {
                 .tint(accentColors.solid)
                 .frame(width: 200)
             }
-            SettingsRow(label: "Launch at login", hint: "Volar starts in the background and lives in your menu bar.") {
-                VolarToggle(isOn: $launchAtLogin)
-            }
-            SettingsRow(label: "Default task duration", hint: "Block this much time when a task has no explicit length.") {
-                Segmented(value: $defaultDuration, options: [
-                    .init(id: 15, label: "15"), .init(id: 30, label: "30"), .init(id: 60, label: "60 min"),
-                ])
+            launchAtLoginRow
+            // Wired for real to `AppState` (2026-07-29) — same "custom `Binding` around a
+            // `private(set)` property + setter" convention as `globalReminderPolicy`/
+            // `voiceDeliveryMode` below in `notificationsTab`, not cosmetic local `@State` like most
+            // rows in this tab. Doubles as the `estimateMinutes` a no-estimate task gets, so the
+            // hint spells out the "urgent, no deadline" scenario that setting actually drives
+            // (`IntentRouter.applyStartTimeDerivation`), not just "duration".
+            SettingsRow(
+                label: "Default task duration",
+                hint: "Used when you say something is urgent without giving a deadline — Volar blocks this much time and sets the same number as the task's estimate."
+            ) {
+                Segmented(
+                    value: Binding(
+                        get: { appState.defaultTaskDurationMinutes },
+                        set: { appState.setDefaultTaskDurationMinutes($0) }
+                    ),
+                    options: [
+                        .init(id: 15, label: "15", mono: true), .init(id: 30, label: "30", mono: true),
+                        .init(id: 45, label: "45", mono: true), .init(id: 60, label: "60 min", mono: true),
+                    ]
+                )
             }
             SettingsRow(label: "Hyperfocus interrupt after", hint: "Volar checks in if you've been deep on one task this long.") {
                 Segmented(value: $hyperfocusInterrupt, options: [
-                    .init(id: 60, label: "60"), .init(id: 90, label: "90"), .init(id: 120, label: "120 min"),
+                    .init(id: 60, label: "60", mono: true), .init(id: 90, label: "90", mono: true), .init(id: 120, label: "120 min", mono: true),
                 ])
             }
             SettingsRow(label: "Show morning frog prompt", hint: "A daily question at first launch: what's the ONE task that matters most?") {
@@ -272,8 +336,8 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 26)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .volarHairline(cornerRadius: 7)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .volarHairline(cornerRadius: 5)
             }
             SettingsRow(label: "Capture foreground app context", hint: "Tags new tasks with the app you were in when you captured them.") {
                 VolarToggle(isOn: $captureAppContext)
@@ -282,6 +346,58 @@ struct SettingsView: View {
             if appState.calendarAccess.status == .granted {
                 calendarMirrorRow
             }
+        }
+    }
+
+    /// Wired for real to `SMAppService.mainApp` (`LoginItem.swift`) — see that file's header
+    /// comment for why `loginItemStatus` is re-read live rather than cached. The toggle's `isOn`
+    /// binding calls `LoginItem.setEnabled(_:)` synchronously in its `set:` (no `Task` hop needed
+    /// — `SMAppService`'s register/unregister calls are synchronous) and immediately re-reads
+    /// `status` afterward, so the switch always reflects what macOS actually did, not what the
+    /// user merely requested. `.requiresApproval` is a real, ordinary post-register state (macOS
+    /// posts its own "Volar added a login item" notification and the login item doesn't actually
+    /// fire until the user approves it in System Settings) — surfaced here as its own explanatory
+    /// row + "Open Login Items…" button rather than treated as a toggle failure.
+    @ViewBuilder
+    private var launchAtLoginRow: some View {
+        SettingsRow(
+            label: "Launch at login",
+            hint: "Volar opens automatically when you log in to your Mac."
+        ) {
+            VStack(alignment: .trailing, spacing: 4) {
+                VolarToggle(isOn: Binding(
+                    get: { loginItemStatus == .enabled },
+                    set: { newValue in
+                        do {
+                            try LoginItem.setEnabled(newValue)
+                            loginItemError = nil
+                        } catch {
+                            loginItemError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                        }
+                        // Re-read live status regardless of success/failure — a throw can still
+                        // leave `SMAppService` in a different state than before the call (e.g.
+                        // partial unregister), so this is the one honest source of truth either way.
+                        loginItemStatus = LoginItem.status
+                    }
+                ))
+                if let loginItemError {
+                    Text(loginItemError)
+                        .font(.system(size: 11))
+                        .foregroundStyle(VolarColor.reschedule)
+                        .lineLimit(2)
+                }
+            }
+        }
+        if loginItemStatus == .requiresApproval {
+            HStack(spacing: 10) {
+                Text("macOS needs your approval to finish enabling this.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textSec)
+                settingsPillButton("Open Login Items…") {
+                    LoginItem.openLoginItemsSettings()
+                }
+            }
+            .padding(.horizontal, 18)
         }
     }
 
@@ -360,8 +476,8 @@ struct SettingsView: View {
             .padding(.horizontal, 12)
             .frame(height: 26)
             .background(VolarColor.veil(0.06))
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .volarHairline(cornerRadius: 7)
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+            .volarHairline(cornerRadius: 5)
 
         case .granted:
             HStack(spacing: 10) {
@@ -380,8 +496,8 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 26)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .volarHairline(cornerRadius: 7)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .volarHairline(cornerRadius: 5)
             }
 
         case .denied, .restricted:
@@ -400,8 +516,8 @@ struct SettingsView: View {
                 .padding(.horizontal, 12)
                 .frame(height: 26)
                 .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                .volarHairline(cornerRadius: 7)
+                .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                .volarHairline(cornerRadius: 5)
             }
 
         case .unavailable:
@@ -417,6 +533,13 @@ struct SettingsView: View {
         VStack(spacing: 12) {
             SettingsRow(label: "Quick capture", hint: "Press this combo from anywhere to toggle recording — press to start, press again to stop.") {
                 KeyRecorder(keys: ["\u{2303}", "\u{2325}", "M"])
+            }
+            // Add a task by typing (⌃⌥T, `Sources/Speech/HotkeyManager.swift` /
+            // `Sources/Views/TextCapturePanel.swift`) — the typed equivalent of Quick capture
+            // above, for when speaking isn't an option (a meeting, a café, an open-plan office).
+            // Same `SettingsRow`/`KeyRecorder` structure as every other row in this tab.
+            SettingsRow(label: "Add a task by typing", hint: "Press this combo from anywhere to open a small text box — type, hit Return, done. No speaking required.") {
+                KeyRecorder(keys: ["\u{2303}", "\u{2325}", "T"])
             }
             SettingsRow(label: "Task breakdown (long press)", hint: "Hold the same hotkey \u{2265}1.5s to have AI split the task into steps.") {
                 HStack(spacing: 8) {
@@ -484,6 +607,22 @@ struct SettingsView: View {
                     options: VoiceDeliveryMode.allCases.map { SegmentOption(id: $0, label: $0.label) }
                 )
             }
+            // Full-screen deadline escalation (this task): reads/writes
+            // `FullScreenEscalationSetting` directly rather than through `appState` — this
+            // preference isn't `AppState`-owned (see that enum's own doc comment in
+            // `Sources/Reminders/FullScreenEscalationDecision.swift`), so it follows the same
+            // "bind a `VolarToggle` straight to the real external source" convention this file
+            // already uses for "Launch at login" (`LoginItem.swift`) rather than the
+            // `appState.set...`-method convention used for the two rows just above.
+            SettingsRow(
+                label: "Full-screen alert khi tới hạn",
+                hint: "Only for a reminder AT or PAST its deadline that you haven't acknowledged after a few minutes — never for a plain nudge on a task with no deadline. Skipped while you're on a call or Volar itself is recording, and always has a one-tap snooze."
+            ) {
+                VolarToggle(isOn: Binding(
+                    get: { FullScreenEscalationSetting.isEnabled },
+                    set: { FullScreenEscalationSetting.isEnabled = $0 }
+                ))
+            }
         }
     }
 
@@ -497,7 +636,11 @@ struct SettingsView: View {
 
         var label: String {
             switch self {
-            case .dayHourAt: return "1 day, 1 hour, at deadline"
+            // Label kept in sync with `.defaultPolicy` (`Recurrence.swift`) after anh Khôi's
+            // 2026-07-28 change from fixed -1 day/-1 hour marks to proportional reminders — this
+            // preset IS `.defaultPolicy`, so the string here must describe whatever that constant
+            // actually does, not the old fixed offsets.
+            case .dayHourAt: return "Halfway, 1/3 remaining, at deadline"
             case .hourAt: return "1 hour, at deadline"
             case .atOnly: return "At deadline"
             case .none: return "None"
@@ -517,6 +660,219 @@ struct SettingsView: View {
         /// set by a future finer-grained editor) rather than crashing on an unrecognized shape.
         init(matching policy: ReminderPolicy) {
             self = Self.allCases.first { $0.policy == policy } ?? .dayHourAt
+        }
+    }
+
+    // MARK: - Permissions (Việc 3, 2026-07-27 fix batch)
+    //
+    // Born from anh Khôi's very first real-Mac run: there was nowhere in the app to SEE whether
+    // Volar actually had microphone/speech/notifications/calendar access, or to get routed to
+    // System Settings when it didn't. This tab is read-mostly — it never invents its own notion of
+    // "granted", it only ever reads the OS's/EventKit's own authorization state and mirrors it.
+
+    /// Coarse three-way status shared by all four rows below. Each real source has its own richer
+    /// enum (`AVAuthorizationStatus`, `SFSpeechRecognizerAuthorizationStatus`, `UNAuthorizationStatus`,
+    /// `CalendarAccess.Status`) — this collapses every one of them down to the one distinction the
+    /// UI actually needs to react to: what to say, and which button (if any) to offer.
+    private enum PermissionState: Equatable {
+        case allowed, notAllowed, notAsked
+
+        var text: String {
+            switch self {
+            case .allowed: return "Allowed"
+            case .notAllowed: return "Not allowed"
+            case .notAsked: return "Not asked yet"
+            }
+        }
+
+        /// Hard "no red for status" rule (this project's convention, see `calendarAccessControl`
+        /// above) does NOT apply here — unlike overdue-task badges, a permission that's actually
+        /// off is a real, actionable state the user should notice, not an ambient nag.
+        var color: Color {
+            switch self {
+            case .allowed: return VolarColor.done
+            case .notAllowed: return VolarColor.destruct
+            case .notAsked: return VolarColor.textSec
+            }
+        }
+    }
+
+    private var micPermissionState: PermissionState {
+        switch micAuthStatus {
+        case .authorized: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied, .restricted: return .notAllowed
+        @unknown default: return .notAllowed
+        }
+    }
+
+    private var speechPermissionState: PermissionState {
+        switch speechAuthStatus {
+        case .authorized: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied, .restricted: return .notAllowed
+        @unknown default: return .notAllowed
+        }
+    }
+
+    private var notifPermissionState: PermissionState {
+        switch notifAuthStatus {
+        case .authorized, .provisional, .ephemeral: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied: return .notAllowed
+        @unknown default: return .notAllowed
+        }
+    }
+
+    private var calendarPermissionState: PermissionState {
+        switch appState.calendarAccess.status {
+        case .granted: return .allowed
+        case .notDetermined: return .notAsked
+        case .denied, .restricted, .unavailable: return .notAllowed
+        }
+    }
+
+    /// Re-reads all four live statuses from their real sources. Called from `permissionsTab`'s
+    /// `.task` (fires every time this tab is switched to — matches `integrationsTab`'s existing
+    /// `.task` convention above for the same "may have changed while the user was elsewhere"
+    /// reason) and again after any "Request" button actually asks the OS for something, so a grant
+    /// or denial is reflected immediately rather than waiting for the next tab switch.
+    private func refreshPermissionStatuses() {
+        micAuthStatus = MicrophonePermission.status
+        speechAuthStatus = SFSpeechRecognizer.authorizationStatus()
+        appState.calendarAccess.refreshStatus()
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            notifAuthStatus = settings.authorizationStatus
+        }
+    }
+
+    /// Opens System Settings' Privacy & Security pane at the given anchor (e.g.
+    /// "Privacy_Microphone"). `URL(string:)` is optional — guarded rather than force-unwrapped, so
+    /// a malformed/renamed anchor just no-ops instead of crashing (mirrors
+    /// `CalendarAccess.openSystemSettings()`'s existing precedent one file over).
+    private func openSystemSettingsPrivacy(anchor: String) {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    /// Same guard-not-force-unwrap reasoning as `openSystemSettingsPrivacy` above — Notifications
+    /// lives under its own pane extension, not the Privacy & Security anchor scheme.
+    private func openNotificationsSystemSettings() {
+        guard let url = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension") else { return }
+        NSWorkspace.shared.open(url)
+    }
+
+    private var permissionsTab: some View {
+        VStack(spacing: 12) {
+            SettingsRow(label: "Microphone", hint: "Needed while you hold the capture hotkey, so Volar can hear what you're saying.") {
+                HStack(spacing: 10) {
+                    Text(micPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(micPermissionState.color)
+                    switch micPermissionState {
+                    case .notAsked:
+                        settingsPillButton("Request") {
+                            Task {
+                                _ = await MicrophonePermission.request()
+                                refreshPermissionStatuses()
+                            }
+                        }
+                    case .notAllowed:
+                        settingsPillButton("Open System Settings") {
+                            openSystemSettingsPrivacy(anchor: "Privacy_Microphone")
+                        }
+                    case .allowed:
+                        EmptyView()
+                    }
+                }
+            }
+            // The one fact that actually resolves anh Khôi's confusion: macOS's mic/speech TCC
+            // prompts are one-shot. If either was answered "Don't Allow" (by anh Khôi or on his
+            // behalf) at any point in the past, Volar cannot make the system ask again — the ONLY
+            // way back in is the user flipping it by hand in System Settings, which is exactly what
+            // the "Open System Settings" buttons above/below route to.
+            Text("macOS only asks for microphone and speech-recognition access once each. If either was ever denied, Volar can't prompt again — turn it back on in System Settings instead.")
+                .font(.system(size: 11.5))
+                .foregroundStyle(VolarColor.textSec)
+                .lineSpacing(2)
+                .padding(.horizontal, 18)
+
+            SettingsRow(label: "Speech Recognition", hint: "Apple's on-device recognizer turns your captured audio into a task title.") {
+                HStack(spacing: 10) {
+                    Text(speechPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(speechPermissionState.color)
+                    switch speechPermissionState {
+                    case .notAsked:
+                        settingsPillButton("Request") {
+                            Task {
+                                // Same `@Sendable`-completion-handler hazard `SpeechCapture
+                                // .requestAuthorization()` documents in detail: this method lives
+                                // on a `@MainActor` view, so a non-`@Sendable` closure literal here
+                                // would be inferred MainActor-isolated — and the Speech framework
+                                // invokes its completion handler on a background queue, which traps
+                                // at the isolation check before the closure body even runs. `@Sendable`
+                                // opts this one out of that inference.
+                                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                                    SFSpeechRecognizer.requestAuthorization { @Sendable _ in
+                                        continuation.resume()
+                                    }
+                                }
+                                refreshPermissionStatuses()
+                            }
+                        }
+                    case .notAllowed:
+                        settingsPillButton("Open System Settings") {
+                            openSystemSettingsPrivacy(anchor: "Privacy_SpeechRecognition")
+                        }
+                    case .allowed:
+                        EmptyView()
+                    }
+                }
+            }
+
+            SettingsRow(label: "Notifications", hint: "Task reminders and delegation nudges arrive as macOS notifications.") {
+                HStack(spacing: 10) {
+                    Text(notifPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(notifPermissionState.color)
+                    if notifPermissionState == .notAllowed {
+                        settingsPillButton("Open System Settings") {
+                            openNotificationsSystemSettings()
+                        }
+                    }
+                }
+            }
+
+            SettingsRow(label: "Calendar", hint: "Lets Volar see which time blocks are free, and — once you turn on mirroring in the General tab — write scheduled tasks into a calendar it creates.") {
+                HStack(spacing: 10) {
+                    Text(calendarPermissionState.text)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(calendarPermissionState.color)
+                    switch calendarPermissionState {
+                    case .notAsked:
+                        settingsPillButton("Request") {
+                            Task { await appState.enableCalendarAccess() }
+                        }
+                    case .notAllowed:
+                        settingsPillButton("Open System Settings") {
+                            appState.calendarAccess.openSystemSettings()
+                        }
+                    case .allowed:
+                        EmptyView()
+                    }
+                }
+            }
+        }
+        // Refreshes every time this tab is shown — matches `integrationsTab`'s own `.task` above
+        // (re-checks `claudeDetected`/`claudeConnected` on every appearance for the identical
+        // reason: state that can change OUTSIDE the app, behind Settings' back, while the window
+        // isn't looking). Without this, a user who grants access in System Settings and clicks
+        // back into Volar would still see a stale "Not allowed" — which is precisely the confusion
+        // this whole tab exists to resolve.
+        .task {
+            refreshPermissionStatuses()
         }
     }
 
@@ -552,8 +908,8 @@ struct SettingsView: View {
                             .padding(.horizontal, 12)
                             .frame(height: 28)
                             .background(VolarColor.card)
-                            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                            .volarHairline(cornerRadius: 7)
+                            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                            .volarHairline(cornerRadius: 5)
 
                         if appState.customImageURL != nil {
                             Button("Remove") {
@@ -873,6 +1229,31 @@ struct SettingsView: View {
         VStack(spacing: 12) {
             accountCard
         }
+        // `onNeedSignIn`: the paywall's own CTA routes here instead of attempting a doomed purchase
+        // while signed out (`Entitlements.purchase` throws `.notSignedIn` — see `PaywallView`'s doc
+        // comment).
+        //
+        // The handoff runs through `onDismiss` rather than flipping both flags in the callback
+        // (`showPaywall = false; showSignInSheet = true`). Setting both in one closure asks SwiftUI
+        // to tear down one sheet and present another within the same update, and the second
+        // presentation is routinely dropped — the paywall closes and nothing replaces it, which
+        // reads to the user as a dead button. `onDismiss` fires only once the paywall is fully
+        // gone, so the second present always lands. `pendingSignInAfterPaywall` is what
+        // distinguishes "closed via the sign-in CTA" from "closed with the X button", which must
+        // not open anything.
+        .sheet(isPresented: $showPaywall, onDismiss: {
+            guard pendingSignInAfterPaywall else { return }
+            pendingSignInAfterPaywall = false
+            showSignInSheet = true
+        }) {
+            PaywallView(onNeedSignIn: {
+                pendingSignInAfterPaywall = true
+                showPaywall = false
+            })
+        }
+        .sheet(isPresented: $showSignInSheet) {
+            SignInSheet()
+        }
     }
 
     /// Single card, same "one `VolarColor.card` block, not several `SettingsRow`s" reasoning as
@@ -898,7 +1279,12 @@ struct SettingsView: View {
                 signedOutAccountBody
             }
 
-            if let accountError = appState.accountError {
+            // Signed-in-only here: the signed-OUT case's error display now lives INSIDE
+            // `EmailSignInForm` (embedded by `signedOutAccountBody` below), which shows the exact
+            // same `appState.accountError` text right under its own Verify button. Without this
+            // guard a sign-in failure would render twice on this card — once from the form, once
+            // from here.
+            if appState.accountEmail != nil, let accountError = appState.accountError {
                 Text(accountError)
                     .font(.system(size: 11.5))
                     .foregroundStyle(VolarColor.reschedule)
@@ -911,53 +1297,13 @@ struct SettingsView: View {
         .volarHairline(cornerRadius: 11)
     }
 
+    /// The email-OTP form itself now lives in exactly one place, `EmailSignInForm.swift` — this
+    /// used to be a full copy of that form's fields/buttons, inlined directly here. Kept as its own
+    /// `private var` (rather than inlining `EmailSignInForm()` straight into `accountCard` above)
+    /// so the "why this exists / what it used to be" comment has an obvious home, and so a future
+    /// diff against this tab's history reads cleanly.
     private var signedOutAccountBody: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            settingsPillButton("Sign in with Apple", solid: true) {
-                appState.signInWithApple()
-            }
-            .disabled(appState.accountBusy)
-
-            Text("or sign in with email")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(VolarColor.textMut)
-
-            HStack(spacing: 8) {
-                TextField("you@example.com", text: $accountEmailInput)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(VolarColor.textPri)
-                    .padding(.horizontal, 10)
-                    .frame(height: 30)
-                    .background(Color.black.opacity(0.25))
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                    .volarHairline(cornerRadius: 7)
-                settingsPillButton("Send code") {
-                    accountCodeSent = true
-                    appState.sendEmailOTP(email: accountEmailInput)
-                }
-                .disabled(appState.accountBusy || accountEmailInput.isEmpty)
-            }
-
-            if accountCodeSent {
-                HStack(spacing: 8) {
-                    TextField("6-digit code", text: $accountCodeInput)
-                        .textFieldStyle(.plain)
-                        .font(.system(size: 12.5, design: .monospaced))
-                        .foregroundStyle(VolarColor.textPri)
-                        .padding(.horizontal, 10)
-                        .frame(height: 30)
-                        .frame(width: 120)
-                        .background(Color.black.opacity(0.25))
-                        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
-                        .volarHairline(cornerRadius: 7)
-                    settingsPillButton("Verify", solid: true) {
-                        appState.verifyEmailOTP(email: accountEmailInput, code: accountCodeInput)
-                    }
-                    .disabled(appState.accountBusy || accountCodeInput.count != 6)
-                }
-            }
-        }
+        EmailSignInForm()
     }
 
     @ViewBuilder
@@ -972,11 +1318,13 @@ struct SettingsView: View {
 
             if let status = appState.subscriptionStatus {
                 Text("Parse: \(status.parseUsedToday)/\(status.parseLimit) lượt AI hôm nay")
-                    .font(.system(size: 11.5))
+                    .font(Font.volarMono(size: 11.5))
+                    .monospacedDigit()
                     .foregroundStyle(VolarColor.textSec)
                 if appState.accountTier == .pro {
                     Text("Speech: \(status.speechUsedToday)/\(status.speechLimit) lượt hôm nay")
-                        .font(.system(size: 11.5))
+                        .font(Font.volarMono(size: 11.5))
+                        .monospacedDigit()
                         .foregroundStyle(VolarColor.textSec)
                 }
             }
@@ -984,6 +1332,8 @@ struct SettingsView: View {
             if appState.accountTier == .free {
                 upgradeSection
             }
+
+            redeemCodeRow
 
             HStack(spacing: 8) {
                 settingsPillButton("Restore Purchases") { appState.restorePurchases() }
@@ -1010,6 +1360,61 @@ struct SettingsView: View {
         }
     }
 
+    /// Backlog "1 free month of Pro" promo codes (Task 3, redeem contract). Only reachable from
+    /// `signedInAccountBody` — redemption attaches the grant to the signed-in identity, so showing
+    /// this to a signed-out user would just produce `AccountError.signedOut` on every tap; visible-
+    /// but-disabled was considered and rejected in favor of just not rendering it, matching how
+    /// `upgradeSection`/`Restore Purchases`/"Delete account" are ALSO signed-in-only rows on this
+    /// same card rather than disabled placeholders — same-page precedent, not a new pattern.
+    ///
+    /// Styled identically to the email-OTP field/button pair directly above in
+    /// `signedOutAccountBody` (same `VolarColor.surfaceHi` field background, `volarHairline`,
+    /// monospaced font matching the 6-digit code field, `settingsPillButton`) — deliberately no new
+    /// visual treatment introduced for this row.
+    private var redeemCodeRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Have a promo code?")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(VolarColor.textMut)
+            HStack(spacing: 8) {
+                TextField("PROMOCODE", text: $promoCodeInput)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12.5, design: .monospaced))
+                    .foregroundStyle(VolarColor.textPri)
+                    .padding(.horizontal, 10)
+                    .frame(height: 30)
+                    .background(VolarColor.surfaceHi)
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+                    .volarHairline(cornerRadius: 5)
+                    // Live-uppercase as the user types — cosmetic only (Task 1's
+                    // `AccountService.redeemPromoCode` is the ONE place that actually normalizes
+                    // what goes on the wire; this just keeps what's on screen matching what will be
+                    // sent, since a pasted lowercase code otherwise LOOKS unnormalized until submit).
+                    // Mutating the bound string directly here (rather than `.textCase(.uppercase)`,
+                    // which only recases the RENDERED glyphs and would leave `promoCodeInput` itself
+                    // mixed-case) is the straightforward option — no fight with the binding, since
+                    // `TextField` already treats `$promoCodeInput` as the single source of truth.
+                    .onChange(of: promoCodeInput) { _, newValue in
+                        let upper = newValue.uppercased()
+                        if upper != newValue { promoCodeInput = upper }
+                    }
+                settingsPillButton("Redeem", solid: true) {
+                    appState.redeemPromoCode(promoCodeInput)
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(appState.accountBusy || promoCodeInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+            // Success confirmation only — failures already surface through `accountCard`'s existing
+            // `appState.accountError` `Text` right below this whole card, so this does NOT duplicate
+            // that as a second error label (task brief's explicit instruction).
+            if let until = appState.lastRedeemedUntil {
+                Text("Pro until \(until.formatted(date: .abbreviated, time: .omitted))")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.done)
+            }
+        }
+    }
+
     private var tierBadge: some View {
         Text(appState.accountTier == .pro ? "Pro" : "Free")
             .font(.system(size: 10.5, weight: .semibold))
@@ -1017,40 +1422,30 @@ struct SettingsView: View {
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
             .background((appState.accountTier == .pro ? VolarColor.done : Color.white).opacity(0.14))
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 
-    /// The two "Volar Pro" products (contract §8) — prices always come from `product.displayPrice`
-    /// (never a hardcoded "$6.99"), so this reads correctly in every storefront/currency.
+    /// Single entry point into `PaywallView` (the one purchase surface in the app — see that file's
+    /// header comment) rather than the plan cards previously inlined directly here. Real
+    /// price/trial/plan copy now lives in exactly one place instead of two independently-maintained
+    /// UIs that could drift apart.
     private var upgradeSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Upgrade to Pro — 14-day free trial")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(VolarColor.textPri)
-                .padding(.top, 4)
-            productRow(appState.monthlyProduct, product: .monthly)
-            productRow(appState.yearlyProduct, product: .yearly)
-        }
-    }
-
-    @ViewBuilder
-    private func productRow(_ product: Product?, product which: VolarProduct) -> some View {
-        HStack {
-            Text(product?.displayName ?? (which == .monthly ? "Monthly" : "Yearly"))
-                .font(.system(size: 12))
-                .foregroundStyle(VolarColor.textSec)
-            Spacer()
-            if let product {
-                settingsPillButton(product.displayPrice, solid: true) {
-                    appState.purchase(which)
-                }
-                .disabled(appState.accountBusy)
-            } else {
-                Text("Unavailable")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(VolarColor.textMut)
+        Button {
+            showPaywall = true
+        } label: {
+            HStack(spacing: 8) {
+                VolarIcon(.sparkle, size: 13, color: .white, weight: .medium)
+                Text("Upgrade to Pro")
+                    .font(.system(size: 13, weight: .semibold))
             }
+            .foregroundStyle(.white)
+            .frame(maxWidth: .infinity)
+            .frame(height: 36)
         }
+        .buttonStyle(.plain)
+        .background(accentColors.solid)
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        .padding(.top, 4)
     }
 
     /// macOS has no `AppStore.showManageSubscriptions(in:)` equivalent (that StoreKit 2 call is
@@ -1063,6 +1458,18 @@ struct SettingsView: View {
 
     // MARK: - About
 
+    /// Read the real marketing version from the bundle instead of typing it in the string below —
+    /// a typed literal silently drifts from `Info.plist`'s `CFBundleShortVersionString` on every
+    /// version bump (this string used to read "1.0.2" while Info.plist said "1.0.0"). Falls back
+    /// to an empty string (never force-unwrapped) so a lookup failure just omits the version
+    /// rather than crashing or showing a placeholder.
+    private var appVersionSuffix: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              !version.isEmpty
+        else { return "" }
+        return " \(version)"
+    }
+
     private var aboutTab: some View {
         VStack(spacing: 14) {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -1073,7 +1480,7 @@ struct SettingsView: View {
                 }
                 .shadow(color: accentColors.glow, radius: 20, y: 8)
 
-            Text("Volar 1.0.2")
+            Text("Volar AI\(appVersionSuffix)")
                 .font(.system(size: 22, weight: .medium))
                 .foregroundStyle(VolarColor.textPri)
 
@@ -1088,7 +1495,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(accentColors.surface)
-                    .clipShape(Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
 
                 Text("Acknowledgements")
                     .font(.system(size: 11, weight: .medium))
@@ -1096,7 +1503,7 @@ struct SettingsView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                     .background(VolarColor.veil(0.06))
-                    .clipShape(Capsule())
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             }
             .padding(.top, 4)
         }
@@ -1147,7 +1554,7 @@ private struct VolarToggle: View {
     private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
-        RoundedRectangle(cornerRadius: 12, style: .continuous)
+        RoundedRectangle(cornerRadius: 8, style: .continuous)
             .fill(isOn ? accentColors.solid : VolarColor.veil(0.12))
             .frame(width: 38, height: 22)
             .overlay(alignment: isOn ? .trailing : .leading) {
@@ -1167,6 +1574,11 @@ private struct SegmentOption<T: Hashable> {
     let id: T
     let label: String
     var disabled: Bool = false
+    /// Set `true` only for options whose label is a measurement a user reads/compares as a number
+    /// (minute values in duration pickers) — design-spec.md §2's mono-numerals rule. Defaults
+    /// `false` so every other `Segmented` row in this file (Density, Theme, Ambient, reminder
+    /// policy, voice delivery — all prose labels) keeps its ordinary system font untouched.
+    var mono: Bool = false
 }
 
 /// Segmented control. Ported from the prototype's `Segmented`.
@@ -1186,7 +1598,8 @@ private struct Segmented<T: Hashable>: View {
                     value = option.id
                 } label: {
                     Text(option.label)
-                        .font(.system(size: 11.5, weight: .medium))
+                        .font(option.mono ? Font.volarMono(size: 11.5, weight: .medium) : .system(size: 11.5, weight: .medium))
+                        .monospacedDigit()
                         .foregroundStyle(option.disabled ? VolarColor.textMut : (selected ? accentColors.solid : VolarColor.textSec))
                         .opacity(option.disabled ? 0.5 : 1)
                         .padding(.horizontal, 12)
@@ -1198,9 +1611,9 @@ private struct Segmented<T: Hashable>: View {
             }
         }
         .padding(2)
-        .background(Color.black.opacity(0.25))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .volarHairline(cornerRadius: 8)
+        .background(VolarColor.surfaceHi)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .volarHairline(cornerRadius: 5)
     }
 }
 

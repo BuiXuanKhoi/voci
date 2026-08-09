@@ -23,8 +23,32 @@ import { readEnvInt } from "./env.ts";
 
 export type Route = "parse" | "speech";
 
-export const DEFAULT_PARSE_LIMIT_FREE = 20;
+/** Free daily `/parse` cap — 12, chốt bởi anh Khôi 2026-08-09 (hạ từ 20; `docs/product-vision-v2.md`
+ *  còn ghi 50 và một đề xuất 20–25, cả hai đều đã lỗi thời — doc được cập nhật cùng ngày).
+ *
+ *  Con số này KHÔNG phải cảm tính, nó rơi ra từ chi phí thật đo được cùng ngày: một `parse` call
+ *  hiện tốn ~5.967 input token + ~220 output token trên `gemini-3.1-flash-lite` = **~$0.0016/call**
+ *  (đo bằng `usageMetadata` thật, không phải ước lượng). Ở 12/ngày, một free device chạm trần mỗi
+ *  ngày tốn ~$0.58/tháng; ở mức 20 cũ là ~$0.96 và ở mức 50 trong doc là ~$2.40.
+ *
+ *  Vì sao 12 là ngưỡng đúng: ở conversion 2,5% (giả định cận thực của `product-vision-v2.md`), mỗi
+ *  Pro (net $5.94 sau Apple 15%) gánh ~39 free user, tức ngân sách hoà vốn là ~$0.15/free/tháng
+ *  ≈ 95 call/tháng ≈ **3,2 call/ngày TRUNG BÌNH trên toàn bộ free base**. Trần 12/ngày cho user
+ *  nhiệt tình đủ chỗ thở mà vẫn giữ trung bình thực tế dưới ngưỡng đó — miễn là tỉ lệ user chạm
+ *  trần đều đặn không vượt ~25%. NẾU số liệu thật sau launch cho thấy trung bình vượt 3,2/ngày,
+ *  đòn xử lý ĐÚNG không phải hạ trần tiếp mà là route free tier sang `gemini-2.5-flash-lite`
+ *  ($0.10/$0.40 thay vì $0.25/$1.50 → ~$0.00068/call, rẻ 2,4×) — xem `backlog.md`.
+ *
+ *  Chỉnh được server-side qua env `PARSE_LIMIT_FREE` mà không cần redeploy (đó là lý do hằng số
+ *  này chỉ là DEFAULT) — nên đây là con số an toàn để khởi điểm, không phải cam kết vĩnh viễn. */
+export const DEFAULT_PARSE_LIMIT_FREE = 12;
+/** CẢNH BÁO CHI PHÍ (2026-08-09, chưa được anh Khôi quyết — xem `backlog.md`): 500/ngày ở
+ *  ~$0.0016/call là ~$24/tháng cho MỘT Pro user chạm trần, so với net $5.94/tháng. Đây là trần
+ *  chống-abuse, KHÔNG phải mức fair-use mà `product-vision-v2.md` giả định (~30/ngày ≈ $1.44/tháng)
+ *  — khoảng cách 16×. Không tự hạ ở đây vì đó là quyết định sản phẩm, nhưng đừng nhầm nó là con số
+ *  đã được tính toán về mặt margin: nó chưa. */
 export const DEFAULT_PARSE_LIMIT_PRO = 500;
+export const DEFAULT_SPEECH_LIMIT_FREE = 20;
 export const DEFAULT_SPEECH_LIMIT_PRO = 500;
 
 /** `/parse` is available to both tiers, just with a different daily cap. */
@@ -34,7 +58,17 @@ export function parseLimitFor(tier: "free" | "pro"): number {
     : readEnvInt("PARSE_LIMIT_FREE", DEFAULT_PARSE_LIMIT_FREE);
 }
 
-/** `/groq` (speech) is Pro-only (contract §1) — there is no free-tier speech limit to compute. */
+/** `/groq` (speech) is available to both tiers, just with a different daily cap — same shape as
+ *  `parseLimitFor` above. Any tier value other than the literal `"pro"` falls to the FREE cap;
+ *  there is no "unexpected tier" case that ever resolves to the larger Pro budget. */
+export function speechLimitFor(tier: "free" | "pro"): number {
+  return tier === "pro" ? speechLimitForPro() : readEnvInt("SPEECH_LIMIT_FREE", DEFAULT_SPEECH_LIMIT_FREE);
+}
+
+/** Pro-tier speech cap alone. Kept as its own export (rather than folded fully into
+ *  `speechLimitFor`) because `../subscription/index.ts`'s `/status` handler calls it directly for
+ *  its own tier branch — that file is out of scope for the free/paid `/groq` change this module
+ *  was updated for, so its call site and behavior are deliberately left untouched here. */
 export function speechLimitForPro(): number {
   return readEnvInt("SPEECH_LIMIT_PRO", DEFAULT_SPEECH_LIMIT_PRO);
 }

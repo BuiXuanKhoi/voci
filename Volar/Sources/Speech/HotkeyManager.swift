@@ -1,46 +1,57 @@
-// Sources/Speech/HotkeyManager.swift — global ⌃⌥M toggle-to-talk hotkey (Carbon, sandbox-safe)
+// Sources/Speech/HotkeyManager.swift — global ⌃⌥M (toggle-to-talk) + ⌃⌥T (typed capture) hotkeys
+// (Carbon, sandbox-safe)
 import Carbon.HIToolbox
 
-/// Registers a system-wide "press ⌃⌥M to toggle capture (press to start, press again to stop)"
-/// hotkey using Carbon's `RegisterEventHotKey`/`InstallEventHandler` — replaces the prior
-/// `NSEvent.addGlobalMonitorForEvents` implementation (feature 002, research.md R3).
+/// Registers TWO system-wide hotkeys using Carbon's `RegisterEventHotKey`/`InstallEventHandler`:
+/// ⌃⌥M ("press to toggle voice capture — press to start, press again to stop", unchanged since the
+/// pre-second-hotkey version of this file) and ⌃⌥T ("open the typed-capture popup", new — see
+/// `docs`/the task brief for "type → Add task → done"). Both share the same `InstallEventHandler`
+/// registration (one handler, `kEventHotKeyPressed`/`kEventHotKeyReleased`, covers every hotkey
+/// registered against `GetApplicationEventTarget()`) but each gets its OWN `RegisterEventHotKey`
+/// call and its own `EventHotKeyRef` — see `start()`/`stop()` below for why that independence
+/// matters (one hotkey's registration failing must never disable the other).
 ///
-/// Why the switch: `NSEvent.addGlobalMonitorForEvents` only delivers events system-wide once the
-/// user has granted **Accessibility** permission, which is unacceptable under Mac App Store
-/// review + App Sandbox (Volar.entitlements now sets `com.apple.security.app-sandbox`).
+/// Why Carbon at all (unchanged rationale): `NSEvent.addGlobalMonitorForEvents` only delivers
+/// events system-wide once the user has granted **Accessibility** permission, which is unacceptable
+/// under Mac App Store review + App Sandbox (Volar.entitlements sets `com.apple.security.app-sandbox`).
 /// `RegisterEventHotKey` is a first-class Carbon Event Manager API: sandbox-legal, needs no
-/// permission prompt at all, and — unlike the old global+local monitor pair — fires uniformly
-/// regardless of which app is frontmost, INCLUDING Volar itself. That means there is no equivalent
-/// of the old "local monitor" needed here; one registration covers every case.
+/// permission prompt at all, and fires uniformly regardless of which app is frontmost, INCLUDING
+/// Volar itself.
 ///
-/// Public API and toggle semantics are UNCHANGED from the pre-Carbon version (commit ee75841):
-/// same class name, same `start(appState:onKeyDown:onKeyUp:)` / `stop()` signatures, same ⌃⌥M
-/// (Control+Option+M) toggle-to-talk behavior, same auto-repeat guard, same "onKeyUp is stored
-/// but intentionally never invoked" behavior (toggle mode never needed it — see `handle` below).
-/// `AppState` call sites (`AppState.activateServices()`, which calls `hotkey.start(appState: self)`
-/// with no closures) are untouched.
+/// Public API is UNCHANGED from the single-hotkey version: same class name, same
+/// `start(appState:onKeyDown:onKeyUp:)` / `stop()` signatures. `AppState.activateServices()` (the
+/// only call site, `hotkey.start(appState: self)`, no closures) needs no changes — ⌃⌥T's dispatch
+/// target is reached by calling `appState.openTextCapture()` directly from `handle(hotKeyID:isKeyDown:)`
+/// below, the exact same pattern ⌃⌥M already used for `appState.handleHotkey()`. `onKeyDown`/
+/// `onKeyUp` remain ⌃⌥M-only (never invoked for ⌃⌥T) — mirrors ⌃⌥M's own pre-existing "onKeyUp is
+/// stored but intentionally never invoked" behavior (toggle mode never needed it either).
 ///
 /// UNVERIFIED (authored on a Windows machine with no Xcode/Carbon to compile against — verify on
 /// Mac): `import Carbon.HIToolbox` availability/name, `EventHandlerUPP`'s exact Swift-imported
 /// closure signature, `EventTypeSpec`'s memberwise-init argument labels, whether
-/// `GetApplicationEventTarget()`/`GetEventKind()` return optionals, and that none of the Carbon
-/// Event Manager hot-key APIs used here are deprecated-and-removed on the macOS 14 SDK floor (they
-/// are old but, per research R3, still the only sandbox-legal system-wide hotkey mechanism as of
-/// this writing).
+/// `GetApplicationEventTarget()`/`GetEventKind()` return optionals, that none of the Carbon Event
+/// Manager hot-key APIs used here are deprecated-and-removed on the macOS 14 SDK floor, AND (new to
+/// this file) the exact `GetEventParameter(..., kEventParamDirectObject, typeEventHotKeyID, ...)`
+/// call shape used in `carbonEventHandler` below to identify which of the two hotkeys fired — this
+/// is a widely-used Carbon idiom (the standard way to read an `EventHotKeyID` back out of a hotkey
+/// event) but has never been compiled against a real Carbon.HIToolbox header on this machine.
 @MainActor
 final class HotkeyManager {
-    // MARK: - Hotkey identity (⌃⌥M — Control+Option+M, same combo as before)
+    // MARK: - Hotkey identity
 
-    /// `kVK_ANSI_M` = 46, the same raw key code the previous `NSEvent`-based implementation used.
-    private static let hotkeyKeyCode = UInt32(kVK_ANSI_M)
+    /// `kVK_ANSI_M` = 46 — ⌃⌥M, unchanged from the single-hotkey version.
+    private static let hotkeyKeyCodeCapture = UInt32(kVK_ANSI_M)
+    /// `kVK_ANSI_T` — ⌃⌥T, new: "add a task by typing" (see `AppState.openTextCapture()`).
+    private static let hotkeyKeyCodeTextCapture = UInt32(kVK_ANSI_T)
     /// Carbon's legacy Menu-Manager-style modifier bitmask (`controlKey`/`optionKey` from
-    /// `<HIToolbox/Events.h>`), NOT `NSEvent.ModifierFlags` — a different constant space than the
-    /// old implementation used, but the same physical combo (Control+Option).
+    /// <HIToolbox/Events.h>), NOT `NSEvent.ModifierFlags`. Same physical combo (Control+Option) for
+    /// both hotkeys — only the letter differs.
     private static let hotkeyModifiers = UInt32(controlKey | optionKey)
-    /// Four-char-code "app signature" + a local id, just a tag Carbon uses to identify which
-    /// hotkey fired (only one is ever registered by this class, but the ID is still required by
-    /// the API and is useful for defensively verifying the event in `handleCarbonEvent`).
-    private static let hotkeyID = EventHotKeyID(signature: fourCharCode("Volar"), id: 1)
+    /// Four-char-code "app signature" shared by both hotkeys; the `id` is what
+    /// `handle(hotKeyID:isKeyDown:)` actually dispatches on — `1` = ⌃⌥M (unchanged id from the
+    /// single-hotkey version, so nothing about the FIRST hotkey's identity changes), `2` = ⌃⌥T.
+    private static let hotkeyIDCapture = EventHotKeyID(signature: fourCharCode("Volar"), id: 1)
+    private static let hotkeyIDTextCapture = EventHotKeyID(signature: fourCharCode("Volar"), id: 2)
 
     /// Packs up to 4 ASCII characters into the `OSType`/`FourCharCode` Carbon expects for a
     /// hotkey signature — a plain arithmetic helper, no Carbon API involved.
@@ -52,31 +63,43 @@ final class HotkeyManager {
         return result
     }
 
-    // MARK: - Carbon handles (torn down in `stop()` and mirrored in `deinit`)
+    // MARK: - Carbon handles (torn down in `stop()`)
 
-    private var hotKeyRef: EventHotKeyRef?
+    /// ⌃⌥M's registration. Kept in its own property (rather than an array/dictionary) so `stop()`
+    /// can unregister each hotkey explicitly and independently, matching how `start()` registers
+    /// them independently.
+    private var hotKeyRefCapture: EventHotKeyRef?
+    /// ⌃⌥T's registration — see `hotKeyRefCapture` above for why this is a separate property.
+    private var hotKeyRefTextCapture: EventHotKeyRef?
+    /// One shared event handler covers press/release for BOTH hotkeys (Carbon dispatches by
+    /// matching `EventHotKeyID`, not by handler) — unchanged shape from the single-hotkey version.
     private var eventHandlerRef: EventHandlerRef?
     /// The `Unmanaged.passRetained(self)` pointer handed to Carbon as `userData` so the
     /// C-function-pointer callback (which cannot capture Swift context) can recover `self`.
-    /// Retained on `start()`, released on `stop()`/`deinit` — the only way this class avoids
-    /// either a dangling pointer (if released too early) or a retain-cycle-shaped leak (if never
-    /// released at all).
+    /// Retained on `start()`, released on `stop()`/a fully-failed `start()` — the only way this
+    /// class avoids either a dangling pointer or a retain-cycle-shaped leak.
     private var retainedSelfPointer: UnsafeMutableRawPointer?
 
+    /// ⌃⌥M's auto-repeat guard (unchanged name/semantics from the single-hotkey version — toggle
+    /// mode: press starts/stops, key-up is accepted but never acted on).
     private var isDown = false
+    /// ⌃⌥T's own auto-repeat guard. Deliberately a SEPARATE flag from `isDown` — the two hotkeys'
+    /// key-down/key-up events are entirely independent and must never share bookkeeping (holding
+    /// one down while tapping the other must not desync either guard).
+    private var isTextDown = false
     private var onKeyDown: (() -> Void)?
     private var onKeyUp: (() -> Void)?
-    /// Stored (weak) because the Carbon callback only receives `self` via `userData` — unlike the
-    /// old NSEvent-monitor closures, it has no way to also capture `appState` directly, so
-    /// `start()` now stashes it here instead. Weak to avoid `HotkeyManager` keeping `AppState`
-    /// alive (matches the old code's `[weak appState]` capture).
+    /// Stored (weak) because the Carbon callback only receives `self` via `userData` — it has no
+    /// way to also capture `appState` directly, so `start()` stashes it here instead. Weak to avoid
+    /// `HotkeyManager` keeping `AppState` alive (matches the old code's `[weak appState]` capture).
     private weak var appState: AppState?
 
-    /// Starts monitoring for ⌃⌥M. `appState.toggleCapture()` is called directly on key-down;
-    /// `onKeyDown`/`onKeyUp` let the owner additionally drive `SpeechCapture` without
-    /// `HotkeyManager` needing to know that type (`onKeyUp` is accepted for API compatibility but
-    /// — same as before Carbon — is never actually invoked; toggle mode has no use for key-up).
-    /// Safe to call again without a prior `stop()` — any existing registration is torn down first.
+    /// Starts monitoring for BOTH ⌃⌥M and ⌃⌥T. `appState.handleHotkey()` fires on ⌃⌥M key-down
+    /// (unchanged toggle semantics); `appState.openTextCapture()` fires on ⌃⌥T key-down (key-down
+    /// only — "there is no hold-to-type" per the task brief; ⌃⌥T's key-up is delivered by the same
+    /// shared handler but intentionally ignored, see `handle(hotKeyID:isKeyDown:)` below).
+    /// `onKeyDown`/`onKeyUp` remain ⌃⌥M-only, same as before Carbon. Safe to call again without a
+    /// prior `stop()` — any existing registration is torn down first.
     func start(appState: AppState, onKeyDown: (() -> Void)? = nil, onKeyUp: (() -> Void)? = nil) {
         stop()
         self.appState = appState
@@ -86,9 +109,9 @@ final class HotkeyManager {
         let selfPointer = Unmanaged.passRetained(self).toOpaque()
         retainedSelfPointer = selfPointer
 
-        // One handler covers both press and release so `isDown` bookkeeping (auto-repeat guard,
-        // same as the old code) still works; `handleCarbonEvent` reads the event *kind* to tell
-        // them apart instead of relying on separate callbacks.
+        // One handler covers press AND release for BOTH hotkeys — Carbon tells them apart by the
+        // `EventHotKeyID` carried on the event itself (see `carbonEventHandler` below), not by
+        // having a separate handler per hotkey.
         var eventTypes = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased)),
@@ -110,36 +133,69 @@ final class HotkeyManager {
         }
         eventHandlerRef = handlerRef
 
-        var registeredHotKeyRef: EventHotKeyRef?
-        let registerStatus = RegisterEventHotKey(
-            Self.hotkeyKeyCode,
+        // ⌃⌥M and ⌃⌥T are registered INDEPENDENTLY, each in its own `RegisterEventHotKey` call with
+        // its own success/failure handling — a conflict with another app owning one combo (e.g.
+        // ⌃⌥T already bound elsewhere) must never prevent the OTHER hotkey from registering. This
+        // is a deliberate change from the single-hotkey version's all-or-nothing failure path:
+        // there, one hotkey meant one `guard ... else { return }` was correct; with two independent
+        // hotkeys sharing one handler, a partial failure (one registered, one didn't) must still
+        // leave the handler installed and the succeeding hotkey live.
+        var registeredCaptureRef: EventHotKeyRef?
+        let registerCaptureStatus = RegisterEventHotKey(
+            Self.hotkeyKeyCodeCapture,
             Self.hotkeyModifiers,
-            Self.hotkeyID,
+            Self.hotkeyIDCapture,
             GetApplicationEventTarget(),
             0,
-            &registeredHotKeyRef
+            &registeredCaptureRef
         )
-        guard registerStatus == noErr else {
-            print("[Volar.HotkeyManager] RegisterEventHotKey failed: status \(registerStatus)")
-            // Roll back the handler + retained pointer so a failed start never leaves dangling
-            // Carbon state or a leaked retain behind.
+        if registerCaptureStatus == noErr {
+            hotKeyRefCapture = registeredCaptureRef
+        } else {
+            print("[Volar.HotkeyManager] RegisterEventHotKey(⌃⌥M) failed: status \(registerCaptureStatus)")
+        }
+
+        var registeredTextRef: EventHotKeyRef?
+        let registerTextStatus = RegisterEventHotKey(
+            Self.hotkeyKeyCodeTextCapture,
+            Self.hotkeyModifiers,
+            Self.hotkeyIDTextCapture,
+            GetApplicationEventTarget(),
+            0,
+            &registeredTextRef
+        )
+        if registerTextStatus == noErr {
+            hotKeyRefTextCapture = registeredTextRef
+        } else {
+            print("[Volar.HotkeyManager] RegisterEventHotKey(⌃⌥T) failed: status \(registerTextStatus)")
+        }
+
+        // Only tear the whole thing down (handler + retained pointer) if BOTH registrations failed
+        // — at that point this instance has genuinely nothing to do and holding the retained
+        // pointer/handler would just be a leak. A PARTIAL failure (exactly one of the two
+        // registered) is left running: half the hotkeys working is strictly better than silently
+        // disabling both over one conflict, and the failure was already logged above.
+        guard hotKeyRefCapture != nil || hotKeyRefTextCapture != nil else {
             RemoveEventHandler(handlerRef)
             eventHandlerRef = nil
             Unmanaged<HotkeyManager>.fromOpaque(selfPointer).release()
             retainedSelfPointer = nil
             return
         }
-        hotKeyRef = registeredHotKeyRef
     }
 
-    /// Unregisters the hotkey, removes the event handler, and releases the retained `self`
-    /// pointer handed to Carbon — clears all in-progress hold state. Idempotent: safe to call
-    /// when nothing is registered (e.g. a repeated `stop()`, or a `start()` that failed partway).
+    /// Unregisters BOTH hotkeys, removes the event handler, and releases the retained `self`
+    /// pointer handed to Carbon — clears all in-progress hold state. Idempotent: safe to call when
+    /// nothing (or only one of the two hotkeys) is registered.
     func stop() {
-        if let hotKeyRef {
-            UnregisterEventHotKey(hotKeyRef)
+        if let hotKeyRefCapture {
+            UnregisterEventHotKey(hotKeyRefCapture)
         }
-        hotKeyRef = nil
+        hotKeyRefCapture = nil
+        if let hotKeyRefTextCapture {
+            UnregisterEventHotKey(hotKeyRefTextCapture)
+        }
+        hotKeyRefTextCapture = nil
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
@@ -149,59 +205,106 @@ final class HotkeyManager {
         }
         retainedSelfPointer = nil
         isDown = false
+        isTextDown = false
         onKeyDown = nil
         onKeyUp = nil
         appState = nil
     }
 
-    // No `deinit`: teardown happens via `stop()`. A `deinit` here is unreachable while Carbon
-    // registration is live — `start()` hands Carbon `Unmanaged.passRetained(self)`, which keeps
-    // this instance alive for as long as `hotKeyRef`/`eventHandlerRef` are registered, and `stop()`
-    // is the only thing that releases that pointer. Swift 6 also forbids a `deinit` on a
-    // `@MainActor`-isolated class from touching non-Sendable MainActor-isolated stored properties
-    // like `EventHotKeyRef?`/`EventHandlerRef?`/`UnsafeMutableRawPointer?` (compile error under
-    // strict concurrency), so even if this were somehow reachable it could not be written this way.
+    // No `deinit`: teardown happens via `stop()`. Same reasoning as the single-hotkey version —
+    // `start()` hands Carbon `Unmanaged.passRetained(self)`, which keeps this instance alive for as
+    // long as either `EventHotKeyRef` is registered, and `stop()` is the only thing that releases
+    // that pointer. Swift 6 also forbids a `deinit` on a `@MainActor`-isolated class from touching
+    // actor-isolated stored properties like these, so even if reachable it could not be written
+    // this way.
 
-    /// Same logic as the pre-Carbon `handle(keyCode:modifiers:isKeyDown:appState:)`, minus the
-    /// keyCode/modifiers checks — Carbon only ever calls back for the exact combo registered in
-    /// `start()`, so there is nothing left to filter here.
-    private func handle(isKeyDown: Bool) {
+    /// Dispatches on WHICH hotkey fired (`hotKeyID.id`, extracted from the raw Carbon event by
+    /// `carbonEventHandler` below) and whether this is press or release. ⌃⌥M keeps its EXACT
+    /// pre-existing toggle-to-talk semantics (auto-repeat guard via `isDown`, key-up intentionally
+    /// a no-op). ⌃⌥T is key-down only: no hold-to-type, opens the typed-capture popup on every
+    /// non-repeated press and otherwise does nothing (its own `isTextDown` guard exists purely to
+    /// ignore OS-level key-repeat, mirroring `isDown`'s role for ⌃⌥M).
+    private func handle(hotKeyID: EventHotKeyID, isKeyDown: Bool) {
         guard let appState else { return }
-        if isKeyDown {
-            // Defensive: Carbon hot keys are not expected to redeliver `kEventHotKeyPressed` on
-            // OS-level key-repeat the way raw `NSEvent .keyDown` did, but this guard costs
-            // nothing and keeps the exact same anti-double-toggle behavior as before.
-            guard !isDown else { return }
-            isDown = true
-            appState.toggleCapture() // toggle: press to start, press again to stop+parse
-            onKeyDown?()
-        } else {
-            isDown = false
-            // onKeyUp intentionally not invoked — matches pre-Carbon behavior: toggle mode has no
-            // use for key-up, and AppState.activateServices() never passes a closure for it.
+        switch hotKeyID.id {
+        case Self.hotkeyIDCapture.id:
+            if isKeyDown {
+                // Defensive: Carbon hot keys are not expected to redeliver `kEventHotKeyPressed` on
+                // OS-level key-repeat, but this guard costs nothing and keeps the exact same
+                // anti-double-toggle behavior the single-hotkey version had.
+                guard !isDown else { return }
+                isDown = true
+                // Real hotkey entry point — routes through `handleHotkey()` (not `toggleCapture()`)
+                // so a press while a confirm card is already up (`captureState == .parsed`) SAVES
+                // it instead of blowing it away to start a brand-new recording; see
+                // `handleHotkey()`'s own doc comment in `AppState.swift` for the full state table
+                // (which, as of this file's change, also closes the ⌃⌥T text-capture popup first if
+                // it happens to be open — "whichever hotkey the user pressed wins").
+                appState.handleHotkey()
+                onKeyDown?()
+            } else {
+                isDown = false
+                // onKeyUp intentionally not invoked — matches the pre-existing behavior: toggle
+                // mode has no use for key-up, and AppState.activateServices() never passes a
+                // closure for it.
+            }
+        case Self.hotkeyIDTextCapture.id:
+            guard isKeyDown else {
+                // Key-up delivered (same shared handler as ⌃⌥M) but deliberately ignored — ⌃⌥T has
+                // no hold-to-type behavior, only "open on press".
+                isTextDown = false
+                return
+            }
+            guard !isTextDown else { return }
+            isTextDown = true
+            // `AppState.openTextCapture()` itself handles the mutual-exclusion rule (closes any
+            // in-flight voice recording/confirm card/consent prompt first) — nothing extra needed
+            // here beyond the auto-repeat guard above.
+            appState.openTextCapture()
+        default:
+            // Unrecognized id — should be unreachable (only `hotkeyIDCapture`/`hotkeyIDTextCapture`
+            // are ever registered), but dropped rather than guessed, same principle as a failed
+            // `GetEventParameter` read in `carbonEventHandler` below.
+            break
         }
     }
 
-    /// The actual Carbon callback. Must be a context-free `@convention(c)` function (or, as here,
-    /// a closure literal with no captures assigned to a `static let` of the matching type) since
+    /// The actual Carbon callback. Must be a context-free `@convention(c)` function (or, as here, a
+    /// closure literal with no captures assigned to a `static let` of the matching type) since
     /// Carbon invokes it as a raw C function pointer — it cannot capture `self`. `self` instead
     /// travels through `userData`, using the `Unmanaged` retained-pointer pattern set up in
-    /// `start()`. Recovers the event kind (pressed vs. released) directly from the event via
-    /// `GetEventKind`, then hops to `@MainActor` — same `Task { @MainActor in ... }` pattern the
-    /// pre-Carbon `NSEvent` monitor closures used to cross from a non-actor-isolated callback
-    /// context into `HotkeyManager`'s (and `AppState`'s) MainActor-isolated state.
-    /// `nonisolated` for the same reason the closure takes `self` through `userData` instead of
-    /// capturing it: Carbon calls this as a raw `@convention(c)` function pointer, from whatever
-    /// thread the event arrives on. A `static let` declared inside this `@MainActor` type would
-    /// otherwise inherit main-actor isolation, and Swift 6 refuses to form a C function pointer
-    /// from an actor-isolated closure. Nothing here touches isolated state directly — the hop to
-    /// `manager.handle` already goes through `Task { @MainActor in ... }` below.
+    /// `start()`. `nonisolated` for the same reason as before: Carbon calls this as a raw
+    /// `@convention(c)` function pointer, from whatever thread the event arrives on, and Swift 6
+    /// refuses to form a C function pointer from an actor-isolated closure.
+    ///
+    /// NEW (second hotkey): recovers WHICH hotkey fired via `GetEventParameter(...,
+    /// kEventParamDirectObject, typeEventHotKeyID, ...)` — the single-hotkey version never needed
+    /// this since only one hotkey (and therefore only one possible `EventHotKeyID`) existed. If
+    /// extraction fails for ANY reason (non-`noErr` status), the event is DROPPED entirely rather
+    /// than guessing which hotkey it was — firing the wrong capture surface (e.g. starting a voice
+    /// recording when the user meant to open the typed popup) off an unidentifiable event is worse
+    /// than silently missing one keypress.
+    // UNVERIFIED: see file header — the exact `GetEventParameter` call shape (buffer-size/out-param
+    // arrangement) below has never been compiled against a real Carbon.HIToolbox header.
     private nonisolated static let carbonEventHandler: EventHandlerUPP = { _, eventRef, userData in
         guard let eventRef, let userData else { return noErr }
         let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
         let isKeyDown = GetEventKind(eventRef) == UInt32(kEventHotKeyPressed)
+
+        var hotKeyID = EventHotKeyID()
+        let paramStatus = GetEventParameter(
+            eventRef,
+            EventParamName(kEventParamDirectObject),
+            EventParamType(typeEventHotKeyID),
+            nil,
+            MemoryLayout<EventHotKeyID>.size,
+            nil,
+            &hotKeyID
+        )
+        guard paramStatus == noErr else { return noErr }
+
         Task { @MainActor in
-            manager.handle(isKeyDown: isKeyDown)
+            manager.handle(hotKeyID: hotKeyID, isKeyDown: isKeyDown)
         }
         return noErr
     }

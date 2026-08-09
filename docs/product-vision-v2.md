@@ -109,7 +109,7 @@ quota free = DeviceCheck (không cần đăng nhập).
 |---|---|---|
 | Toàn bộ tính năng app: task model, reminder, orchestrator + Claude Code connect, focus/breakdown/đổi gió/panic, rituals, accomplishment, calendar, capture, voice query, export/search | ✅ đầy đủ | ✅ đầy đủ (không khác) |
 | Speech-to-text | WhisperKit on-device **không giới hạn** (Apple Silicon; máy Intel fallback Apple Speech) | **Groq whisper-large-v3**: chính xác nhất, code-switch Việt-Anh, auto-detect, nhanh |
-| AI parse câu nói → task + AI breakdown | FM on-device không giới hạn (macOS 26) · **cloud 50 lần/ngày/thiết bị** (opt-in, DeviceCheck) · heuristic không giới hạn | Cloud **không giới hạn** (fair-use) |
+| AI parse câu nói → task + AI breakdown | FM on-device không giới hạn (macOS 26) · **cloud 12 lần/ngày/thiết bị** (chốt 2026-08-09, hạ từ 50 → 20 → 12 sau khi đo chi phí thật; opt-in, DeviceCheck) · heuristic không giới hạn | Cloud **không giới hạn** (fair-use) |
 | Meeting ingestion (P3) | Whisper on-device (chậm hơn, vẫn unlimited) | Groq (nhanh, chính xác, file dài) |
 | Weekly narrative | FM on-device / template | Cloud LLM khi máy không có FM |
 | Trần 10 task/lần nói | áp dụng | áp dụng (sanity UX, không phải để bán) |
@@ -118,8 +118,10 @@ quota free = DeviceCheck (không cần đăng nhập).
 
 1. **Trial 7–14 ngày full Pro cho mọi user mới** (StoreKit intro offer) rồi tự rơi về
    free — loss aversion là đòn bẩy chính, không phải cắt free.
-2. **Quota AI cloud free hạ còn ~20–25/ngày + HIỆN đếm** ("còn 8 lượt AI hôm nay") —
-   trần nhìn thấy được là quảng cáo Pro tự nhiên; giá trị chỉnh server-side.
+2. **Quota AI cloud free — CHỐT 12/ngày** (2026-08-09, thay đề xuất ~20–25 ở đây và con số
+   50 trong bảng trên; code default `DEFAULT_PARSE_LIMIT_FREE` đã hạ 20 → 12) **+ HIỆN đếm**
+   ("còn 8 lượt AI hôm nay") — trần nhìn thấy được là quảng cáo Pro tự nhiên; giá trị chỉnh
+   server-side qua `PARSE_LIMIT_FREE` không cần redeploy.
 3. **Chuyển sang Pro** (loại scale & polish, không đụng vòng lõi): meeting ingestion
    (Pro-only hẳn), AI weekly narrative, lịch sử accomplishment >30 ngày + view tháng
    (export vẫn FREE — không bắt cóc data), theme/soundscape pack làm sẵn.
@@ -142,18 +144,41 @@ bộ giá & mục tiêu MRR cập nhật 2026-07-16 sau deep-research)
 Gemini 3.1 Flash-Lite $0.25/$1.50 per 1M in/out (2.5 Flash-Lite $0.10/$0.40);
 Supabase $0 → Pro $25/mo khi cần; Apple Small Business Program 15%; DeviceCheck $0.
 
-**Chi phí biến đổi / user / tháng** (ước lượng, parse ~700 token in + 250 out):
+**Chi phí biến đổi / user / tháng** (bảng ĐÃ SỬA 2026-08-09 — xem cảnh báo ngay dưới):
 
-| Hạng mục | Free (điển hình → trần) | Pro điển hình | Pro nặng (trần fair-use) |
+| Hạng mục | Free (điển hình → trần 12/ngày) | Pro điển hình | Pro nặng (fair-use) |
 |---|---|---|---|
 | Speech capture (15–30 lượt/ngày, min 10s) | $0 (on-device) | ~$0.15–0.3 (large-v3) | ~$0.3 |
 | Meeting ingestion (Pro-only; **dùng turbo** cho file dài) | — | 4h ≈ $0.16 | 20h ≈ $0.80 |
-| Cloud parse (free ≤25/ngày; Pro ~30/ngày) | $0.05 → $0.4 max | ~$0.5 | ~$0.7 |
-| **Tổng biến đổi** | **≈$0.05–0.4** | **≈$0.8–1.0** | **≈$1.8** |
+| Cloud parse @ **$0.0016/call đo thật** (free ≤12/ngày; Pro ~30/ngày; nặng ~50/ngày) | $0.07 → **$0.58** | **~$1.44** | **~$2.40** |
+| **Tổng biến đổi** | **≈$0.07–0.58** | **≈$1.75–1.9** | **≈$3.5** |
+
+> ⚠️ **Bảng cũ sai 8,5× ở input token.** Nó giả định "parse ~700 token in + 250 out". Đo thật
+> ngày 2026-08-09 bằng `usageMetadata` của Gemini trên `gemini-3.1-flash-lite`: **5.967 token
+> in** + ~220 out = **$0.0016/call**, không phải $0.00055. Prompt đã phình qua ba đợt tính năng
+> (`task_refs_v1`, `task_cues_v1`, khối date rules 8.2k ký tự) mà bảng này chưa cập nhật theo.
+> Phân rã: systemInstruction 3.230 tok + date rules 2.400 + example theo `now` 235 + dữ liệu
+> user chỉ 90 → **98,8% input token là chi phí cố định, lời user chỉ chiếm 1,2%**.
+> (`responseSchema` 1.367 tok KHÔNG tính vào `promptTokenCount` nên không bill.)
+
+Margin thật sau khi sửa (thay bộ số ở mục "Chi tiết margin" bên dưới):
+
+- **Pro monthly $6.99** → net $5.94 − $1.75–1.9 = lời ~**$4.05–4.2 (~68–71%)**, không phải 80%+.
+- **Pro yearly $49.99** → net $3.54/mo − $1.75–1.9 = lời ~**$1.65–1.8 (~47–51%)**, không phải
+  ~70%. Đây là chỗ tụt mạnh nhất — annual đang được đẩy mạnh để khoá churn, cần biết margin
+  thật của nó chỉ bằng ~2/3 kỳ vọng cũ.
+- **Pro nặng** → lời ~**$2.44 (~41%)**, không phải ~70%. Vẫn dương.
 
 Cố định: Apple dev $99/năm (~$8/mo) + Supabase $0→$25/mo. Trial ≈ $0.3–0.5/người dùng thử.
-Đòn giảm chi phí có sẵn: turbo cho file dài (rẻ 2.8×), 2.5 Flash-Lite cho free tier,
-FM on-device gánh miễn phí trên macOS 26, quota chỉnh server-side nếu free-cost phình.
+Đòn giảm chi phí có sẵn: turbo cho file dài (rẻ 2.8×), **2.5 Flash-Lite cho free tier**
+($0.10/$0.40 → ~$0.00068/call, rẻ 2,4× — đây là đòn mạnh nhất còn chưa dùng, mạnh hơn hẳn việc
+rút gọn prompt), FM on-device gánh miễn phí trên macOS 26, quota chỉnh server-side
+(`PARSE_LIMIT_FREE`) nếu free-cost phình.
+
+**Ngưỡng phải theo dõi sau launch**: ở conversion 2,5%, mỗi Pro gánh ~39 free user → ngân sách
+hoà vốn ~$0.15/free/tháng ≈ **3,2 parse/ngày trung bình trên toàn free base**. Trần 12/ngày an
+toàn miễn là trung bình thực tế nằm dưới mức đó; nếu vượt, xử lý bằng cách route free sang
+2.5 Flash-Lite trước, hạ trần sau.
 
 **Giá CHỐT (anh Khôi duyệt 2026-07-16, thay bộ giá 2026-07-15 sau deep-research) + thang
 nâng giá theo mốc:**
@@ -174,11 +199,17 @@ nâng giá theo mốc:**
 
 Chi tiết margin của bộ số mới:
 
-- **Pro monthly $6.99** → net sau Apple 15% ≈ $5.94 → chi phí biến đổi Pro điển hình
+> ⚠️ **HAI GẠCH ĐẦU DÒNG NGAY DƯỚI ĐÃ LỖI THỜI** (2026-08-09) — chúng dựa trên chi phí biến đổi
+> $0.8–1.0/tháng, tính từ giả định parse 700 token in đã được đo lại là sai 8,5×. Số margin
+> ĐÚNG nằm ở mục "Margin thật sau khi sửa" phía trên. Giữ lại nguyên văn ở đây để thấy bộ số
+> nào đã dùng cho quyết định giá 2026-07-16; **đừng trích dẫn hai dòng này nữa**.
+
+- ~~**Pro monthly $6.99** → net sau Apple 15% ≈ $5.94 → chi phí biến đổi Pro điển hình
   ~$0.8-1.0/user/tháng (không đổi) → margin điển hình ~80%+ (~$5/user), user nặng nhất
-  (trần fair-use, chi phí ~$1.8) vẫn lời ~$4.1 (~70%).
-- **Pro yearly $49.99** (= $4.17/mo, giảm ~40% — đẩy annual để khóa churn) → net sau
-  Apple 15% ≈ $42.49/năm ≈ $3.54/mo → margin điển hình ~70% (~$2.6/user/tháng).
+  (trần fair-use, chi phí ~$1.8) vẫn lời ~$4.1 (~70%).~~ → thật: ~68–71% / ~41%.
+- ~~**Pro yearly $49.99** (= $4.17/mo, giảm ~40% — đẩy annual để khóa churn) → net sau
+  Apple 15% ≈ $42.49/năm ≈ $3.54/mo → margin điển hình ~70% (~$2.6/user/tháng).~~
+  → thật: ~47–51% (~$1.65–1.8/user/tháng).
 - **Không bán lifetime lúc launch** (chi phí cloud là recurring; xét sau khi có số liệu,
   nếu bán thì ≥$99.99 + fair-use).
 - **Storefront VN**: đặt giá riêng 149.000đ/tháng, 449.000đ/năm (Apple cho custom theo

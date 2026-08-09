@@ -116,7 +116,7 @@ struct TourOverlay: View {
             VolarColor.bg.opacity(0.78)
             if let rect = resolvedRect {
                 let hole = rect.insetBy(dx: -Self.holeOutset, dy: -Self.holeOutset)
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .frame(width: hole.width, height: hole.height)
                     .position(x: hole.midX, y: hole.midY)
                     .blendMode(.destinationOut)
@@ -134,7 +134,7 @@ struct TourOverlay: View {
     /// hex (hard project rule — every color in this file traces back to `Theme.swift`).
     private func ring(for rect: CGRect) -> some View {
         let hole = rect.insetBy(dx: -Self.holeOutset, dy: -Self.holeOutset)
-        return RoundedRectangle(cornerRadius: 12, style: .continuous)
+        return RoundedRectangle(cornerRadius: 8, style: .continuous)
             .stroke(accent.solid, lineWidth: 1.5)
             .frame(width: hole.width, height: hole.height)
             .position(x: hole.midX, y: hole.midY)
@@ -333,6 +333,11 @@ struct TourOverlay: View {
                 .foregroundStyle(VolarColor.bg)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
+                // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09) — xem
+                // `Sidebar.swift`'s `SidebarItem`. Đây là nút đi tiếp của guided tour, tức thứ
+                // người dùng MỚI bấm trong vài phút đầu tiên: một nút không ăn click ở đây là ấn
+                // tượng đầu tiên về app.
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(accent.solid)

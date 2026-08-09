@@ -63,14 +63,68 @@ extension Recurrence: Codable {
 
 // MARK: - ReminderPolicy
 
-struct ReminderPolicy: Sendable, Equatable, Codable {
-    /// Offsets relative to the task's deadline (seconds; negative = before). Default global
-    /// policy per data-model.md: -1 day, -1 hour, at-deadline.
+/// NOTE ON MEMBERWISE INIT: this struct deliberately does NOT declare any initializer in its own
+/// body (the `Codable` conformance below lives in a separate `extension` instead) so the compiler
+/// keeps auto-synthesizing the memberwise init with `offsets`/`repeatEvery` first (in that order)
+/// and the two newer fields defaulted and trailing. That's not cosmetic: `IntentParsing.swift` and
+/// `NLParser.swift` (both owned by other in-flight agents, not touched by this change) call
+/// `ReminderPolicy(offsets:repeatEvery:)` by keyword — moving/reordering fields or hand-writing an
+/// init in the primary declaration would silently break those call sites.
+struct ReminderPolicy: Sendable, Equatable {
+    /// Offsets relative to the task's deadline (seconds; negative = before). Always applied on
+    /// top of whatever `fractionsRemaining`/`remindPeriod` produce (see `ReminderRecord.derive`) —
+    /// this is how "fire exactly at the deadline" keeps working under the new default, which
+    /// carries only `[0]` here.
     var offsets: [TimeInterval]
     /// "Every 30 minutes" style repeat after the deadline; `nil` = fire once per offset only.
     var repeatEvery: TimeInterval?
+    /// User-facing "remind me at the halfway point / with a third of the time left" reminders,
+    /// expressed as fractions of the remaining time-to-deadline (0.5 = halfway, 1/3 = a third
+    /// left, ...). Only consulted by `ReminderRecord.derive` when `remindPeriod` is `nil` — an
+    /// explicit repeat cadence always wins over the proportional one. Empty = no proportional
+    /// reminders (the pre-existing offsets-only behavior).
+    var fractionsRemaining: [Double] = []
+    /// "Nhắc mỗi X" — user-specified fixed repeat cadence counting back from the deadline
+    /// (`deadline - P`, `deadline - 2P`, ...), used INSTEAD of `fractionsRemaining` when set.
+    /// `nil` = no user-specified cadence; fall back to `fractionsRemaining`.
+    var remindPeriod: TimeInterval?
 
-    static let defaultPolicy = ReminderPolicy(offsets: [-86400, -3600, 0], repeatEvery: nil)
+    /// New default (anh Khôi, 2026-07-28): proportional reminders at the halfway point and with
+    /// a third of the remaining time left, replacing the old fixed -1 day/-1 hour marks — plus
+    /// the at-deadline offset, which is still how "fire exactly at the deadline" is expressed.
+    static let defaultPolicy = ReminderPolicy(
+        offsets: [0], repeatEvery: nil, fractionsRemaining: [0.5, 1.0 / 3.0], remindPeriod: nil
+    )
+}
+
+extension ReminderPolicy: Codable {
+    private enum CodingKeys: String, CodingKey {
+        case offsets, repeatEvery, fractionsRemaining, remindPeriod
+    }
+
+    /// Hand-written (rather than compiler-synthesized) so a JSON blob persisted by an OLDER build
+    /// — which only ever wrote `offsets`/`repeatEvery`, see `AppState.setGlobalReminderPolicy` —
+    /// still decodes successfully after this update. `AppState`'s own load path wraps this in
+    /// `try?` and falls back to `.defaultPolicy` on ANY decode failure, so a naive
+    /// compiler-synthesized `Codable` (which would require the two new keys to be present) would
+    /// silently wipe out every user's already-saved global reminder policy the first time this
+    /// build ran, without ever crashing or logging anything — `decodeIfPresent` + a default is
+    /// what avoids that.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        offsets = try container.decode([TimeInterval].self, forKey: .offsets)
+        repeatEvery = try container.decodeIfPresent(TimeInterval.self, forKey: .repeatEvery)
+        fractionsRemaining = try container.decodeIfPresent([Double].self, forKey: .fractionsRemaining) ?? []
+        remindPeriod = try container.decodeIfPresent(TimeInterval.self, forKey: .remindPeriod)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(offsets, forKey: .offsets)
+        try container.encodeIfPresent(repeatEvery, forKey: .repeatEvery)
+        try container.encode(fractionsRemaining, forKey: .fractionsRemaining)
+        try container.encodeIfPresent(remindPeriod, forKey: .remindPeriod)
+    }
 }
 
 // MARK: - DelegationMeta

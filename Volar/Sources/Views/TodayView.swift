@@ -32,6 +32,12 @@ struct TodayView: View {
     /// NEW (retheme): "Completed" drawer, same collapsed-by-default convention as `laterExpanded`.
     @State private var completedExpanded = false
 
+    /// Drives `SignInSheet` (main-window Sign-in entry point fix, 2026-07-28) — Settings ▸ Account
+    /// used to be the ONLY place to sign in, which a brand-new user has no reason to ever open, so
+    /// they'd never discover cloud speech/parsing or Pro. This flag backs a toolbar pill that's
+    /// visible only while signed out (see the `ToolbarItemGroup` below).
+    @State private var showSignInSheet = false
+
     private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
@@ -41,15 +47,33 @@ struct TodayView: View {
                     .ignoresSafeArea()
             }
 
+            // Panel-refactor (specs/005-cursor-retheme/panel-refactor.md §5 item 3): `detailPanel`
+            // is a third CHILD of this `HStack`, not an overlay — it does not participate in, and
+            // must not disturb, the tour-overlay-must-be-last ordering the big comment below (on
+            // `.overlayPreferenceValue`) locks in. `FocusOverlay()` below is a sibling of this whole
+            // `HStack` inside the outer `ZStack`, so it already paints over all three columns
+            // (Sidebar/mainColumn/detailPanel) when focus mode is active — the panel never sits
+            // beside it.
             HStack(spacing: 0) {
                 Sidebar()
                 mainColumn
+                detailPanel
             }
+            .animation(VolarMotion.state, value: appState.detailTaskID)
 
             if appState.focusActive {
                 FocusOverlay()
             }
         }
+        // 006-cues-and-waiting (design.md §2 Việc B): the "natural touch point" trigger for
+        // `CueFiring.pending` — design.md's own words: "Ở điểm chạm tự nhiên (mở popover)". The
+        // main window becoming visible is the closest equivalent this app has to that (see
+        // `AppState.noteNaturalCueTouch`'s own doc comment for why `PopoverView`'s capture-flow
+        // popup was deliberately NOT used instead). Not overlay-producing, so — unlike the two
+        // `.overlay`/`.overlayPreferenceValue` modifiers below — its position in this chain carries
+        // no z-order meaning; placed here, right after the `ZStack` closes, purely because it reads
+        // most naturally as "the very first thing that happens once this view is on screen."
+        .onAppear { appState.noteNaturalCueTouch() }
         // Reminder banner (`NotificationView`): a plain `.overlay`, attached BEFORE the guided
         // tour's `.overlayPreferenceValue` below — see that block's own comment for why ORDER
         // (not `.zIndex`) is what actually decides which of the two draws on top here.
@@ -115,12 +139,58 @@ struct TodayView: View {
                 ToolButton(icon: .plus, accent: true) {
                     appState.startCapture()
                 }
+                // Sign-in entry point from the main window (fix, 2026-07-28): before this, signing
+                // in was reachable ONLY through Settings ▸ Account, which a first-time user has no
+                // reason to ever open — so cloud speech/parsing and Pro were effectively
+                // undiscoverable. Text pill (not a bare icon): `VolarIconName` has no "person/
+                // account" glyph (see `SettingsView`'s `.account` tab-icon comment for the same gap),
+                // and even if it did, a brand-new user has no learned association for it yet — the
+                // word "Sign in" needs no icon to be understood. Hidden entirely once signed in
+                // (Việc 3's brief: no avatar/email replacement, that's out of scope here).
+                if appState.accountEmail == nil {
+                    SignInToolPill { showSignInSheet = true }
+                }
                 // Settings entry point from the main window: previously reachable ONLY via the
                 // menu-bar dropdown or the ⌘, shortcut (which requires the window to already be
                 // key). See `SettingsToolButton`'s own doc comment below for why this isn't just
                 // `ToolButton` with a `SettingsLink`-flavored action.
                 SettingsToolButton()
             }
+        }
+        .sheet(isPresented: $showSignInSheet) {
+            SignInSheet()
+        }
+    }
+
+    // MARK: - Detail panel
+
+    /// Task-detail inspector column (panel-refactor.md §5 item 3) — replaces the old `.sheet`
+    /// (`VolarApp.swift` used to present `TaskDetailView` modally; that `.sheet` is gone). `@ViewBuilder`
+    /// `if` (not a ternary/`opacity`) so the column is fully absent from the `HStack`'s layout when
+    /// `detailTask` is `nil`, rather than reserving 340pt of empty space — and so the
+    /// `.transition`/`.animation(VolarMotion.state, value: appState.detailTaskID)` pair on the
+    /// `HStack` above actually has an insertion/removal edge to animate.
+    ///
+    /// Fixed 340pt width, `VolarColor.surface` background, 0.5pt `VolarColor.border` hairline on the
+    /// LEADING edge — same "`Rectangle().fill(VolarColor.border).frame(width: 0.5)` via
+    /// `.overlay(alignment:)`" idiom `Sidebar.swift` already uses for its own trailing hairline
+    /// against `mainColumn`, just mirrored to the opposite edge since this column sits on the other
+    /// side of the window.
+    ///
+    /// `TaskDetailView` itself renders `EmptyView()` when `appState.detailTask` is `nil` (its own
+    /// `body` already guards that) — the `if` here is what makes the outer 340pt frame disappear
+    /// too, not just its content.
+    @ViewBuilder
+    private var detailPanel: some View {
+        if appState.detailTask != nil {
+            TaskDetailView()
+                .frame(width: 340)
+                .frame(maxHeight: .infinity)
+                .background(VolarColor.surface)
+                .overlay(alignment: .leading) {
+                    Rectangle().fill(VolarColor.border).frame(width: 0.5)
+                }
+                .transition(.move(edge: .trailing).combined(with: .opacity))
         }
     }
 
@@ -175,6 +245,56 @@ struct TodayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: appState.density.sectionGap) {
                 nowSpotlight
+
+                // 006-cues-and-waiting (design.md §2 Việc B/C, §3): the two new ambient surfaces
+                // this feature adds, both "renders nothing when there's nothing to show" like every
+                // other banner in this stack. `cueBanner` prefers a just-fired `.wake` cue (set by
+                // `AppState.recordAppBecameActive`, driven off real app activation) but also carries
+                // a `.pending` dayEnd/unknown cue surfaced at this exact natural touch point — see
+                // `.onAppear` below.
+                if let banner = appState.cueBanner {
+                    CueReminderRow(banner: banner)
+                }
+                if let decision = appState.waitingModeDecision {
+                    WaitingModeRow(
+                        decision: decision,
+                        suggestedTitle: decision.suggestedTaskId.flatMap { id in
+                            appState.tasks.first { $0.id == id }?.title
+                        }
+                    )
+                }
+
+                // FR-030: the one-time "want to split this up?" invite, whenever one's pending —
+                // shared with `FocusOverlay`'s own copy of the same banner (both read the exact
+                // same `AppState.switchBreakdownSuggestion`; see `SwitchBreakdownSuggestionBanner`,
+                // `Sources/Views/FocusOverlay.swift`). Same "renders nothing when there's nothing to
+                // show" convention as `DelegationAmbientSection()` right below.
+                if let suggestion = appState.switchBreakdownSuggestion {
+                    SwitchBreakdownSuggestionBanner(task: suggestion)
+                }
+
+                // "Stuck?" (anh Khôi, 2026-07-29): the "dread" reason's message/fallback banner,
+                // the "too_big" reason's single next-action banner, and the "cant_start" reason's
+                // 2-minute timer — shared with `FocusOverlay`'s own copies (`StuckDreadBanner`/
+                // `StuckNextActionBanner`/`StuckTimerBanner`, `Sources/Views/FocusOverlay.swift`)
+                // so wording/behavior can never drift between the two places "Stuck?" appears.
+                // None of the three renders anything while idle (same "always safe to include
+                // unconditionally" convention `DelegationAmbientSection()` right below documents
+                // for itself). The `...id == appState.dashboardActiveTask?.id` guards keep each
+                // banner scoped to whichever task the hero card is CURRENTLY showing — Stuck may
+                // have been invoked from `FocusOverlay` on a different task while this view sits
+                // underneath it.
+                if let dreadTask = appState.stuckDreadTask, appState.stuckDreadState != .idle,
+                   dreadTask.id == appState.dashboardActiveTask?.id {
+                    StuckDreadBanner(task: dreadTask)
+                }
+                if let nextActionTask = appState.stuckNextActionTask, appState.stuckNextActionState != .idle,
+                   nextActionTask.id == appState.dashboardActiveTask?.id {
+                    StuckNextActionBanner(task: nextActionTask)
+                }
+                if appState.stuckTimerActive {
+                    StuckTimerBanner()
+                }
 
                 // T043 (phase6-contract.md §C): ambient needs-review / WIP soft-limit /
                 // ai-done disambiguation — renders nothing when there's genuinely nothing
@@ -288,11 +408,15 @@ struct TodayView: View {
     // MARK: - NOW / NEXT / LATER derivation (retheme, display-order only — no `AppState` change)
 
     /// Every open task except the one currently spotlit as NOW — same membership/order as the old
-    /// flat `nowTasks + laterTasks` list (`appState.openTasks`), just minus whichever task the
-    /// engine picked. If the engine found nothing eligible (`activeTask == nil`, e.g. everything
+    /// flat `nowTasks + laterTasks` list (`appState.openTasks`), just minus whichever task is
+    /// spotlit. Reads `appState.dashboardActiveTask`, NOT the raw engine `activeTask` — after a
+    /// Switch (`nowSpotlight`'s new "Switch" button) the spotlit task is the replacement, not
+    /// whatever the engine would otherwise still rank first, and this list must agree with the
+    /// hero card about which one that is (the switched-away task belongs back in this list, the
+    /// replacement must NOT still show up here too). If nothing is spotlit at all (e.g. everything
     /// open is gated on an unmet condition), nothing is excluded.
     private var remainingOpenTasks: [TaskItem] {
-        guard let active = appState.activeTask else { return appState.openTasks }
+        guard let active = appState.dashboardActiveTask else { return appState.openTasks }
         return appState.openTasks.filter { $0.id != active.id }
     }
 
@@ -308,15 +432,18 @@ struct TodayView: View {
 
     // MARK: - NOW spotlight
 
-    /// The hero treatment for `appState.activeTask` — the one thing on screen allowed to be amber.
-    /// Bespoke (not `TaskRow`) because the design calls for a big centered title + chip row + primary
-    /// action that `TaskRow`'s compact horizontal layout has no room for; every action `TaskRow`
-    /// would have offered (tap-to-open-detail, mark done, breakdown, delete) is still wired here via
-    /// the same `appState` calls. Falls back to a calm placeholder if the engine has nothing eligible
-    /// (never crashes/force-unwraps).
+    /// The hero treatment for `appState.dashboardActiveTask` — the one thing on screen allowed to be
+    /// amber. Bespoke (not `TaskRow`) because the design calls for a big centered title + chip row +
+    /// primary action that `TaskRow`'s compact horizontal layout has no room for; every action
+    /// `TaskRow` would have offered (tap-to-open-detail, mark done, breakdown, delete) is still wired
+    /// here via the same `appState` calls, PLUS the new "Switch" action. Reads `dashboardActiveTask`
+    /// rather than the raw engine `activeTask` so a Switch actually moves what this card shows (see
+    /// that property's own doc comment for why the plain engine pick alone can never change here).
+    /// Falls back to a calm placeholder if there's nothing eligible at all (never crashes/force-
+    /// unwraps).
     @ViewBuilder
     private var nowSpotlight: some View {
-        if let active = appState.activeTask {
+        if let active = appState.dashboardActiveTask {
             VStack(spacing: 16) {
                 Text("◆ NOW")
                     .font(Font.volarMono(size: 11, weight: .semibold))
@@ -352,7 +479,7 @@ struct TodayView: View {
                                 endPoint: .bottom
                             )
                         )
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         // Guided tour, stop 3 primary anchor (`Sources/Views/Tour/*`): only ever
                         // rendered while `!appState.focusActive` (this whole `Button` sits inside
                         // that guard, immediately above), i.e. only while there's an eligible NOW
@@ -372,11 +499,75 @@ struct TodayView: View {
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.surfaceHi)
-                    .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                     .overlay(
-                        RoundedRectangle(cornerRadius: 9, style: .continuous)
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .stroke(VolarColor.borderHi, lineWidth: 0.5)
                     )
+
+                    // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain here — this Switch
+                    // button, its context-menu twin below, and the `dashboardActiveTask` rewiring
+                    // above have not been compiled, run, or seen on screen. Needs a Mac visual pass
+                    // (see final report's verify checklist) before shipping.
+                    //
+                    // Switch ("đổi gió") — equal footing with "Done" right above, not a secondary/
+                    // hidden action (also mirrored in the context menu below, same as "Mark done"
+                    // already is, but this button row is the primary, always-visible home for it).
+                    // Deliberately the SAME neutral styling as "Done" (no accent fill, no icon, no
+                    // red) — this is a completely normal thing to tap, not an admission of anything.
+                    // Disabled (not hidden) when there's nowhere else open to switch to.
+                    if !active.done {
+                        Button {
+                            appState.switchDashboardActiveTask()
+                        } label: {
+                            Text("Switch")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(VolarColor.textPri)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .background(VolarColor.surfaceHi)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
+                        )
+                        .opacity(appState.canSwitchDashboardActiveTask ? 1 : 0.4)
+                        .disabled(!appState.canSwitchDashboardActiveTask)
+                        .help("Move on to something else — this task isn't done, it just steps out for now.")
+                    }
+
+                    // "Stuck?" (anh Khôi, 2026-07-29) — equal footing with "Done"/"Switch" right
+                    // above, same neutral capsule styling (no accent, no icon, no warning color):
+                    // an entirely ordinary thing to tap. Opens the same three-reason popover
+                    // (`StuckReasonPicker`) `FocusOverlay`'s own "Stuck?" button uses — one shared
+                    // definition, `Sources/Views/FocusOverlay.swift`.
+                    if !active.done {
+                        Button {
+                            appState.openStuckPicker(for: active)
+                        } label: {
+                            Text("Stuck?")
+                                .font(.system(size: 13, weight: .medium))
+                                .foregroundStyle(VolarColor.textPri)
+                                .padding(.horizontal, 16)
+                                .padding(.vertical, 10)
+                        }
+                        .buttonStyle(.plain)
+                        .background(VolarColor.surfaceHi)
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
+                        )
+                        .popover(isPresented: Binding(
+                            get: { appState.stuckPickerTask?.id == active.id },
+                            set: { presented in if !presented { appState.dismissStuckPicker() } }
+                        )) {
+                            StuckReasonPicker(task: active)
+                        }
+                        .help("Name what kind of stuck this is — different kinds need different fixes.")
+                    }
 
                     // T042 (phase6-contract.md §C): delegate affordance on the current (NOW) task
                     // — `AppState.delegateTask` adds the unsatisfied "waiting on AI" condition,
@@ -398,9 +589,9 @@ struct TodayView: View {
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.instrumentDim.opacity(0.18))
-                        .clipShape(RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
-                            RoundedRectangle(cornerRadius: 9, style: .continuous)
+                            RoundedRectangle(cornerRadius: 6, style: .continuous)
                                 .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
                         )
                     }
@@ -428,9 +619,15 @@ struct TodayView: View {
             // `TaskRow`'s doc comment on why a nested-Button row is safe here.
             .onTapGesture { appState.openDetail(active.id) }
             .contextMenu {
-                Button("Break down into steps…") { appState.showBreakdown = true }
+                Button("Break down into steps…") { appState.openBreakdown(for: active) }
                 Button(active.done ? "Mark not done" : "Mark done") { appState.toggleDone(active.id) }
                 if !active.done {
+                    // Mirrors the button row's Switch exactly (same `AppState` call, same
+                    // disabled-when-nowhere-else-to-go rule) — the button row is the primary,
+                    // always-visible home for Switch; this is just the same convenience-duplicate
+                    // treatment "Mark done" already gets here.
+                    Button("Switch") { appState.switchDashboardActiveTask() }
+                        .disabled(!appState.canSwitchDashboardActiveTask)
                     Button("Delegate to Claude…") { appState.delegateTask(active.id) }
                 }
                 Divider()
@@ -499,6 +696,8 @@ struct TodayView: View {
                     // split into separate `Text` fragments so the numbers can take `Font.volarMono`.
                     HStack(spacing: 4) {
                         Text(todayDateLabel)
+                            .font(Font.volarMono(size: 12.5))
+                            .monospacedDigit()
                         Text("·").foregroundStyle(VolarColor.textMut)
                         Text("\(appState.openTasks.count)")
                             .font(Font.volarMono(size: 12, weight: .medium))
@@ -630,9 +829,10 @@ struct TodayView: View {
         .padding(.trailing, 6)
         .padding(.vertical, 5)
         .background(accentColors.surface)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            Capsule().stroke(accentColors.solid.opacity(0.27), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(accentColors.solid.opacity(0.27), lineWidth: 0.5)
         )
         .shadow(color: accentColors.glow.opacity(0.25), radius: 22)
     }
@@ -663,7 +863,7 @@ struct TodayView: View {
             }
             .buttonStyle(.plain)
             .background(accentColors.solid)
-            .clipShape(Capsule())
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             // Guided tour, stop 3 fallback anchor: `frogPill` (unlike `nowSpotlight`'s "Start
             // focus" button above) has no `appState.activeTask`/`focusActive` guard, so this
             // "Focus" button is always on screen whenever the running-focus pill isn't — including
@@ -681,9 +881,10 @@ struct TodayView: View {
         // which is also what the frog dot above already uses. Deliberately NOT `nowAccent` — amber
         // is reserved for the NOW spotlight alone, and this pill isn't it.
         .background(VolarColor.high.opacity(0.10))
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            Capsule().stroke(VolarColor.high.opacity(0.20), lineWidth: 0.5)
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(VolarColor.high.opacity(0.20), lineWidth: 0.5)
         )
     }
 
@@ -719,7 +920,7 @@ struct TodayView: View {
 }
 
 /// Gear entry point into Settings from the main window's toolbar. Visually matches
-/// `Components.swift`'s `ToolButton` (28x28 hit target, 7pt-rounded hover tint, subtle press
+/// `Components.swift`'s `ToolButton` (28x28 hit target, 5pt-rounded hover tint, subtle press
 /// scale) so it reads as one more tool alongside ambient/read-aloud/search/capture — but it wraps
 /// `SettingsLink` (macOS 14+, opens the app's `Settings` scene) instead of a plain `Button`, for
 /// two reasons: `SettingsLink` owns its action outright and has no `action:` closure parameter to
@@ -742,8 +943,8 @@ private struct SettingsToolButton: View {
                 .frame(width: 28, height: 28)
         }
         .buttonStyle(SettingsToolButtonStyle())
-        .background(isHovering ? VolarColor.veil(0.08) : .clear)
-        .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .background(isHovering ? VolarColor.veil(0.06) : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
         .accessibilityLabel("Settings")
@@ -757,6 +958,48 @@ private struct SettingsToolButtonStyle: ButtonStyle {
         configuration.label
             .scaleEffect(configuration.isPressed ? 0.96 : 1)
             .animation(VolarMotion.press, value: configuration.isPressed)
+    }
+}
+
+/// Toolbar "Sign in" pill — the new main-window entry point into `SignInSheet` (see this file's
+/// `.toolbar` block above; visible only while `appState.accountEmail == nil`). Text rather than a
+/// bare icon: `VolarIconName` has no person/account glyph (same gap `SettingsView`'s Account tab
+/// works around), and a brand-new user wouldn't recognize one yet even if it existed — "Sign in"
+/// reads on its own.
+///
+/// RETHEME (Graphite, spec §3.2, revised by design-owner follow-up): was an always-filled accent
+/// capsule; a first pass flattened it to no fill at all, matching the icon-only `ToolButton`s
+/// beside it — but that went too far. Before this pill existed, sign-in was only reachable through
+/// Settings and was effectively undiscoverable, which is the whole reason the fill was added in the
+/// first place. So this stays deliberately the one toolbar item carrying a fill at rest: a subtle
+/// ~15% accent tint (`accent.surface`) with a soft accent-tinted border, not the solid capsule of
+/// the old design and not the flat/borderless treatment of its `SettingsToolButton` sibling.
+private struct SignInToolPill: View {
+    let action: () -> Void
+
+    @Environment(AppState.self) private var appState
+    @State private var isHovering = false
+
+    private var accentColors: Accent { appState.accent.accent }
+
+    var body: some View {
+        Button(action: action) {
+            Text("Sign in")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(accentColors.solid)
+                .padding(.horizontal, 12)
+                .frame(height: 28)
+        }
+        .buttonStyle(SettingsToolButtonStyle())
+        .background(accentColors.surface)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
+                .stroke(accentColors.solid.opacity(isHovering ? 0.5 : 0.3), lineWidth: 0.5)
+        )
+        .onHover { isHovering = $0 }
+        .animation(VolarMotion.hover, value: isHovering)
+        .accessibilityLabel("Sign in")
     }
 }
 
@@ -827,9 +1070,9 @@ private struct SpotlightChip: View {
         .padding(.horizontal, 11)
         .padding(.vertical, 6)
         .background(VolarColor.surface)
-        .clipShape(Capsule())
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
-            Capsule()
+            RoundedRectangle(cornerRadius: 5, style: .continuous)
                 .stroke(
                     borderColor,
                     style: style == .dependency ? StrokeStyle(lineWidth: 0.5, dash: [3, 2]) : StrokeStyle(lineWidth: 0.5)
@@ -909,7 +1152,7 @@ private struct NextPeekRow: View {
         .contentShape(Rectangle())
         .onTapGesture { appState.openDetail(task.id) }
         .contextMenu {
-            Button("Break down into steps…") { appState.showBreakdown = true }
+            Button("Break down into steps…") { appState.openBreakdown(for: task) }
             Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
             Divider()
             Button("Delete", role: .destructive) { appState.deleteTask(task.id) }
@@ -1014,9 +1257,9 @@ private struct CollapsibleTaskSection: View {
             }
             .buttonStyle(.plain)
             .background(VolarColor.surfaceHi)
-            .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
                     .stroke(VolarColor.borderHi, lineWidth: 0.5)
             )
         }
@@ -1071,8 +1314,11 @@ private struct DelegationAmbientSection: View {
     private var softLimitHint: some View {
         HStack(spacing: 10) {
             VolarIcon(.bolt, size: 12, color: VolarColor.instrument, weight: .semibold)
-            Text("\(wipCount) tasks are out with Claude right now — review before delegating more?")
-                .font(.system(size: 12.5))
+            (
+                Text("\(wipCount)").font(Font.volarMono(size: 12.5).monospacedDigit())
+                + Text(" tasks are out with Claude right now — review before delegating more?")
+                    .font(.system(size: 12.5))
+            )
                 .foregroundStyle(VolarColor.textSec)
                 .lineLimit(2)
             Spacer(minLength: 8)
@@ -1086,9 +1332,9 @@ private struct DelegationAmbientSection: View {
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .background(VolarColor.instrumentDim.opacity(0.14))
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
         )
     }
@@ -1117,10 +1363,10 @@ private struct DelegationAmbientSection: View {
                     .buttonStyle(.plain)
                     .background(VolarColor.card)
                     .overlay(
-                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                        RoundedRectangle(cornerRadius: 5, style: .continuous)
                             .stroke(VolarColor.border, lineWidth: 0.5)
                     )
-                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
                 }
             }
             Button("None of these") {
@@ -1133,10 +1379,10 @@ private struct DelegationAmbientSection: View {
         .padding(12)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     // MARK: - Needs-review card ([Done] / [Still waiting] / [Check later])
@@ -1160,10 +1406,10 @@ private struct DelegationAmbientSection: View {
         .padding(12)
         .background(VolarColor.card)
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(VolarColor.border, lineWidth: 0.5)
         )
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 
     private func ambientButton(_ title: String, solid: Bool = false, action: @escaping () -> Void) -> some View {
@@ -1179,6 +1425,100 @@ private struct DelegationAmbientSection: View {
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(solid ? Color.clear : VolarColor.borderHi, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+// MARK: - 006-cues-and-waiting: cue reminder + waiting-mode holder (T5, wire UI)
+//
+// Both rows below share `DelegationAmbientSection`'s own card shell (`VolarColor.card` +
+// `VolarColor.border` hairline, 8pt corner radius) so the three ambient surfaces in this file read
+// as one family, not three competing styles. Neither row carries an icon/color the way
+// `softLimitHint`/`needsReviewCard` above do — design.md §3's anti-shame/anti-nag rule ("Cấm đỏ,
+// cấm badge... giọng chữ điềm tĩnh") is why this is plain text with no accent tint at all, closer
+// to `SweepView`'s calm copy than to an instrument-tinted status card.
+
+/// `AppState.cueBanner`, read back verbatim — design.md §2 Việc B: "hiện đúng MỘT việc, kèm trích
+/// NGUYÊN VĂN lời user." Never renders `CueKind`/`kind` (`CueBanner` itself doesn't even carry
+/// one — see that struct's own doc comment) — only `verbatim`, plus a date-aware lead-in so the
+/// copy never overclaims ("Tối qua anh nói…" only when `createdAt` really was yesterday).
+private struct CueReminderRow: View {
+    let banner: CueBanner
+
+    /// UNVERIFIED (product-phrasing judgment call, not a Mac-only concern): design.md §2's own
+    /// worked example is fixed as "Tối qua anh nói…", which reads naturally for the common case
+    /// this cue exists for (say it near bedtime, `.wake` fires on the next ≥6h-gap session — almost
+    /// always the next morning). But a cue can sit unfired for up to `TaskCue.expiresAt`'s 48h floor,
+    /// so a literal "Tối qua" would be a false claim outside that common case. This checks the real
+    /// day relationship instead of hardcoding the phrase, falling back to a time-neutral "Anh nói…"
+    /// whenever "last night" isn't actually true — never a bug fix Mac verification would catch (no
+    /// crash either way), just a calm-voice-accuracy call flagged for review.
+    private var leadIn: String {
+        Calendar.current.isDateInYesterday(banner.createdAt) ? "Tối qua anh nói" : "Anh nói"
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(leadIn): \u{201C}\(banner.verbatim)\u{201D}")
+                .font(.system(size: 12.5))
+                .foregroundStyle(VolarColor.textSec)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VolarColor.border, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// `AppState.waitingModeDecision`, read as one calm line — design.md §2 Việc C: "một dòng điềm
+/// tĩnh: mốc đang được giữ + thời gian còn lại." Three distinct phrasings, matching
+/// `WaitingMode.Decision.suggestedTaskId`'s own doc comment on why the "anchor is itself eligible"
+/// case is NOT the same thing as "nothing fits":
+///   - anchor is itself actionable right now (`anchorIsEligible`) → just the hold line, no second
+///     suggestion (suggesting a substitute against the user's own deadline is the exact bug
+///     `WaitingMode.swift`'s header comment documents fixing).
+///   - a task fits the remaining time → name it, as an invitation ("Có thể tranh thủ…"), never an
+///     instruction.
+///   - nothing fits → say so plainly ("Chưa có việc nào khít") and stop — design.md §2: "không ép."
+private struct WaitingModeRow: View {
+    let decision: WaitingMode.Decision
+    let suggestedTitle: String?
+
+    private var lineText: String {
+        let time = decision.anchorAt.formatted(.dateTime.hour().minute())
+        let holding = "Đang giữ mốc \u{201C}\(decision.anchorTitle)\u{201D} lúc \(time) — còn \(decision.minutesUntil) phút."
+        if decision.anchorIsEligible {
+            return holding
+        }
+        guard let suggestedTitle else {
+            return holding + " Chưa có việc nào khít."
+        }
+        return holding + " Có thể tranh thủ \u{201C}\(suggestedTitle)\u{201D}."
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(lineText)
+                .font(.system(size: 12.5))
+                .foregroundStyle(VolarColor.textSec)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VolarColor.border, lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
