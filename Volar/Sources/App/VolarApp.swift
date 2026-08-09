@@ -238,6 +238,11 @@ struct VolarApp: App {
                 // this whole view regardless, so ordering here only matters for the in-window
                 // overlay/background pieces, not the `.sheet`s above).
                 .background(commandBarShortcut)
+                // Sơn titlebar cùng màu `VolarColor.bg` (anh Khôi 2026-08-09: "header màu trắng
+                // mà body đen nhìn xấu"). Không vẽ gì cả — chỉ mượn `.background` làm chỗ móc vào
+                // `NSWindow`; xem `WindowChrome.swift` để biết vì sao là view chứ không phải một
+                // lệnh gọi một lần trong `AppDelegate`, và vì sao không dùng `.hiddenTitleBar`.
+                .background(WindowChrome())
                 .overlay { commandBarOverlay }
                 .animation(VolarMotion.state, value: appState.showCommandBar)
         }
