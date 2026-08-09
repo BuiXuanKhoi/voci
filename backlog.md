@@ -159,9 +159,18 @@
   **Bổ sung 2026-08-10 (hai van an toàn, cũng UNVERIFIED):** `SyncMerge.cursorAfterStalenessCheck`
   + hai hằng số, `SyncEngine.trustedCursor(forKey:)` / `resyncFromScratch()` / `cursorEpoch` /
   `SyncReason.manualResync`, `AppState.resyncFromScratch()`, và nút "Re-sync from scratch" ở **cả**
-  `SettingsView.swift` (macOS) lẫn `SettingsIOSView.swift` (iOS). Số test lên **51** (8 test mới
-  trong `SyncMergeTests.swift`). Cần **QA bằng mắt** hai nút đó — vùng bấm có phủ đúng vùng nhìn
-  thấy không, và dòng chú thích dưới nút có xuống dòng đẹp trong cả hai chiều rộng cửa sổ không.
+  `SettingsView.swift` (macOS) lẫn `SettingsIOSView.swift` (iOS). Cần **QA bằng mắt** hai nút đó —
+  vùng bấm có phủ đúng vùng nhìn thấy không, và dòng chú thích dưới nút có xuống dòng đẹp trong cả
+  hai chiều rộng cửa sổ không.
+  **Bổ sung lần 2 (gate + nhãn máy):** `SyncGate` + `SyncMerge.gate(state:)`,
+  `SyncAccountClient.cachedState`, `SyncEngine.currentGate()` + nhánh gate trong `runSyncRound` +
+  fetch state lúc foreground, và `SyncEngine.deviceLabel` viết lại. Số test lên **57**.
+  **Ba thứ Windows không kiểm được, phải xem trên Mac:** (1) đọc `await SyncAccountClient.shared
+  .cachedState` (property của actor) từ ngữ cảnh `@MainActor` có biên dịch như mong đợi không;
+  (2) `SyncGate: Equatable` với case `.blocked(SyncFailure)` — `SyncFailure` đã `Equatable` nên
+  suy diễn phải chạy; (3) `Task { @MainActor in ... }` lồng trong `handleForeground()` vốn đã
+  `@MainActor` có sinh cảnh báo hop thừa không. **Và một hành vi cần xác nhận bằng mắt, không phải
+  bằng compiler: tài khoản free thì KHÔNG được có một lời gọi `sync_exchange` nào.**
 - [ ] **`SyncMerge.nextCursor` so sánh cursor bằng LEXICAL string** (2026-08-10) — đúng chỉ vì
   Postgres render timestamptz ở định dạng cố định và Supabase để timezone UTC (`+00:00`). Phân tích
   tay thì mọi ranh giới đều đúng (phần thập phân bị trim zero, mốc giây, không có phần thập phân),
@@ -201,27 +210,29 @@
   không có gì từ EventKit vào `TaskPayload`, `eventMap`/`volarCalendarID` là `UserDefaults` và
   design §3 cố ý không sync; ghi rõ 3 điều kiện lật ngược), §2 thêm 8 dòng trigger cho sync, §3
   thêm phần giả định của 008. **Còn phải quyết trước khi nộp:** hai mục 🔴 ngay dưới đây.
-- [ ] **🔴 LỖI THẬT, không phải chuyện nhãn: client GỬI nội dung task lên server KHI CỔNG ĐANG ĐÓNG**
-  (2026-08-10, phát hiện khi viết lại `app-store-privacy.md`). `SyncEngine.attach()` được gọi vô
-  điều kiện và poll theo lịch riêng; **không có chỗ nào ở client kiểm `syncState.isPro` /
-  `syncState.syncEnabled` trước khi gọi `sync_exchange`**. Hệ quả: một user **free** đã đăng nhập —
-  hoặc một user Pro cố ý để công tắc TẮT — vẫn bị gửi lên server toàn bộ task đang pending (kể cả
-  `sourceTranscript` nguyên văn) cùng `p_device`/`p_device_label`. Server raise
-  `sync_pro_required`/`sync_disabled` và abort transaction nên **không lưu gì**, nhưng dữ liệu đã
-  qua dây. Điều đó **đi ngược thẳng mục đích của màn xác nhận ở design §8.1** — màn đó sinh ra để
-  server không biết gì về một máy trước khi user đồng ý. Chữa nhỏ: một guard trước khi dựng request
-  (đọc `SyncState` đã cache; đang offline/chưa biết thì vẫn cho thử, đừng tự khoá mình). Làm xong
-  thì sửa lại hai đoạn "over-declaration caveat" trong `app-store-privacy.md` (câu trả lời vẫn là
-  "Yes", chỉ lập luận hẹp lại). Cũng tiết kiệm băng thông cho mọi user free.
-- [ ] **🔴 QUYẾT TRƯỚC KHI NỘP APP STORE: `p_device_label` đang chở TÊN NGƯỜI DÙNG** (2026-08-10).
-  `SyncEngine.deviceLabel` = `Host.current().localizedName` (Mac) / `UIDevice.current.name` (iOS),
-  lưu vào `sync_devices.label`. Mặc định iOS thường là **"Khôi's iPhone"** ⇒ một **tên người** nằm
-  trên server, gắn với tài khoản, như tác dụng phụ của một dòng vốn để nhận diện máy. Hai đường,
-  chọn một: **(a)** khai `Contact Info › Name: Yes` trên nhãn dinh dưỡng (an toàn, tốn thêm một
-  hạng mục hiện rõ trên App Store); **(b)** đừng gửi tên máy thô nữa — chỉ gửi phần model/OS, hoặc
-  cho user tự đặt nhãn — rồi (a) thành không cần. Khuyến nghị **(b)** nếu kịp, **(a)** nếu không.
-  **Cấm** ship kiểu vẫn gửi tên thật mà khai Name = "No". Chi tiết: `docs/app-store-privacy.md`
-  mục Identifiers › Device ID.
+- [x] **🔴 LỖI THẬT: client GỬI nội dung task lên server KHI CỔNG ĐANG ĐÓNG — ĐÃ SỬA 2026-08-10.**
+  `SyncEngine` gắn vô điều kiện và poll, **không kiểm Pro/công tắc trước khi gọi `sync_exchange`**
+  ⇒ user free đã đăng nhập, hoặc user Pro cố ý tắt công tắc, vẫn đẩy toàn bộ task pending (kể cả
+  `sourceTranscript` nguyên văn) lên server; server abort nên không lưu, **nhưng dữ liệu đã rời
+  khỏi máy** — đi ngược mục đích màn xác nhận §8.1. Sửa: `SyncMerge.gate(state:)` (hàm thuần, 3
+  nhánh) chặn **trước khi gom outbox và dựng request**, cache ở `SyncAccountClient.cachedState`,
+  `handleForeground()` refresh state (đủ 3 thời điểm design §8.2 quy định). Ba luật giữ nguyên:
+  `volar_sync_state()` **không gate**, `.unknown` thì **không gửi và cũng không kết luận** (không
+  đặt `lastFailure`), server vẫn là quyền cuối. Chi tiết: `client-contract.md` §8.0.
+  ⚠️ Swift UNVERIFIED. Lợi ích phụ: user free tốn **0 request** mỗi 30 giây thay vì một request
+  mang cả outbox.
+- [x] **🔴 `p_device_label` chở TÊN NGƯỜI DÙNG — ĐÃ SỬA 2026-08-10, KHÔNG cần khai `Name`.**
+  Đánh giá ban đầu nói cả hai nền tảng đều dính là **sai** — cảm ơn phần phản biện. **iOS chưa bao
+  giờ dính**: từ iOS 16 `UIDevice.current.name` tự suy giảm về tên model nếu app không xin
+  entitlement `com.apple.developer.device-information.user-assigned-device-name`; đã verify trong
+  repo — **không có** entitlement đó ở đâu cả, target iOS 17.0 ⇒ chuỗi thật là `"iPhone · iOS"`.
+  **macOS mới là chỗ rò**: `Host.current().localizedName` không bị hạn chế tương đương và trả tên
+  máy do user đặt, mà macOS mặc định đặt theo tên chủ tài khoản.
+  Sửa: macOS → hằng `"Mac"`; iOS → `.model` thay vì `.name` (để bảo đảm bằng **cấu trúc**, không
+  phụ thuộc việc sau này có ai thêm entitlement kia không); thêm hậu tố 4 ký tự đầu `deviceId` cho
+  hai máy cùng model khỏi trùng nhãn — không lộ thêm gì vì server đã nhận đủ UUID đó qua `p_device`.
+  ⇒ `Contact Info › Name: **No**` và giờ mới **thật sự đúng theo cấu trúc**. ⚠️ Swift UNVERIFIED —
+  cần nhìn chuỗi nhãn thật trên Mac + iPhone.
 - [ ] **Epoch guard của van 2 KHÔNG có test bảo vệ** (2026-08-10). `cursorEpoch` trong
   `SyncEngine.runOneExchange` là logic sửa **race condition** — bấm "Re-sync from scratch" đúng lúc
   một lượt đang bay thì lượt cũ sẽ ghi đè cursor và nút thành **no-op im lặng**. Hiện **không có

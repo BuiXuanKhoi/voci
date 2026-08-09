@@ -103,27 +103,34 @@ Swift under `Shared/Sync/`.
   fails before any request is built and the identifier never leaves the device
   (`Shared/Sync/SyncClient.swift`). See the transmitted-while-gated-off caveat below for the
   free-account case.
-- **⚠️ Judgment call for anh Khôi — the accompanying label may contain the user's name.**
-  Along with the UUID, the client sends `p_device_label`, built as
-  `"\(Host.current().localizedName) · macOS"` on Mac and `"\(UIDevice.current.name) · iOS"` on
-  iPhone (`SyncEngine.deviceLabel`), and it is stored in `sync_devices.label`. Those OS values are
-  whatever the user named their machine, which on a default iOS setup is very often literally
-  *"Khôi's iPhone"*. That means a **personal name can be stored server-side, linked to the
-  account**, as a side effect of a row whose purpose is device identification. Two honest options,
-  pick one before submission:
-  1. **Declare `Contact Info › Name: Yes`** (linked to identity, App Functionality, not used for
-     tracking). Conservative, costs a visible extra category on the label, never wrong.
-  2. **Stop sending the raw OS device name** — send only the model/OS part, or let the user type
-     the label — after which this row genuinely carries no name and option 1 is unnecessary.
-     Cheaper on the label, costs a small code change in one property.
-  Recommendation: option 2 if there is time before submission, option 1 otherwise. Do **not** ship
-  with the raw name being sent and the Name row answered "No".
-- **⚠️ Over-declaration caveat (also logged as a defect, see §3).** Today the client sends
-  `p_device` on every attempted round *even when the account is free or the sync toggle is off* —
-  `SyncEngine` has no client-side gate, and the RPC raises `sync_pro_required`/`sync_disabled`
-  before writing anything, so nothing is stored. The value still reaches Volar's server. Because
-  "reached the server but was rejected" is a fragile thing to build a label answer on, this row is
-  answered **Yes** regardless of the user's tier.
+- **The accompanying device label carries NO personal name — and that is now structural, not
+  incidental.** Along with the UUID the client sends `p_device_label`, stored in
+  `sync_devices.label`. As of 2026-08-10 `SyncEngine.deviceLabel` produces only
+  `"Mac · macOS · A3F9"` / `"iPhone · iOS · A3F9"` — a hardcoded platform word, the OS name, and
+  the first four characters of the `deviceId` UUID above (a suffix that keeps two machines of the
+  same model apart in Settings and reveals nothing the server does not already receive in full as
+  `p_device`).
+  - **This was briefly a real exposure on macOS.** The property previously used
+    `Host.current().localizedName`, which returns the *user-assigned* computer name — and macOS
+    defaults that to one built from the account holder's name ("MacBook Pro của Khôi"). That is a
+    person's name, stored against `profile_id`, retained indefinitely. Fixed by hardcoding `"Mac"`.
+  - **iOS was never exposed**, but was changed anyway. `UIDevice.current.name` has, since iOS 16,
+    returned the model name rather than the user-assigned one unless the app holds
+    `com.apple.developer.device-information.user-assigned-device-name` — Volar requests no such
+    entitlement (verified: no match anywhere in the repo) and targets iOS 17.0. The property now
+    uses `UIDevice.current.model`, which is documented never to carry a user-assigned name, so the
+    guarantee no longer depends on an entitlement staying un-added by a future contributor.
+  - ⇒ **`Contact Info › Name` stays "No"**, and unlike before it is true by construction rather
+    than by luck. `SyncEngine.deviceLabel` carries a 🔴 comment saying this label is what that
+    answer rests on. If anyone ever puts a user-assignable name back into it, that answer changes.
+- **Over-declaration caveat — narrowed 2026-08-10, answer unchanged.** `SyncEngine` now runs
+  `SyncMerge.gate(state:)` before building any request, so a free account (or a Pro account with
+  the switch off) no longer transmits `p_device` at all. Two residual cases keep this row at
+  **Yes** rather than "only when sync is on": the identifier is still generated and stored locally
+  regardless of tier, and the gate is a client-side pre-check that can only *refuse* — the server's
+  RLS policy remains the real authority, so a state the client has not yet learned still resolves
+  by attempting a round. Answering "Yes" costs nothing and does not depend on a client-side guard
+  staying correct.
 
 ### Purchases
 - **Collected:** Yes — subscription tier and status (`free`/`pro`, `expiresAt`, `productId`).
@@ -275,14 +282,23 @@ dung task nằm ở trạng thái nghỉ trên server Volar. Đây là cam kết
   used to correlate the user across other companies' apps or websites.
 - **Purpose:** App Functionality only (keep the user's own task list consistent across their own
   devices). Not Analytics, not Product Personalization, not Advertising.
-- **⚠️ Over-declaration caveat (also logged as a defect, see §3).** `SyncEngine` currently has no
-  client-side gate: on a signed-in **free** account, or with the sync switch **off**, it still
-  builds and sends a `sync_exchange` request carrying the device's pending task payloads, and the
-  RPC rejects it (`sync_pro_required` / `sync_disabled`) before writing anything. Nothing is
-  stored — the whole RPC is one transaction and the rejection aborts it — but the bytes do reach
-  Volar's server. That is narrower than "collected" under Apple's definition, but it is not
-  something to build a "No" answer on, and it undercuts the consent screen's purpose. The answer
-  above is therefore **Yes**, and the underlying behavior is filed as a defect to fix.
+- **Over-declaration caveat — resolved 2026-08-10, answer unchanged.** Until that date `SyncEngine`
+  had no client-side gate: a signed-in **free** account, or a Pro account with the switch **off**,
+  still sent a `sync_exchange` request carrying the device's pending task payloads —
+  `sourceTranscript` included — which the RPC rejected (`sync_pro_required` / `sync_disabled`)
+  before writing anything. Nothing was ever stored (the RPC is one transaction and the rejection
+  aborts it), but the bytes reached Volar's server, which undercut the very consent screen design
+  §8.1 exists to provide. `SyncMerge.gate(state:)` now blocks the round **before the outbox is
+  gathered and before any request is built**, so on those accounts no task content leaves the
+  device at all.
+  - The answer above stays **Yes** regardless, and deliberately so: the gate is a client-side
+    pre-check that can only *refuse*, the server's RLS policy is still the real authority, and a
+    label answer should not rest on a guard in the client staying correct. What changed is the
+    reasoning, not the row.
+  - Note the gate's third state. When the client has never successfully read
+    `volar_sync_state()` it neither transmits nor concludes anything — it must not tell a merely
+    offline user they lack Pro. `volar_sync_state()` itself is deliberately ungated (design §8.2)
+    so a locked-out device can always still learn *why*.
 
 ### What is explicitly NOT collected
 State these as "No" across the board in App Store Connect:
@@ -427,19 +443,23 @@ State these as "No" across the board in App Store Connect:
   "a transcript held briefly to parse one sentence" into "a training-shaped corpus at rest on
   Volar's server", which is a different promise, not a bigger one. Requires anh Khôi's separate
   sign-off per `design.md` §3, and a rewrite of User Content › Path 2 if it ever happens.
-- **Change what `p_device_label` sends** (`SyncEngine.deviceLabel`) → this is the open judgment call
-  flagged in the Identifiers › Device ID row. Narrowing it so it no longer carries the OS device
-  name removes the `Contact Info › Name` question; widening it, or adding any second
-  device-descriptive field, makes that row's "declare Name: Yes" option mandatory rather than
-  optional.
+- **Change what `p_device_label` sends** (`SyncEngine.deviceLabel`) → this property is the sole
+  basis for answering `Contact Info › Name: No`. It currently emits only a hardcoded platform word,
+  the OS name, and four characters of the app-generated device UUID. Putting **any** user-assignable
+  value back into it — `Host.current().localizedName`, `UIDevice.current.name` plus the
+  `user-assigned-device-name` entitlement, or a user-typed nickname — makes declaring
+  `Contact Info › Name: Yes` mandatory. The property carries a 🔴 comment saying so; read it before
+  touching that line.
 - **Implement the 90-day tombstone sweep, or any other server-side retention job** (`0005`'s
   closing NOTE §1–3, currently unimplemented — `pg_cron` has never been enabled on this project) →
   the User Content › Path 2 retention paragraph's "known gap" note must be updated, and only then
   may any user-facing text claim deleted tasks are removed from the server after 90 days.
-- **Add a client-side Pro/toggle gate to `SyncEngine`** (the defect noted in §3) → the two
-  "over-declaration caveat" paragraphs (Identifiers › Device ID, User Content › Path 2) become
-  stale and should be rewritten to say collection begins only once sync is actually enabled. The
-  *answers* stay Yes either way; only the reasoning narrows.
+- **Weaken or remove the client-side gate `SyncMerge.gate(state:)`** → this is what currently stops
+  a free (or switched-off) account from transmitting task content for the server to reject. Both
+  "over-declaration caveat" paragraphs above describe the world with it in place. In particular, do
+  not "simplify" its third state: a client that has never read `volar_sync_state()` must transmit
+  nothing AND conclude nothing, and `volar_sync_state()` must itself stay ungated. The *answers*
+  stay Yes either way; the reasoning does not survive.
 - **Turn sync on by default, drop the confirmation sheet, or make Pro alone sufficient without the
   user's own switch** → the User Content › Path 2 framing of "two conditions, both required,
   default off, confirmed on a screen that says so" becomes false. This is the sync equivalent of
@@ -499,25 +519,23 @@ State these as "No" across the board in App Store Connect:
   the two revised rows above is derived from reading the migration and the client contract, not
   from observing a running system. Re-verify both rows once sync has actually run on a Mac against
   a real project, before submission.
-- **🔴 Defect, not a labeling question: task payloads are transmitted while the gate is closed.**
-  `SyncEngine` (`Shared/Sync/SyncEngine.swift`) attaches unconditionally and polls on its own
-  schedule; nothing on the client checks `syncState.isPro` / `syncState.syncEnabled` before calling
-  `sync_exchange`. A signed-in **free** user — or a Pro user who deliberately left the switch
-  **off** — therefore has their pending task payloads (titles, notes, and `sourceTranscript`) plus
-  their device id and device label **sent to Volar's server**, where the RPC raises
-  `sync_pro_required` / `sync_disabled` and aborts the transaction before writing anything.
-  Nothing is stored, and this is why both affected rows above are answered "Yes" conservatively
-  rather than argued down. But it means data crosses the wire *before the consent screen that
-  exists to authorize exactly that crossing* — `design.md` §8.1 built that screen precisely so the
-  server learns nothing about a device until the user agrees. The fix is small (one guard before
-  building the request) and belongs to the sync feature, not to this document.
-  **Action for anh Khôi:** fix the guard, then simplify the two caveats. Logged in `backlog.md`.
+- **~~Defect: task payloads transmitted while the gate is closed~~ — FIXED 2026-08-10.**
+  `SyncEngine` attached unconditionally and polled with no client-side Pro/switch check, so a free
+  (or switched-off) account uploaded its pending task payloads, `sourceTranscript` included, for
+  the server to reject. `SyncMerge.gate(state:)` now runs before any request is built. Both
+  affected rows above keep their conservative "Yes"; only their reasoning narrowed. ⚠️ The fix is
+  Swift and therefore **UNVERIFIED** — it has never been compiled or run. Re-confirm on a Mac that
+  a free account genuinely issues no `sync_exchange` call before treating this as closed.
+- **~~Open decision: `p_device_label` may carry a personal name~~ — RESOLVED 2026-08-10.**
+  macOS was sending the user-assigned computer name; it now sends a hardcoded `"Mac"`, and iOS
+  moved from `UIDevice.current.name` to `.model`. `Contact Info › Name` stays **No** and is now
+  true structurally. Also UNVERIFIED — confirm the label string on a real Mac and iPhone.
 - **Whether Supabase (as infrastructure provider) counts as a "third party" for App Store Connect's
   sharing question.** The position taken above is no — Supabase hosts Volar's own database and
   processes data on Volar's behalf, the same way a hosting provider does, and Apple's questionnaire
   is aimed at disclosure to *other* parties for their own purposes. Not independently verified
   against Apple's current wording. If the label ends up needing a "Data shared with third parties"
   answer, this is the row it would come from.
-- **The `Contact Info › Name` question raised by `p_device_label`** (Identifiers › Device ID row) is
-  an open decision, not a documented fact. It must be resolved — either by declaring Name, or by
-  changing what the label sends — before submission.
+- **Both items that previously blocked submission are now resolved** (see the two struck rows
+  above). Nothing in this document is waiting on a decision from anh Khôi; what remains is
+  verification on a Mac.

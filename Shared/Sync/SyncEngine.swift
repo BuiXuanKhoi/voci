@@ -155,12 +155,13 @@ final class SyncEngine {
     /// be generated, which is harmless — every caller of this property is about to send `deviceId`
     /// anyway, or is a user-initiated `volar_set_sync_enabled` call.
     var deviceLabel: String {
+        let shortId = String(deviceId.prefix(4))
         #if os(macOS)
-        return "\(Host.current().localizedName ?? "Mac") · macOS"
+        return "Mac · macOS · \(shortId)"
         #elseif os(iOS)
-        return "\(UIDevice.current.name) · iOS"
+        return "\(UIDevice.current.model) · iOS · \(shortId)"
         #else
-        return "Volar device"
+        return "Volar device · \(shortId)"
         #endif
     }
 

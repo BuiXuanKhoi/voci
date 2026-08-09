@@ -396,8 +396,25 @@ enum SyncDate {
 | `volar.sync.cursorCompletions` | chuỗi mờ |
 | `volar.sync.lastSuccessAt` | `Date` — chỉ để hiển thị "đồng bộ lần cuối" |
 
-Nhãn máy: `"\(hostOrDeviceName) · \(osName)"` — macOS lấy `Host.current().localizedName`, iOS lấy
-`UIDevice.current.name`. Phải nằm trong `#if os(...)` (luật `Shared/`).
+Nhãn máy: **`"<model> · <os> · <4 ký tự đầu của deviceId>"`** — `"Mac · macOS · A3F9"`,
+`"iPhone · iOS · A3F9"`. Phải nằm trong `#if os(...)` (luật `Shared/`).
+
+🔴 **KHÔNG BAO GIỜ để tên máy do người dùng đặt vào chuỗi này** (sửa 2026-08-10, trước đó sai).
+Nhãn này đi lên `sync_devices.label`, gắn với `profile_id`, **giữ vô thời hạn** — thứ gì rơi vào đây
+là dữ liệu cá nhân nằm nghỉ trên server, và `docs/app-store-privacy.md` khai `Contact Info › Name:
+No` **dựa hẳn vào property này**.
+
+- **macOS là chỗ đã sai.** `Host.current().localizedName` trả tên máy do user đặt, mà macOS mặc định
+  đặt theo tên chủ tài khoản ("MacBook Pro của Khôi") ⇒ **tên người** lên server. Đổi thành hằng
+  `"Mac"`.
+- **iOS thì chưa bao giờ sai**, nhưng vẫn đổi từ `.name` sang `.model`. Từ iOS 16 `.name` tự suy
+  giảm về tên model nếu app không xin entitlement `com.apple.developer.device-information.
+  user-assigned-device-name` (Volar không xin, target iOS 17) — nhưng dựa vào điều đó nghĩa là ngày
+  nào đó ai thêm entitlement ấy thì chỗ này **lặng lẽ** thành chỗ rò tên. `.model` thì theo tài liệu
+  không bao giờ mang tên người ⇒ bảo đảm bằng **cấu trúc**, không bằng trí nhớ.
+- **Hậu tố 4 ký tự** để hai máy cùng model không trùng nhãn trong Settings. Nó **không lộ thêm gì**:
+  đó là 4 ký tự đầu của `deviceId`, một UUID ngẫu nhiên do app tự sinh mà server vốn đã nhận đủ qua
+  `p_device`.
 
 ---
 
@@ -425,6 +442,48 @@ AppState gọi đúng ba thứ: `SyncEngine.shared.attach(store:)` một lần l
 `SyncEngine.shared.requestSync(reason: .localEdit)` sau khi ghi, và
 `SyncEngine.shared.resyncFromScratch()` khi user bấm nút ở Settings (đi qua
 `AppState.resyncFromScratch()`). Không realtime, không websocket, không APNs (design §12).
+
+### 8.0 Gate ở client TRƯỚC khi dựng request (bổ sung 2026-08-10)
+
+Bản đầu không có gate nào ở client: `SyncEngine` gắn vô điều kiện và poll, nên **user free đã đăng
+nhập** — hoặc user Pro **cố ý tắt công tắc** — vẫn đẩy payload task, **gồm `sourceTranscript` tức
+nguyên văn lời họ nói**, lên server. Server raise `sync_pro_required`/`sync_disabled` và abort nên
+không lưu gì, nhưng **dữ liệu đã rời khỏi máy** — đúng cái màn xác nhận ở design §8.1 hứa sẽ không
+xảy ra. Đây là lỗi riêng tư, không phải lỗi hiệu năng.
+
+`SyncMerge.gate(state:) -> SyncGate` (hàm thuần) trả **ba** kết quả, và `runSyncRound` xử lý ngay
+sau `guard let store`, **trước khi gom outbox và trước khi dựng bất kỳ request nào**:
+
+| `SyncGate` | Khi nào | Làm gì |
+|---|---|---|
+| `.allowed` | state đã biết, Pro **và** công tắc bật | chạy bình thường |
+| `.blocked(.proRequired)` / `.blocked(.disabled)` | state đã biết, một điều kiện đóng | đặt `lastFailure` **đúng bằng giá trị mà 403 sẽ tạo ra**, rồi dừng — UI không có nhánh mới nào |
+| `.unknown` | **chưa bao giờ** lấy được `volar_sync_state()` | **im lặng tuyệt đối**: không gửi gì, và **KHÔNG đặt `lastFailure`** |
+
+Bốn luật của gate này, thiếu cái nào là đổi lỗi này lấy lỗi khác:
+
+1. 🔴 **`volar_sync_state()` KHÔNG được gate.** Nó là đường duy nhất để biết trạng thái đã đổi (vừa
+   mua Pro ở máy khác, vừa bật công tắc ở iPhone). Gate luôn cả nó là client **tự nhốt mình vĩnh
+   viễn**. `currentGate()` gọi thẳng nó khi cache còn rỗng, và `handleForeground()` cũng gọi — đúng
+   ba thời điểm design §8.2 đã quy định (khởi động · foreground · sau mọi 403), trong đó engine
+   trước đây mới làm mỗi cái cuối.
+2. 🔴 **Chưa biết thì KHÔNG được đoán.** `.unknown` ≠ "chưa có Pro". Một máy offline chưa học được
+   gì về tier của user thì không được nói ngược lại. Nó cũng không được đặt `lastFailure` — làm thế
+   là biến "chưa kịp hỏi" thành một vấn đề mà user tưởng mình phải xử lý.
+3. 🔴 **Server vẫn là quyền cuối.** Gate này **chỉ có thể TỪ CHỐI**, không bao giờ cho phép thứ mà
+   server sẽ chặn. Toàn bộ đường xử lý 403 giữ nguyên không sửa một dòng; hai bên lệch nhau (VD Pro
+   vừa hết hạn ở máy khác, cache còn cũ) thì server thắng và `handleFailure` refetch state đã tự
+   sửa cache ngay lượt đó.
+4. **Thứ tự kiểm Pro TRƯỚC công tắc**, khớp thứ tự hai `raise exception` trong `sync_exchange` — để
+   một tài khoản vừa hết Pro vừa tắt công tắc không bị hai bên báo hai lý do khác nhau.
+
+Cache sống ở `SyncAccountClient.cachedState` (chứ không ở `SyncEngine`) vì đó là chỗ duy nhất gọi
+`volar_sync_state`; để ở engine là đẻ ra bản sao thứ hai có thể lệch. **Không xoá cache khi fetch
+hỏng** — một câu trả lời cũ mà thật vẫn tốt hơn `.unknown`, và `.unknown` nghĩa là "chưa bao giờ
+hỏi được", không phải "lần hỏi vừa rồi hỏng".
+
+**Lợi ích phụ, không phải mục tiêu:** user free giờ tốn **0 request `sync_exchange`** mỗi 30 giây
+thay vì một request mang toàn bộ outbox.
 
 ### 8.1 Van 2 — "Re-sync from scratch" (design §6.1, bổ sung 2026-08-10)
 
