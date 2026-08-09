@@ -130,12 +130,30 @@ final class SyncEngine {
         return fresh
     }()
 
-    /// `"\(hostOrDeviceName) · \(osName)"` — client-contract.md §7. Internal ON PURPOSE, not a
+    /// `"<model> · <os> · <short id>"`. Pinned by client-contract.md §7. Internal ON PURPOSE, not a
     /// missed `private`: this is the ONE formula for a device label in the whole client (group B
     /// owns it per §7) — `AppState` reads it when calling `volar_set_sync_enabled` so the label
     /// that lands in `sync_prefs.enabled_by_device` matches the one `sync_exchange` writes into
     /// `sync_devices`. A second, independently-written formula would let the two drift and show
     /// the same machine under two different names side by side in Settings.
+    ///
+    /// 🔴 NEVER put a user-assignable device name in this string. It is sent as `p_device_label`,
+    /// stored in `sync_devices.label` against the account, and kept until the user purges or deletes
+    /// the account — so anything that lands here is personal data at rest, and
+    /// `docs/app-store-privacy.md` answers `Contact Info › Name: No` on the strength of this property
+    /// alone. macOS's `Host.current().localizedName` was exactly that mistake: it returns the
+    /// user-assigned computer name, which macOS defaults to one built from the account holder's name.
+    ///
+    /// `UIDevice.current.model` (not `.name`) on iOS: `.name` already degrades to the model name
+    /// without the `user-assigned-device-name` entitlement, which this app does not request — but
+    /// relying on that would mean adding that entitlement someday silently turns this into a name
+    /// leak. `.model` is documented to never carry one, which makes the guarantee structural.
+    ///
+    /// The short id suffix keeps two machines of the same model apart in Settings. It reveals nothing
+    /// new: it is the first four characters of `deviceId`, an app-generated random UUID the server
+    /// already receives in full as `p_device`. Reading this property therefore forces `deviceId` to
+    /// be generated, which is harmless — every caller of this property is about to send `deviceId`
+    /// anyway, or is a user-initiated `volar_set_sync_enabled` call.
     var deviceLabel: String {
         #if os(macOS)
         return "\(Host.current().localizedName ?? "Mac") · macOS"
@@ -259,6 +277,10 @@ final class SyncEngine {
         resetBackoff()
         startPolling()
         startNetworkMonitor()
+        // design §8.2's second required moment. Fire-and-forget: the result lands in
+        // `SyncAccountClient.cachedState`, which `currentGate()` reads on the round the debounce
+        // below is about to schedule.
+        Task { @MainActor in _ = try? await SyncAccountClient.shared.fetchState() }
         requestSync(reason: .foreground)
     }
 
@@ -403,6 +425,25 @@ final class SyncEngine {
         currentInterval = min(currentInterval * 2, Self.maxInterval)
     }
 
+    /// Reads the cached account state, fetching it ONCE if it has never been fetched. The fetch lives
+    /// here rather than relying on `AppState.refreshSyncState()` alone so the engine can never end up
+    /// permanently dead: a launch whose first state fetch failed (offline) would otherwise leave the
+    /// gate at `.unknown` forever with nothing to retry it.
+    ///
+    /// `volar_sync_state()` is itself UNGATED server-side (design §8.2) and MUST stay reachable here —
+    /// gating the one call that reports the gate is how a client locks itself out permanently after
+    /// the user buys Pro or flips the switch on another device.
+    private func currentGate() async -> SyncGate {
+        var state = await SyncAccountClient.shared.cachedState
+        if state == nil {
+            // `try?` — a failed fetch leaves `state == nil`, which resolves to `.unknown`: silent, no
+            // content sent, retried next round. Never `.proRequired`: an offline client has learned
+            // nothing about the user's tier and must not say otherwise.
+            state = try? await SyncAccountClient.shared.fetchState()
+        }
+        return SyncMerge.gate(state: state)
+    }
+
     // MARK: - The exchange round itself
 
     /// Runs `sync_exchange` repeatedly (bounded by `maxConsecutiveRounds`) until the server reports
@@ -410,6 +451,28 @@ final class SyncEngine {
     /// OUTCOME of the whole round. Re-entrancy-safe (`isExchanging`/`pendingRerun` above).
     private func runSyncRound() async {
         guard let store else { return }
+
+        // Client-side gate (design §8, added 2026-08-10). Deliberately BEFORE the outbox is gathered
+        // and before any request is built: the whole point is that task content —
+        // `sourceTranscript` included — never leaves the machine just to be rejected. The
+        // server-side RLS check is untouched and remains the real authority; this only stops the
+        // pointless (and privacy-relevant) upload.
+        switch await currentGate() {
+        case .allowed:
+            break
+        case .blocked(let failure):
+            // Same two values `sync_exchange`'s 403 would have produced, so the UI path is identical
+            // to the one it already handles — no new state, no "sync error" string (contract §1
+            // rule 2).
+            lastFailure = failure
+            return
+        case .unknown:
+            // Never asked, or the ask failed. Say nothing and send nothing (contract §3.3: offline is
+            // SILENT) — do NOT set `lastFailure`, which would make "we haven't checked yet" render as
+            // a problem the user could act on.
+            return
+        }
+
         guard !isExchanging else {
             pendingRerun = true
             return

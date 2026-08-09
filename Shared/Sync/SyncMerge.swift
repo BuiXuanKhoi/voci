@@ -18,6 +18,20 @@ enum MergeDecision: Sendable, Equatable {
     case skip
 }
 
+/// What the CLIENT already knows about whether a round may run — decided purely from the last
+/// `SyncState` the account layer fetched. Deliberately NOT folded into `SyncFailure`: two of the
+/// three answers are STATES rather than failures, and "we have not asked the server yet" is not a
+/// failure at all and must never be shown as one.
+enum SyncGate: Sendable, Equatable {
+    case allowed
+    /// Both conditions are KNOWN and one of them is closed. Carries the failure the UI should
+    /// show, so no call site re-derives it from the state and risks wording it differently.
+    case blocked(SyncFailure)
+    /// `volar_sync_state()` has never come back. NOT a denial: the client must neither send task
+    /// content nor claim the user lacks Pro. It simply does nothing this round.
+    case unknown
+}
+
 enum SyncMerge {
     // MARK: - LWW (client-contract.md §4, design.md §5)
 
@@ -136,5 +150,28 @@ enum SyncMerge {
         // A cursor from the FUTURE (server clock ahead of this device) is not stale — only elapsed
         // time in the positive direction can have outrun the server's sweep.
         return now.timeIntervalSince(stamp) > maxAge ? nil : cursor
+    }
+
+    // MARK: - Client-side gate (design.md §8 — keep content from leaving to be rejected)
+
+    /// design.md §8: sync requires Pro **AND** the account-level switch, and the RLS policy
+    /// `volar_sync_allowed()` is the REAL gate. This is only the client-side pre-check, and it exists
+    /// for a privacy reason rather than a correctness one: without it a free account uploads its task
+    /// payloads — `sourceTranscript` included — for the server to throw away, which is precisely what
+    /// the consent screen in §8.1 exists to prevent.
+    ///
+    /// 🔴 THIS CAN ONLY EVER REFUSE. It must never be able to ALLOW something the server would not:
+    /// it grants nothing, opens nothing, and the whole 403 handling path stays exactly as it was. If
+    /// this function and the server ever disagree, the server wins and the client learns the truth
+    /// from the `volar_sync_state()` refetch that already follows every 403.
+    ///
+    /// Pro is checked BEFORE the switch, matching the order of the two `raise exception`s inside
+    /// `sync_exchange` (migration 0005), so a user who is both non-Pro and switched off is told the
+    /// same reason by both sides instead of two different ones depending on who answered.
+    static func gate(state: SyncState?) -> SyncGate {
+        guard let state else { return .unknown }
+        if !state.isPro { return .blocked(.proRequired) }
+        if !state.syncEnabled { return .blocked(.disabled) }
+        return .allowed
     }
 }

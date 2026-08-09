@@ -520,6 +520,21 @@ volar_sync_allowed() = volar_is_pro() AND volar_sync_enabled()
 Đây là điểm chặt hơn hẳn gate ở client, đừng bỏ lỡ: **một máy đang offline, chưa kịp biết user vừa
 tắt sync ở máy khác, vẫn KHÔNG ghi lên được.** Gate ở client là lời khuyên; gate ở policy là luật.
 
+**Nhưng lời khuyên đó vẫn PHẢI có, vì lý do riêng tư chứ không phải đúng/sai (bổ sung 2026-08-10).**
+Bản implement đầu không gate gì ở client: `SyncEngine` gắn vô điều kiện và poll, nên user free đã
+đăng nhập — hoặc user Pro cố ý tắt công tắc — **vẫn đẩy payload task, gồm `sourceTranscript` tức
+nguyên văn lời họ nói, lên server**. Server từ chối và không lưu gì, nhưng **dữ liệu đã rời khỏi
+máy**, và đó đúng là điều màn xác nhận ở §8.1 sinh ra để ngăn. Policy phía server bảo vệ *dữ liệu
+trên đĩa*; nó không bảo vệ được *việc dữ liệu bị gửi đi*. Hai thứ khác nhau và cần hai cơ chế.
+
+Nên: `SyncMerge.gate(state:)` chặn **trước khi dựng request**, dựa trên `SyncState` đã cache. Ba
+kết quả — cho phép · chặn (mang đúng `.proRequired`/`.disabled` mà 403 sẽ tạo ra) · **chưa biết**.
+Nhánh thứ ba là nhánh dễ làm sai nhất: chưa lấy được `volar_sync_state()` thì **không gửi gì và
+cũng không kết luận gì** — không được hiển thị "chưa có Pro" cho một máy vừa mới chỉ là đang offline.
+Và `volar_sync_state()` **tuyệt đối không được gate** (§8.2): gate cái RPC báo trạng thái là cách
+client tự nhốt mình vĩnh viễn sau khi user mua Pro ở máy khác. Chi tiết đầy đủ + bảng ba nhánh:
+`client-contract.md` §8.0.
+
 ### 8.1 Bật lần đầu: màn xác nhận phải trung thực
 
 Bật là một hành động một-chiều-về-mặt-riêng-tư (dữ liệu đã lên server rồi thì tắt không thu hồi

@@ -33,6 +33,14 @@ actor SyncAccountClient {
 
     private let session: URLSession
 
+    /// Last successful `volar_sync_state()`/`volar_set_sync_enabled()` result. `nil` means never
+    /// successfully fetched — NOT "not allowed". `SyncEngine` reads this (through
+    /// `SyncMerge.gate(state:)`) before starting a round, so the client-side pre-check in
+    /// `SyncEngine.currentGate()` never has to make its own separate network call in the common
+    /// case. `AppState.syncState` holds its own copy for the UI; the two stay consistent because
+    /// both are assigned from the return value of these same two calls, never from each other.
+    private(set) var cachedState: SyncState?
+
     init(session: URLSession = .shared) {
         self.session = session
     }
@@ -46,7 +54,9 @@ actor SyncAccountClient {
     /// after any `SyncFailure` `SyncEngine` reports from `sync_exchange` (client-contract.md §3.2).
     func fetchState() async throws -> SyncState {
         let data = try await rpc("volar_sync_state", body: [:])
-        return try Self.decodeState(data)
+        let state = try Self.decodeState(data)
+        cachedState = state
+        return state
     }
 
     // MARK: - volar_set_sync_enabled
@@ -62,7 +72,9 @@ actor SyncAccountClient {
             "p_device": deviceLabel ?? NSNull()
         ]
         let data = try await rpc("volar_set_sync_enabled", body: body)
-        return try Self.decodeState(data)
+        let state = try Self.decodeState(data)
+        cachedState = state
+        return state
     }
 
     // MARK: - volar_sync_purge

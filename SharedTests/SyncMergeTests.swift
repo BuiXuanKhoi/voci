@@ -224,4 +224,49 @@ final class SyncMergeTests: XCTestCase {
     func testCursorMaxAgeStaysBelowServerTombstoneRetention() {
         XCTAssertLessThan(SyncMerge.cursorMaxAgeDays, SyncMerge.serverTombstoneRetentionDays)
     }
+
+    // MARK: - gate(state:) — design.md §8, the client-side pre-check that keeps task content
+    // (including `sourceTranscript`) from leaving the machine just to be rejected server-side.
+
+    private func syncState(isPro: Bool, syncEnabled: Bool) -> SyncState {
+        SyncState(isPro: isPro, syncEnabled: syncEnabled, enabledAt: nil, enabledByDevice: nil, devices: [])
+    }
+
+    func testGateNilStateIsUnknown() {
+        // Never successfully fetched — must NOT read as a denial.
+        XCTAssertEqual(SyncMerge.gate(state: nil), .unknown)
+    }
+
+    func testGateNotProSwitchOnIsBlockedProRequired() {
+        let state = syncState(isPro: false, syncEnabled: true)
+        XCTAssertEqual(SyncMerge.gate(state: state), .blocked(.proRequired))
+    }
+
+    func testGateProSwitchOffIsBlockedDisabled() {
+        let state = syncState(isPro: true, syncEnabled: false)
+        XCTAssertEqual(SyncMerge.gate(state: state), .blocked(.disabled))
+    }
+
+    func testGateProSwitchOnIsAllowed() {
+        let state = syncState(isPro: true, syncEnabled: true)
+        XCTAssertEqual(SyncMerge.gate(state: state), .allowed)
+    }
+
+    /// Pins the ORDER to match the two `raise exception`s inside `sync_exchange` (migration 0005):
+    /// Pro is checked before the switch, so an account that is both non-Pro and switched off gets
+    /// `.proRequired` from the client — the same reason the server would give — rather than the
+    /// two sides reporting different things for the same account.
+    func testGateNeitherProNorSwitchedOnIsBlockedProRequiredNotDisabled() {
+        let state = syncState(isPro: false, syncEnabled: false)
+        XCTAssertEqual(SyncMerge.gate(state: state), .blocked(.proRequired))
+    }
+
+    /// `SyncState.unknown` (the STATE, `SyncContracts.swift`'s static default with `isPro: false`)
+    /// is a real fetched value and a completely different thing from `SyncGate.unknown` (the GATE,
+    /// meaning "never fetched at all"). Only a genuine `nil` produces the gate's `.unknown` — a
+    /// state that merely happens to be named `.unknown` still resolves through the ordinary
+    /// Pro-then-switch logic like any other fetched `SyncState`.
+    func testGateSyncStateDotUnknownIsBlockedProRequiredNotGateUnknown() {
+        XCTAssertEqual(SyncMerge.gate(state: SyncState.unknown), .blocked(.proRequired))
+    }
 }
