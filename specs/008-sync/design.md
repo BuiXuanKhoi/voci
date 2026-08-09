@@ -450,6 +450,8 @@ và vẫn chọn account-level. Mặt trái đó phải được viết ra ở �
 `UserDefaults` không dùng được. "Mức tài khoản" mà lưu trên từng máy thì chỉ là lời hứa suông: bốn
 máy sẽ tin bốn trạng thái khác nhau, và cái máy tin nhầm sẽ đẩy dữ liệu lên trong đúng lúc user
 tưởng đã tắt. Nên: **một dòng `public.sync_prefs` mỗi tài khoản**, mọi máy đọc cùng một chỗ.
+`sync_prefs.profile_id` (2026-08-10: đổi tên từ `user_id`, xem §9) chính là **primary key** của bảng
+— "mỗi tài khoản một dòng" là bất biến ép bằng khoá chính, không phải quy ước.
 
 Và vì nó đã ở server, nó **đi thẳng vào RLS policy** cùng `volar_is_pro()`:
 
@@ -534,7 +536,10 @@ Không mâu thuẫn với nguyên tắc "TÍNH NĂNG miễn phí hết — chỉ
 100% ở tier free. `product-vision-v2.md` cũng đã ghi sẵn "v3 ships (iPhone/Watch + sync): cân nhắc
 $9.99+ — **mốc nâng mạnh nhất**".
 
-**Xoá tài khoản**: cả năm bảng `sync_*` đều `references auth.users(id) on delete cascade` ⇒
+**Xoá tài khoản** (2026-08-10: cascade giờ hai chặng, xem §9): `public.profiles.id references
+auth.users(id) on delete cascade`, và cả năm bảng còn lại — `tasks`, `completions`, `sync_prefs`,
+`sync_devices`, `sync_rejects` — `references public.profiles(id) on delete cascade`. Xoá
+`auth.users` → xoá `profiles` → xoá cả năm bảng kia, tự động, một lệnh.
 `POST /subscription/delete-account` (đang dùng `auth.admin.deleteUser`) tự động xoá sạch. **Bắt
 buộc** — Apple Guideline 5.1.1(v).
 
@@ -549,22 +554,58 @@ khi xa điện thoại", đúng cái tốn tiền server.
 
 **Ranh giới an ninh = cách ly giữa các user, và nó phải do DATABASE ép, không phải do TypeScript.**
 
+### 9.0 `public.profiles` + đổi tên bảng (bổ sung 2026-08-10)
+
+`0005` giờ tạo **sáu** bảng, không phải năm: `profiles`, `tasks`, `completions`, `sync_prefs`,
+`sync_devices`, `sync_rejects`. Ranh giới có nghĩa, không phải đặt tên tuỳ hứng: `tasks`/
+`completions` là **dữ liệu người dùng** (sẽ còn tồn tại kể cả nếu sau này bỏ sync); `sync_prefs`/
+`sync_devices`/`sync_rejects` là **bộ máy đồng bộ** (chỉ tồn tại vì có sync) nên giữ tiền tố
+`sync_`. Đổi tên hai chỗ so với bản đầu của tài liệu này: `sync_tasks` → `tasks`, `sync_completions`
+→ `completions`.
+
+`public.profiles`: `id uuid primary key references auth.users(id) on delete cascade` (id CHÍNH LÀ
+`auth.users.id`, không sinh uuid riêng), `display_name text`, `avatar_url text` (URL, không phải
+bytes), `created_at`/`updated_at timestamptz`. RLS: user chỉ đọc/sửa profile của chính mình
+(`(select auth.uid()) = id`), không cấp `delete`. Trigger `on_auth_user_created` trên `auth.users`
+(hàm `public.volar_handle_new_user()`, `security definer`) tự tạo một dòng `profiles` khi có user
+mới, cộng một câu backfill cho user đã đăng ký từ trước — thiếu bước backfill đó thì FK của cả năm
+bảng còn lại fail cho mọi user cũ.
+
+Cả năm bảng còn lại đổi FK `user_id` → `profile_id uuid references public.profiles(id) on delete
+cascade` (`sync_prefs.profile_id` là primary key). Vì `profiles.id = auth.uid()`, mọi RLS policy vẫn
+so trực tiếp `(select auth.uid()) = profile_id` — **không có join nào** cần thêm. Cascade giờ là
+**hai chặng**: `auth.users` → `profiles` → cả năm bảng.
+
+`sync_prefs.sync_enabled` **vẫn ở bảng riêng**, cố ý KHÔNG ghép vào `profiles`: `display_name`/
+`avatar_url` ai cũng sửa tự do, còn `sync_enabled` có luật ghi riêng (bật đòi Pro, tắt thì lúc nào
+cũng được kể cả đã hết hạn — §8.3). Ghép chung bảng thì `with check` của policy update phải đọc lại
+giá trị cũ bằng subquery để phân biệt "đang đổi avatar" với "đang bật sync" — loại policy dễ viết
+sai, và sai ở đó nghĩa là user free tự bật được sync.
+
+Không đổi: tên và chữ ký cả bảy RPC, mọi tên tham số RPC, hình dạng JSON request/response, tên bảng
+`sync_rejects`. `public.entitlements` (migration `0002`, đã apply) **vẫn dùng `user_id` trỏ
+`auth.users`** — không liên quan tới đổi tên này. Client Swift **không đổi một dòng code chạy nào**.
+`0005` vẫn **CHƯA APPLY**.
+
 Repo hiện có convention: bật RLS, **không policy nào**, mọi thứ đi qua service-role trong edge
 function (`entitlements`, `usage_counters`, ...). **Đợt này lệch convention đó có chủ ý**, và lý do
 phải ghi vào header migration:
 
-> Với `entitlements` thì quên một `.eq("user_id", ...)` chỉ lộ tier. Với `sync_tasks` thì quên một
+> Với `entitlements` thì quên một `.eq("user_id", ...)` chỉ lộ tier. Với `tasks` thì quên một
 > `.eq` là **lộ toàn bộ task của người khác**. Đây là dữ liệu nhạy cảm nhất sản phẩm có. Ranh giới
 > không được phép là "lập trình viên nhớ viết `where`".
 
-Nên: `sync_*` dùng **RLS policy thật** trên `(select auth.uid())`, RPC để `security invoker`, và
-client gọi bằng **JWT của chính user** — Postgres từ chối ở tầng dưới cùng dù code phía trên có sai.
-`(select auth.uid())` bọc trong `select` là bắt buộc (InitPlan, tính một lần thay vì mỗi hàng).
+Nên: `profiles`/`tasks`/`completions`/`sync_*` dùng **RLS policy thật** trên `(select auth.uid())`,
+RPC để `security invoker`, và client gọi bằng **JWT của chính user** — Postgres từ chối ở tầng dưới
+cùng dù code phía trên có sai. `(select auth.uid())` bọc trong `select` là bắt buộc (InitPlan, tính
+một lần thay vì mỗi hàng). (2026-08-10: cột trên các bảng này là `profile_id`, không phải `user_id`
+— nhưng vì `profiles.id = auth.uid()`, policy vẫn so trực tiếp `(select auth.uid()) = profile_id`,
+**không có join nào**; xem §9.0 ngay trên.)
 
 Cổng cũng nhét vào policy, qua `public.volar_sync_allowed()` = `volar_is_pro()` **AND**
 `volar_sync_enabled()` (cả ba đều `security definer`, `set search_path = ''`, tự đọc `auth.uid()`
 bên trong, **không nhận tham số user** — không có gì để giả mạo) ⇒ user free **hoặc** một máy chưa
-biết công tắc đã tắt đều không ghi được `sync_tasks` **kể cả gọi thẳng PostgREST bằng curl**, không
+biết công tắc đã tắt đều không ghi được `tasks` **kể cả gọi thẳng PostgREST bằng curl**, không
 chỉ là bị client từ chối.
 
 Ngoại lệ duy nhất dùng `security definer` cho một RPC là `volar_sync_purge()` — và nó là ngoại lệ
@@ -700,7 +741,7 @@ không qua cloud" — sau đợt này câu đó thành: **cả hai, và mỗi c�
 
 | Việc | Nơi | Ước lượng |
 |---|---|---|
-| Migration + RLS + 5 RPC | `supabase/migrations/0005_sync_tasks.sql` | ~640 dòng — **đã viết trong đợt này** |
+| Migration + RLS + 5 RPC | `supabase/migrations/0005_sync_schema.sql` | **đã viết trong đợt này**, đã đổi tên file 2026-08-10 (thêm `profiles`, đổi `sync_tasks`/`sync_completions` → `tasks`/`completions`) |
 | Ba field + backfill + soft-delete | `Shared/Model/VolarTask.swift`, `TaskStore.swift` | ~120 dòng sửa, 5 `FetchDescriptor` |
 | Engine sync | `Shared/Sync/` (4 file mới) | ~700–900 dòng |
 | Test merge thuần + payload codec | `SharedTests/` | ~400 dòng |

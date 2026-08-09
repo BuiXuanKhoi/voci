@@ -71,7 +71,7 @@
 >
 > **★ SYNC — THIẾT KẾ XONG 2026-08-09 (bản ghi gốc).**
 > Tài liệu: **`specs/008-sync/design.md`**. Migration đã viết nhưng **CHƯA APPLY, CHƯA DEPLOY**:
-> `supabase/migrations/0005_sync_tasks.sql`. Lý do đột ngột cần sync: anh Khôi chốt 2026-08-09 rằng
+> `supabase/migrations/0005_sync_schema.sql`. Lý do đột ngột cần sync: anh Khôi chốt 2026-08-09 rằng
 > **watch phải chạy khi không có iPhone bên cạnh** ⇒ `WCSession` không đủ ⇒ sync chặn Phase 3 của
 > plan 007. Thứ tự anh chốt: **sync trước, watch sau**.
 > Khuyến nghị chính đã chốt trong design: **Supabase chứ KHÔNG phải CloudKit** (CloudKit bỏ rơi bản
@@ -193,8 +193,19 @@
   nhau ⇒ merge xong có hai frog. Cách chữa rẻ đã ghi trong design (`§3`): lúc đọc thì chọn frog có
   `updatedAt` mới nhất và để `AppState` tự dọn — **chưa implement**.
 - [ ] **Ba job dọn dẹp pg_cron đang treo, nên gộp làm một lần bật** (2026-08-09): `usage_counters`
-  (treo từ 0002), `sync_tasks` tombstone >90 ngày, `sync_rejects` >90 ngày (cả hai từ 0005).
+  (treo từ 0002), `tasks` tombstone >90 ngày, `sync_rejects` >90 ngày (cả hai từ 0005).
   pg_cron **chưa từng được bật** ở project này — không migration nào tạo extension nào.
+- [ ] **`0005_sync_schema.sql` đổi schema (2026-08-10): `profiles`/`profile_id`, tách `tasks`/
+  `completions` khỏi tiền tố `sync_` — VẪN CHƯA APPLY.** Thêm bảng `public.profiles` (`id` =
+  `auth.users.id`, không sinh uuid riêng) và đổi FK của cả năm bảng còn lại từ `user_id` sang
+  `profile_id uuid references public.profiles(id) on delete cascade`; hai bảng dữ liệu người dùng
+  đổi tên `sync_tasks` → `tasks`, `sync_completions` → `completions` (ba bảng hạ tầng sync —
+  `sync_prefs`, `sync_devices`, `sync_rejects` — giữ nguyên tên). Chi tiết: `specs/008-sync/design.md`
+  §9.0. Client Swift không đổi code chạy (RPC/`sync_rejects` giữ nguyên, xem
+  `specs/008-sync/client-contract.md`). **Khi apply**: nhớ trigger `on_auth_user_created` trên
+  `auth.users` (hàm `public.volar_handle_new_user()`) tự tạo `profiles` cho user mới, cộng câu
+  backfill cho user cũ — và **phải kiểm bằng mắt** rằng mọi user đang tồn tại đều có dòng `profiles`
+  sau khi apply, vì thiếu profile thì FK của cả năm bảng fail và app dùng không được.
 - [ ] **`0006_` pair-code cho watch — chưa viết** (2026-08-09). Bảng mã một-lần TTL 5 phút +
   `volar_mint_pair_code()` + route `POST /functions/v1/subscription/pair-claim`. Cố ý tách khỏi
   `0005` vì thuộc pha watch chứ không phải pha sync. ⚠️ Bước đổi mã lấy session dựa vào

@@ -59,9 +59,9 @@ private struct ConditionDTO: Codable {
 /// header: "server đợt này là ống dẫn ngu").
 ///
 /// `schemaVersion` is carried BOTH here (self-describing — a future reader of the raw JSONB column
-/// doesn't need to join back to `sync_tasks.schema_version` to know what shape it's looking at) AND
+/// doesn't need to join back to `tasks.schema_version` to know what shape it's looking at) AND
 /// as a sibling field in the wrapper (`SyncTaskOutbound`/`SyncTaskInbound` below, matching
-/// `sync_tasks.schema_version`, the column the DB actually indexes/reasons about). The wrapper's
+/// `tasks.schema_version`, the column the DB actually indexes/reasons about). The wrapper's
 /// copy is authoritative; this one is redundant-by-design, not a second source of truth to keep in
 /// sync by hand — `TaskPayload.init(_:)` always stamps `Self.currentSchemaVersion` and nothing
 /// downstream reads this copy back out except `asTaskItem`, which doesn't consult it at all.
@@ -283,7 +283,7 @@ extension TaskPayload: Codable {
 
 /// Field-for-field wire mirror of the three snapshot fields carried by `PendingCompletion`/
 /// `RemoteCompletion` (`SyncContracts.swift`) — `id`/`taskId`/`completedAt` stay at the WRAPPER
-/// level (matching `sync_completions`'s actual columns), so this only holds what the DB calls
+/// level (matching `completions`'s actual columns), so this only holds what the DB calls
 /// `payload`: the historical snapshot fields that have no column of their own.
 struct CompletionPayload: Sendable, Equatable, Codable {
     var titleSnapshot: String
@@ -338,7 +338,7 @@ struct SyncTaskOutbound: Sendable, Encodable {
 }
 
 /// One entry of `tasks[]` in the response. `serverUpdatedAt`/`originDevice` only exist here (never
-/// sent by the client) — see migration 0005's `sync_tasks` table.
+/// sent by the client) — see migration 0005's `tasks` table.
 ///
 /// `payload` is decoded INDEPENDENTLY of every other field here (custom `init(from:)` below) —
 /// deliberately NOT `TaskPayload` (non-optional) the way `SyncTaskOutbound` is, because that would
@@ -432,7 +432,7 @@ struct SyncCompletionInbound: Sendable, Decodable {
 /// Top-level request body for `POST /rest/v1/rpc/sync_exchange`. `CodingKeys` map to the RPC's
 /// ACTUAL parameter names (`p_cursor_tasks`, ...) — PostgREST binds top-level JSON body keys to
 /// function parameter names by exact string match, so these are VERBATIM from
-/// `0005_sync_tasks.sql`'s `create or replace function public.sync_exchange(...)` signature, not
+/// `0005_sync_schema.sql`'s `create or replace function public.sync_exchange(...)` signature, not
 /// negotiable spelling.
 ///
 /// `cursorTasks`/`cursorCompletions` are `String?` — NEVER `Date?`. Contract §6: Postgres emits up

@@ -153,7 +153,7 @@ enum CompletionLog {
     }
 
     /// Inserts any remote completion whose id isn't already present locally; NEVER updates an
-    /// existing row — matches the server's own `on conflict do nothing` (0005_sync_tasks.sql), so
+    /// existing row — matches the server's own `on conflict do nothing` (0005_sync_schema.sql), so
     /// client and server agree a completion can only ever be created, never edited, from either
     /// direction. Rows inserted this way are immediately marked synced: they came FROM the server,
     /// so pushing them straight back would be a pointless round trip.

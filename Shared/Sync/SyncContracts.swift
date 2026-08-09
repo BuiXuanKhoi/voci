@@ -44,7 +44,7 @@ struct RemoteTask: Sendable {
 }
 
 /// One local completion event waiting to be pushed. `CompletionEvent` is append-only, so there is
-/// no `updatedAt` and no conflict — see `sync_completions` in 0005.
+/// no `updatedAt` and no conflict — see `completions` in 0005.
 struct PendingCompletion: Sendable {
     var id: UUID
     var taskId: UUID

@@ -22,7 +22,7 @@ supabase/
 │   ├── 0002_accounts_entitlements.sql          # entitlements (SUPERSEDED shape, see 0003) + usage_counters + consume_quota RPC
 │   ├── 0003_entitlements_multi_source.sql      # entitlements -> one row per (user_id, source); current shape, see "Auth design" below
 │   ├── 0004_promo_codes.sql                    # promo_codes / promo_redemptions / promo_attempts + redeem_promo_code RPC; adds 'promo' to entitlements.source
-│   └── 0005_sync_tasks.sql                     # ⚠️ WRITTEN, NOT APPLIED — multi-device sync; see below
+│   └── 0005_sync_schema.sql                    # ⚠️ WRITTEN, NOT APPLIED — multi-device sync; see below
 └── functions/
     ├── parse/index.ts         # the parse/breakdown route
     ├── groq/index.ts          # the Groq Speech-to-Text proxy route (both tiers, tiered daily cap)
@@ -32,13 +32,18 @@ supabase/
                                 # log.ts, http.ts
 ```
 
-## ⚠️ `0005_sync_tasks.sql` — written, deliberately NOT applied
+## ⚠️ `0005_sync_schema.sql` — written, deliberately NOT applied
 
-Design: `../specs/008-sync/design.md` (Opus, 2026-08-09). It adds five tables — `sync_tasks`,
-`sync_completions`, `sync_rejects`, `sync_prefs` (the account-level sync toggle), `sync_devices` —
-plus five RPCs that clients call directly under `POST /rest/v1/rpc/…`: `sync_exchange` (push and
-pull in one transaction), `volar_sync_state`, `volar_set_sync_enabled`, `volar_sync_purge`, and the
-policy helper `volar_sync_allowed`.
+Design: `../specs/008-sync/design.md` (Opus, 2026-08-09; renamed 2026-08-10 — see `design.md` §9.0).
+It adds six tables — `profiles` (one row per `auth.users`, holds `display_name`/`avatar_url`; a
+trigger on `auth.users` keeps it populated), `tasks`, `completions`, `sync_rejects`, `sync_prefs`
+(the account-level sync toggle), `sync_devices` — plus five RPCs that clients call directly under
+`POST /rest/v1/rpc/…`: `sync_exchange` (push and pull in one transaction), `volar_sync_state`,
+`volar_set_sync_enabled`, `volar_sync_purge`, and the policy helper `volar_sync_allowed`. `tasks`/
+`completions` hold user content (they'd outlive sync if sync were ever removed); the `sync_*` tables
+are sync machinery only. All five non-`profiles` tables key off `profile_id` (not `user_id`), which
+references `profiles(id)` — and since `profiles.id` IS `auth.users.id`, every RLS policy still
+compares directly against `auth.uid()`, no join required.
 
 Sync is **opt-in**, and the gate is two conditions, not one: `volar_is_pro() AND
 volar_sync_enabled()`. The toggle is per **account**, lives in the database rather than in
@@ -50,9 +55,9 @@ open questions are listed at the end of that document). Two things about it devi
 earlier migration and are the reason it needs a decision, not just a `db push`:
 
 1. It is the **first migration with real RLS policies**. Every earlier table uses "RLS on, zero
-   policies, service-role only". `sync_tasks` holds task titles, notes, and verbatim speech
+   policies, service-role only". `tasks` holds task titles, notes, and verbatim speech
    transcripts — the isolation boundary must be enforced by Postgres, not by remembering to write
-   `.eq("user_id", …)` in TypeScript.
+   `.eq("profile_id", …)` in TypeScript.
 2. It is the **first path where the client talks to PostgREST directly** instead of going through an
    Edge Function, and the first time the Pro gate lives in a policy rather than in client code.
 

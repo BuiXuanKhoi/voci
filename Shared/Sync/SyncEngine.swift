@@ -506,7 +506,7 @@ final class SyncEngine {
         // big comment above) only means one extra redundant push next round, never data loss.
         //
         // `reduce(into:)` (first-wins), not `Dictionary(uniqueKeysWithValues:)` — the page query's
-        // primary key (`user_id, id`) already rules out a duplicate id in one response, but this
+        // primary key (`profile_id, id`) already rules out a duplicate id in one response, but this
         // function has no business trapping over a hypothetical malformed response it doesn't
         // control (same defensive stance `WaitingMode.decide` takes on its own caller-supplied
         // array).
@@ -523,7 +523,7 @@ final class SyncEngine {
         }
 
         // Completions can never lose a conflict (append-only, `on conflict do nothing` — migration
-        // 0005's own header on `sync_completions`) — a 2xx response means every completion in THIS
+        // 0005's own header on `completions`) — a 2xx response means every completion in THIS
         // push was accepted, full stop.
         if !pendingCompletions.isEmpty {
             store.markCompletionsSynced(pendingCompletions.map(\.id))

@@ -4,9 +4,16 @@
 > cùng một thứ. **Đây là hợp đồng, không phải gợi ý.** Mọi chữ ký trong file này là VERBATIM: agent
 > nào cần đổi thì phải dừng lại và báo, không tự sửa.
 >
-> Nguồn: `specs/008-sync/design.md` (thiết kế, anh Khôi đã duyệt) + `supabase/migrations/0005_sync_tasks.sql`
+> Nguồn: `specs/008-sync/design.md` (thiết kế, anh Khôi đã duyệt) + `supabase/migrations/0005_sync_schema.sql`
 > (chữ ký RPC thật). Khi file này và design.md khác nhau ở chi tiết implement, file này thắng — nó
 > chỉ cụ thể hoá, không đảo quyết định nào.
+>
+> **Client không đổi một dòng code chạy nào vì schema đổi tên (2026-08-10).** `0005` đổi
+> `sync_tasks`/`sync_completions` → `public.tasks`/`public.completions`, thêm bảng `public.profiles`,
+> và đổi cột `user_id` → `profile_id` trên cả năm bảng — nhưng cả 7 chữ ký RPC dưới đây (tên hàm, tên
+> tham số, hình dạng JSON request/response) và tên bảng `sync_rejects` mà client `select` thẳng qua
+> PostgREST đều **giữ nguyên**. `profile_id` là chuyện thuần server: vì `profiles.id = auth.uid()`,
+> mọi RLS policy so trực tiếp `(select auth.uid()) = profile_id`, không có join nào client cần biết.
 >
 > ⚠️ Toàn bộ Swift dưới đây **UNVERIFIED** — máy dev là Windows, không có Swift/Xcode.
 
@@ -77,7 +84,7 @@ struct RemoteTask: Sendable {
 }
 
 /// One local completion event waiting to be pushed. `CompletionEvent` is append-only, so there is
-/// no `updatedAt` and no conflict — see `sync_completions` in 0005.
+/// no `updatedAt` and no conflict — see `completions` in 0005.
 struct PendingCompletion: Sendable {
     var id: UUID
     var taskId: UUID
@@ -179,7 +186,7 @@ protocol SyncTaskStoring: AnyObject {
 
 ---
 
-## 3. Chữ ký RPC — khớp `0005_sync_tasks.sql`, không được đoán
+## 3. Chữ ký RPC — khớp `0005_sync_schema.sql`, không được đoán
 
 Base URL và apikey đã có sẵn trong `Shared/Account/AccountService.swift`
 (`https://nuzrpipwacravfgsiacv.supabase.co`, `sb_publishable_...`). Token lấy qua

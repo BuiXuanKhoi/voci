@@ -913,7 +913,7 @@ extension TaskStore: SyncTaskStoring {
         }
     }
 
-    /// Insert-if-absent, matching the server's `on conflict do nothing` (0005_sync_tasks.sql) —
+    /// Insert-if-absent, matching the server's `on conflict do nothing` (0005_sync_schema.sql) —
     /// completions are append-only on both ends, so there is nothing to merge, only to add.
     ///
     /// THROWS on a failed disk write, same contract as `applyRemote` above (client-contract.md

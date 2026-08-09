@@ -1,4 +1,4 @@
--- 0005_sync_tasks.sql
+-- 0005_sync_schema.sql
 --
 -- Multi-device sync for task content. Design: `specs/008-sync/design.md` (Opus, 2026-08-09).
 --
@@ -12,7 +12,7 @@
 --
 -- (1) CÓ RLS POLICY THẬT, và client gọi thẳng PostgREST bằng JWT của chính nó — thay vì "bật RLS,
 --     không policy nào, mọi thứ qua service-role trong edge function".
---     Lý do: với `entitlements` thì quên một `.eq("user_id", ...)` chỉ lộ tier. Với `sync_tasks`
+--     Lý do: với `entitlements` thì quên một `.eq("user_id", ...)` chỉ lộ tier. Với `tasks`
 --     thì quên một `.eq` là lộ TOÀN BỘ TASK CỦA NGƯỜI KHÁC — dữ liệu nhạy cảm nhất sản phẩm có
 --     (title, notes, và `sourceTranscript` = lời nói nguyên văn). Ranh giới an ninh không được
 --     phép là "lập trình viên nhớ viết where". Ở đây Postgres từ chối ở tầng dưới cùng, dù code
@@ -24,14 +24,21 @@
 --     task lên db"), và công tắc ở mức TÀI KHOẢN chứ không phải từng máy — nên nó sống ở bảng
 --     `public.sync_prefs` trên server, không phải `UserDefaults`.
 --     Nhờ đặt cả hai vào policy: một user free, HOẶC một máy đang offline chưa kịp biết user vừa
---     tắt sync ở máy khác, đều không ghi được `sync_tasks` kể cả khi gọi thẳng PostgREST bằng curl.
+--     tắt sync ở máy khác, đều không ghi được `tasks` kể cả khi gọi thẳng PostgREST bằng curl.
 --
 -- ── AN TOÀN ─────────────────────────────────────────────────────────────────────────────────────
--- Migration này chỉ TẠO MỚI. Không `drop`, không `alter` bất kỳ đối tượng nào đã tồn tại, không
--- đụng `entitlements`/`usage_counters`/`promo_*` (plan 007 §8: `0002` đã applied, mọi chỉnh sửa
--- phải đi vào migration mới — file này tuân thủ điều đó và cũng không sửa `0003`/`0004`).
+-- Migration này chủ yếu TẠO MỚI — cộng thêm MỘT trigger trên `auth.users` (`on_auth_user_created`)
+-- và MỘT câu `insert` backfill cho `public.profiles`, nên không còn thuần "chỉ CREATE" như trước.
+-- Hai lệnh `drop` duy nhất trong file (`drop policy if exists`, `drop trigger if exists`) chỉ
+-- nhắm vào đối tượng do CHÍNH file này tạo ra, và chỉ để idempotent (an toàn re-run) — không
+-- `drop`/`alter` bất kỳ đối tượng nào của migration khác, không đụng
+-- `entitlements`/`usage_counters`/`promo_*` (plan 007 §8: `0002` đã applied, mọi chỉnh sửa phải đi
+-- vào migration mới — file này tuân thủ điều đó và cũng không sửa `0003`/`0004`).
+-- Riêng `drop trigger ... on auth.users`: chỉ gỡ đúng trigger tên `on_auth_user_created`, không
+-- đụng gì khác của schema `auth`.
 -- Safe to re-run: mọi CREATE đều `if not exists` / `create or replace`, mọi policy dùng
--- `drop policy if exists` trước khi tạo lại (Postgres không có `create policy if not exists`).
+-- `drop policy if exists` trước khi tạo lại (Postgres không có `create policy if not exists`), và cả
+-- trigger lẫn backfill đều idempotent (`on conflict (id) do nothing`).
 --
 -- ── HAI ĐỒNG HỒ, CỐ Ý TÁCH RỜI (design.md §4) ───────────────────────────────────────────────────
 -- `updated_at`        = đồng hồ LOGIC của client. Dùng DUY NHẤT để phân xử ai thắng (LWW).
@@ -53,10 +60,92 @@
 -- lệnh xoá — nó chỉ thấy "server không có task này" rồi ĐẨY NGƯỢC LÊN, hồi sinh task đã xoá. Đó là
 -- loại lỗi làm user gỡ app.
 --
--- ── FK CASCADE LÀ BẮT BUỘC ──────────────────────────────────────────────────────────────────────
--- Cả NĂM bảng đều `references auth.users(id) on delete cascade`. `POST /subscription/delete-account`
--- (Apple Guideline 5.1.1(v)) xoá `auth.users` bằng admin API và dựa HOÀN TOÀN vào cascade. Thiếu
--- cascade ở một bảng user-owned là im lặng phá tính năng xoá tài khoản.
+-- ── FK CASCADE LÀ BẮT BUỘC — GIỜ LÀ CASCADE HAI CHẶNG ───────────────────────────────────────────
+-- Trước đây cả năm bảng trỏ thẳng `auth.users(id) on delete cascade`. Từ migration này, `profiles`
+-- chen vào giữa: `auth.users` → `public.profiles` → cả năm bảng (`tasks`, `completions`,
+-- `sync_prefs`, `sync_devices`, `sync_rejects`), mỗi chặng đều `on delete cascade`.
+-- `POST /subscription/delete-account` (Apple Guideline 5.1.1(v)) xoá `auth.users` bằng admin API và
+-- dựa HOÀN TOÀN vào cascade — Postgres tự chạy cascade dây chuyền nên tính năng đó vẫn xoá sạch,
+-- nhưng giờ nó PHỤ THUỘC vào việc `profiles` có `on delete cascade` về `auth.users`. Đứt mắt xích đó
+-- (VD: một migration sau này đổi FK của `profiles` mà quên cascade) là im lặng phá tính năng xoá
+-- tài khoản, ở một bảng mà lúc đọc code xoá tài khoản không ai ngờ phải kiểm tra.
+--
+-- ── RANH GIỚI ĐẶT TÊN: `tasks`/`completions` vs `sync_*` ────────────────────────────────────────
+-- `tasks`/`completions` là DỮ LIỆU NGƯỜI DÙNG — chúng sẽ tồn tại kể cả nếu sau này bỏ sync.
+-- `sync_*` (`sync_prefs`, `sync_devices`, `sync_rejects`) là BỘ MÁY ĐỒNG BỘ — chúng chỉ tồn tại vì
+-- có sync. Tiền tố `sync_` trên hai bảng đầu là nói dối về vòng đời của chúng.
+
+-- -----------------------------------------------------------------------------------------------
+-- profiles — một dòng cho mỗi tài khoản, id CHÍNH LÀ auth.users.id
+-- -----------------------------------------------------------------------------------------------
+-- `profiles.id` = `auth.users.id`, KHÔNG sinh uuid riêng. Nếu id riêng thì mọi RLS policy phải join
+-- qua `profiles` để biết `auth.uid()` ứng với profile nào — chậm và phức tạp ở đúng chỗ nóng nhất
+-- (mỗi hàng của mỗi lần pull), đổi lại chẳng được gì. Vì id bằng nhau nên mọi policy trong file này
+-- so trực tiếp `(select auth.uid()) = profile_id`, không có join nào.
+--
+-- VÌ SAO BẮT BUỘC CÓ TRIGGER + BACKFILL: thiếu nó thì người đăng ký mới có `auth.users` nhưng không
+-- có `profiles`, mọi FK trỏ vào đó fail, và đăng ký xong không dùng được app — lỗi sẽ nổ ra ở một
+-- chỗ chẳng liên quan gì tới profile (một `insert into public.tasks` báo vi phạm khoá ngoại).
+create table if not exists public.profiles (
+  id           uuid        primary key references auth.users(id) on delete cascade,
+  display_name text,
+  avatar_url   text,
+  created_at   timestamptz not null default now(),
+  updated_at   timestamptz not null default now()
+);
+
+alter table public.profiles enable row level security;
+
+grant select, insert, update on public.profiles to authenticated;
+
+-- KHÔNG cấp `delete` cho `authenticated`: xoá tài khoản đi đường `auth.users` + cascade, không đi
+-- đường PostgREST.
+drop policy if exists profiles_select on public.profiles;
+create policy profiles_select on public.profiles
+  for select to authenticated
+  using ((select auth.uid()) = id);
+
+drop policy if exists profiles_insert on public.profiles;
+create policy profiles_insert on public.profiles
+  for insert to authenticated
+  with check ((select auth.uid()) = id);
+
+drop policy if exists profiles_update on public.profiles;
+create policy profiles_update on public.profiles
+  for update to authenticated
+  using ((select auth.uid()) = id)
+  with check ((select auth.uid()) = id);
+
+-- `updated_at` do CLIENT tự đặt khi sửa profile; file này cố ý không dựng trigger `set updated_at`
+-- — một trigger nữa trên đường ghi nóng để đổi lấy một cột mà chưa tính năng nào đọc.
+--
+-- `security definer` + `set search_path = ''` cùng lý do như `volar_is_pro()` bên dưới: trigger này
+-- chạy trong ngữ cảnh của `auth.users`, phải tự cấp quyền ghi `public.profiles`, và không được để
+-- một schema lạ chèn hàm/toán tử cùng tên.
+create or replace function public.volar_handle_new_user()
+returns trigger
+language plpgsql
+security definer
+set search_path = ''
+as $$
+begin
+  insert into public.profiles (id) values (new.id)
+  on conflict (id) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.volar_handle_new_user();
+
+-- Backfill cho user đã đăng ký TRƯỚC migration này. Đặt SAU khi tạo trigger — đóng khe hở một user
+-- đăng ký ngay trong lúc migrate. `on conflict (id) do nothing` khiến cả trigger lẫn backfill này
+-- idempotent, đúng với cam kết "safe to re-run" của file (xem mục AN TOÀN ở đầu file).
+insert into public.profiles (id)
+select u.id from auth.users u
+on conflict (id) do nothing;
 
 -- -----------------------------------------------------------------------------------------------
 -- Helper: "user đang gọi có phải Pro không?"
@@ -108,7 +197,7 @@ grant execute on function public.volar_is_pro() to authenticated;
 -- máy đang đăng nhập tài khoản đó lên cloud**, và một máy mới đăng nhập sau đó sẽ tự động bắt đầu
 -- sync mà không hỏi lại. UI bật lần đầu phải nói thẳng điều này (design.md §8.1).
 create table if not exists public.sync_prefs (
-  user_id           uuid        not null primary key references auth.users(id) on delete cascade,
+  profile_id        uuid        not null primary key references public.profiles(id) on delete cascade,
   sync_enabled      boolean     not null default false,
   enabled_at        timestamptz,
   enabled_by_device text,
@@ -126,12 +215,12 @@ alter table public.sync_prefs enable row level security;
 -- Hệ quả đã biết và chấp nhận (design.md §8.1): lần bật ĐẦU TIÊN không liệt kê được máy nào, vì
 -- chưa máy nào từng sync. Màn xác nhận nói thẳng LUẬT thay vì bịa ra một danh sách.
 create table if not exists public.sync_devices (
-  user_id    uuid        not null references auth.users(id) on delete cascade,
+  profile_id uuid        not null references public.profiles(id) on delete cascade,
   device_id  text        not null,
   label      text,
   first_seen timestamptz not null default now(),
   last_seen  timestamptz not null default now(),
-  primary key (user_id, device_id)
+  primary key (profile_id, device_id)
 );
 
 alter table public.sync_devices enable row level security;
@@ -150,7 +239,7 @@ stable
 set search_path = ''
 as $$
   select coalesce(
-    (select p.sync_enabled from public.sync_prefs p where p.user_id = (select auth.uid())),
+    (select p.sync_enabled from public.sync_prefs p where p.profile_id = (select auth.uid())),
     false
   );
 $$;
@@ -160,7 +249,7 @@ revoke all on function public.volar_sync_enabled() from anon;
 grant execute on function public.volar_sync_enabled() to authenticated;
 
 -- HAI điều kiện, gộp làm một để policy đọc được bằng mắt và Postgres chỉ gọi một InitPlan.
--- Đây là hàm mà MỌI policy của `sync_tasks`/`sync_completions`/`sync_rejects` đi qua.
+-- Đây là hàm mà MỌI policy của `tasks`/`completions`/`sync_rejects` đi qua.
 create or replace function public.volar_sync_allowed()
 returns boolean
 language sql
@@ -189,15 +278,15 @@ as $$
   select jsonb_build_object(
     'isPro',           public.volar_is_pro(),
     'syncEnabled',     public.volar_sync_enabled(),
-    'enabledAt',       (select p.enabled_at from public.sync_prefs p where p.user_id = (select auth.uid())),
-    'enabledByDevice', (select p.enabled_by_device from public.sync_prefs p where p.user_id = (select auth.uid())),
+    'enabledAt',       (select p.enabled_at from public.sync_prefs p where p.profile_id = (select auth.uid())),
+    'enabledByDevice', (select p.enabled_by_device from public.sync_prefs p where p.profile_id = (select auth.uid())),
     'devices',         coalesce(
                          (select jsonb_agg(jsonb_build_object(
                                    'deviceId', d.device_id,
                                    'label',    d.label,
                                    'lastSeen', d.last_seen)
                                  order by d.last_seen desc)
-                          from public.sync_devices d where d.user_id = (select auth.uid())),
+                          from public.sync_devices d where d.profile_id = (select auth.uid())),
                          '[]'::jsonb)
   );
 $$;
@@ -207,19 +296,19 @@ revoke all on function public.volar_sync_state() from anon;
 grant execute on function public.volar_sync_state() to authenticated;
 
 -- -----------------------------------------------------------------------------------------------
--- sync_tasks — một dòng cho mỗi task của mỗi user
+-- tasks — một dòng cho mỗi task của mỗi user
 -- -----------------------------------------------------------------------------------------------
--- PK là `(user_id, id)` chứ không phải `id` một mình: `id` do CLIENT sinh (UUID của
+-- PK là `(profile_id, id)` chứ không phải `id` một mình: `id` do CLIENT sinh (UUID của
 -- `VolarTask.id`), nên PK toàn cục sẽ để va chạm giữa hai user trở thành lỗi ghi — và bản thân
 -- việc "insert của tôi bị từ chối" đã là một kênh rò rỉ sự tồn tại. Composite PK làm va chạm liên
--- user trở thành bất khả, và mọi index tự nhiên có tiền tố `user_id`.
+-- user trở thành bất khả, và mọi index tự nhiên có tiền tố `profile_id`.
 --
 -- `payload` là JSONB nguyên khối, KHÔNG phải 25 cột: server đợt này là ống dẫn ngu, nó không đọc
 -- nội dung task. Đổi lại, shape Swift (đã đổi 6 lần trong 3 tuần) đổi được mà không cần migration
 -- production. Giá phải trả: chưa search/lọc phía server được — sau này promote vài cột ra là
 -- migration CỘNG THÊM, rẻ. `schema_version` để một reader tương lai biết mình đang nhìn shape nào.
-create table if not exists public.sync_tasks (
-  user_id           uuid        not null references auth.users(id) on delete cascade,
+create table if not exists public.tasks (
+  profile_id        uuid        not null references public.profiles(id) on delete cascade,
   id                uuid        not null,
   updated_at        timestamptz not null,
   deleted_at        timestamptz,
@@ -227,44 +316,44 @@ create table if not exists public.sync_tasks (
   schema_version    int         not null default 1,
   origin_device     text,
   server_updated_at timestamptz not null default now(),
-  primary key (user_id, id),
+  primary key (profile_id, id),
   -- `octet_length(payload::text)` chứ không `pg_column_size(payload)`: check constraint chỉ nhận
   -- hàm IMMUTABLE, và `pg_column_size` là STABLE (Postgres từ chối lúc tạo constraint).
-  constraint sync_tasks_payload_is_object check (jsonb_typeof(payload) = 'object'),
-  constraint sync_tasks_payload_size check (octet_length(payload::text) <= 65536)
+  constraint tasks_payload_is_object check (jsonb_typeof(payload) = 'object'),
+  constraint tasks_payload_size check (octet_length(payload::text) <= 65536)
 );
 
--- Index DUY NHẤT cần cho đường nóng: `where user_id = ? and server_updated_at > ? order by
+-- Index DUY NHẤT cần cho đường nóng: `where profile_id = ? and server_updated_at > ? order by
 -- server_updated_at limit N`. Cột đẳng thức trước, cột range sau (leftmost-prefix rule).
-create index if not exists sync_tasks_pull_idx
-  on public.sync_tasks (user_id, server_updated_at);
+create index if not exists tasks_pull_idx
+  on public.tasks (profile_id, server_updated_at);
 
-alter table public.sync_tasks enable row level security;
+alter table public.tasks enable row level security;
 
 -- -----------------------------------------------------------------------------------------------
--- sync_completions — nhật ký hoàn thành, CHỈ-THÊM
+-- completions — nhật ký hoàn thành, CHỈ-THÊM
 -- -----------------------------------------------------------------------------------------------
 -- Ánh xạ `CompletionEvent` (`Shared/Model/CompletionLog.swift`), bất biến từ lúc tạo. Vì không bao
 -- giờ update/delete, bảng này KHÔNG THỂ có xung đột: `on conflict do nothing` là toàn bộ chính
 -- sách merge. Watch vẫn cần chiều ghi lên (bấm xong trên watch phải đẻ ra event).
 -- Không có `deleted_at`: một sự kiện lịch sử không bị xoá, kể cả khi task nguồn đã xoá — đúng thiết
 -- kế sẵn có ("May dangle after the source task is deleted — by design", `CompletionLog.swift:17`).
-create table if not exists public.sync_completions (
-  user_id           uuid        not null references auth.users(id) on delete cascade,
+create table if not exists public.completions (
+  profile_id        uuid        not null references public.profiles(id) on delete cascade,
   id                uuid        not null,
   task_id           uuid        not null,
   completed_at      timestamptz not null,
   payload           jsonb       not null,
   server_updated_at timestamptz not null default now(),
-  primary key (user_id, id),
-  constraint sync_completions_payload_is_object check (jsonb_typeof(payload) = 'object'),
-  constraint sync_completions_payload_size check (octet_length(payload::text) <= 8192)
+  primary key (profile_id, id),
+  constraint completions_payload_is_object check (jsonb_typeof(payload) = 'object'),
+  constraint completions_payload_size check (octet_length(payload::text) <= 8192)
 );
 
-create index if not exists sync_completions_pull_idx
-  on public.sync_completions (user_id, server_updated_at);
+create index if not exists completions_pull_idx
+  on public.completions (profile_id, server_updated_at);
 
-alter table public.sync_completions enable row level security;
+alter table public.completions enable row level security;
 
 -- -----------------------------------------------------------------------------------------------
 -- sync_rejects — hộp đen của kẻ thua trong một xung đột LWW
@@ -277,18 +366,18 @@ alter table public.sync_completions enable row level security;
 -- vậy bảng này bị chặn tăng trưởng bởi tần suất xung đột thật, không bởi tần suất sync.
 -- Chưa có UI đọc nó (design.md §12) — dữ liệu không hoãn, mắt người thì hoãn.
 create table if not exists public.sync_rejects (
-  user_id       uuid        not null references auth.users(id) on delete cascade,
+  profile_id    uuid        not null references public.profiles(id) on delete cascade,
   id            uuid        not null default gen_random_uuid(),
   task_id       uuid        not null,
   updated_at    timestamptz not null,
   payload       jsonb       not null,
   origin_device text,
   rejected_at   timestamptz not null default now(),
-  primary key (user_id, id)
+  primary key (profile_id, id)
 );
 
 create index if not exists sync_rejects_task_idx
-  on public.sync_rejects (user_id, task_id, rejected_at);
+  on public.sync_rejects (profile_id, task_id, rejected_at);
 
 alter table public.sync_rejects enable row level security;
 
@@ -300,11 +389,11 @@ alter table public.sync_rejects enable row level security;
 -- Supabase và không cần grant tường minh.
 -- KHÔNG cấp `delete` cho bất kỳ bảng nào: xoá là `deleted_at`, và một hộp đen xoá được thì không
 -- còn là hộp đen.
-grant select, insert, update on public.sync_tasks       to authenticated;
-grant select, insert         on public.sync_completions to authenticated;
-grant select, insert         on public.sync_rejects     to authenticated;
-grant select, insert, update on public.sync_prefs       to authenticated;
-grant select, insert, update on public.sync_devices     to authenticated;
+grant select, insert, update on public.tasks        to authenticated;
+grant select, insert         on public.completions  to authenticated;
+grant select, insert         on public.sync_rejects to authenticated;
+grant select, insert, update on public.sync_prefs   to authenticated;
+grant select, insert, update on public.sync_devices to authenticated;
 
 -- `(select auth.uid())` bọc trong subquery là BẮT BUỘC, không phải thẩm mỹ: viết trần `auth.uid()`
 -- thì planner gọi lại nó cho TỪNG HÀNG; bọc `select` biến nó thành InitPlan tính đúng một lần
@@ -320,59 +409,59 @@ grant select, insert, update on public.sync_devices     to authenticated;
 -- lấy đi task của ai. Dữ liệu trên server GIỮ NGUYÊN vô thời hạn dù hết Pro hay tắt toggle; chỉ
 -- đường ống bị đóng. Muốn xoá thật thì phải gọi `volar_sync_purge()` — user chủ động, không tự động.
 
-drop policy if exists sync_tasks_select on public.sync_tasks;
-create policy sync_tasks_select on public.sync_tasks
+drop policy if exists tasks_select on public.tasks;
+create policy tasks_select on public.tasks
   for select to authenticated
-  using ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  using ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
-drop policy if exists sync_tasks_insert on public.sync_tasks;
-create policy sync_tasks_insert on public.sync_tasks
+drop policy if exists tasks_insert on public.tasks;
+create policy tasks_insert on public.tasks
   for insert to authenticated
-  with check ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  with check ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
 -- UPDATE cần CẢ `using` (được phép nhìn thấy hàng để sửa) LẪN `with check` (kết quả sau khi sửa
--- vẫn phải thuộc về mình). Thiếu `with check` là để user đổi `user_id` sang người khác.
-drop policy if exists sync_tasks_update on public.sync_tasks;
-create policy sync_tasks_update on public.sync_tasks
+-- vẫn phải thuộc về mình). Thiếu `with check` là để user đổi `profile_id` sang người khác.
+drop policy if exists tasks_update on public.tasks;
+create policy tasks_update on public.tasks
   for update to authenticated
-  using ((select auth.uid()) = user_id and (select public.volar_sync_allowed()))
-  with check ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  using ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()))
+  with check ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
-drop policy if exists sync_completions_select on public.sync_completions;
-create policy sync_completions_select on public.sync_completions
+drop policy if exists completions_select on public.completions;
+create policy completions_select on public.completions
   for select to authenticated
-  using ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  using ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
-drop policy if exists sync_completions_insert on public.sync_completions;
-create policy sync_completions_insert on public.sync_completions
+drop policy if exists completions_insert on public.completions;
+create policy completions_insert on public.completions
   for insert to authenticated
-  with check ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  with check ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
 drop policy if exists sync_rejects_select on public.sync_rejects;
 create policy sync_rejects_select on public.sync_rejects
   for select to authenticated
-  using ((select auth.uid()) = user_id);
+  using ((select auth.uid()) = profile_id);
 
 drop policy if exists sync_rejects_insert on public.sync_rejects;
 create policy sync_rejects_insert on public.sync_rejects
   for insert to authenticated
-  with check ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  with check ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
 drop policy if exists sync_devices_select on public.sync_devices;
 create policy sync_devices_select on public.sync_devices
   for select to authenticated
-  using ((select auth.uid()) = user_id);
+  using ((select auth.uid()) = profile_id);
 
 drop policy if exists sync_devices_insert on public.sync_devices;
 create policy sync_devices_insert on public.sync_devices
   for insert to authenticated
-  with check ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  with check ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
 drop policy if exists sync_devices_update on public.sync_devices;
 create policy sync_devices_update on public.sync_devices
   for update to authenticated
-  using ((select auth.uid()) = user_id and (select public.volar_sync_allowed()))
-  with check ((select auth.uid()) = user_id and (select public.volar_sync_allowed()));
+  using ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()))
+  with check ((select auth.uid()) = profile_id and (select public.volar_sync_allowed()));
 
 -- `sync_prefs` KHÔNG bị gate bởi `volar_sync_allowed()` — đó sẽ là một vòng lặp tự khoá:
 --   · SELECT không gate ⇒ mọi máy luôn đọc được trạng thái công tắc, kể cả khi đã tắt hoặc hết Pro.
@@ -383,22 +472,22 @@ create policy sync_devices_update on public.sync_devices
 drop policy if exists sync_prefs_select on public.sync_prefs;
 create policy sync_prefs_select on public.sync_prefs
   for select to authenticated
-  using ((select auth.uid()) = user_id);
+  using ((select auth.uid()) = profile_id);
 
 drop policy if exists sync_prefs_insert on public.sync_prefs;
 create policy sync_prefs_insert on public.sync_prefs
   for insert to authenticated
   with check (
-    (select auth.uid()) = user_id
+    (select auth.uid()) = profile_id
     and (sync_enabled is false or (select public.volar_is_pro()))
   );
 
 drop policy if exists sync_prefs_update on public.sync_prefs;
 create policy sync_prefs_update on public.sync_prefs
   for update to authenticated
-  using ((select auth.uid()) = user_id)
+  using ((select auth.uid()) = profile_id)
   with check (
-    (select auth.uid()) = user_id
+    (select auth.uid()) = profile_id
     and (sync_enabled is false or (select public.volar_is_pro()))
   );
 
@@ -425,7 +514,7 @@ begin
     raise exception 'sync_not_authenticated' using errcode = '28000';
   end if;
 
-  insert into public.sync_prefs as p (user_id, sync_enabled, enabled_at, enabled_by_device, updated_at)
+  insert into public.sync_prefs as p (profile_id, sync_enabled, enabled_at, enabled_by_device, updated_at)
   values (
     v_user,
     p_enabled,
@@ -433,7 +522,7 @@ begin
     case when p_enabled then p_device else null end,
     now()
   )
-  on conflict (user_id) do update
+  on conflict (profile_id) do update
     set sync_enabled      = excluded.sync_enabled,
         -- Giữ nguyên `enabled_at` cũ nếu vốn đã bật rồi (bật lại một công tắc đang bật không phải
         -- một lần bật mới) — màn Settings hiển thị "đã bật từ ..." nên mốc đó phải thật.
@@ -483,12 +572,12 @@ begin
     raise exception 'sync_not_authenticated' using errcode = '28000';
   end if;
 
-  delete from public.sync_tasks where user_id = v_user;
+  delete from public.tasks where profile_id = v_user;
   get diagnostics v_tasks = row_count;
-  delete from public.sync_completions where user_id = v_user;
+  delete from public.completions where profile_id = v_user;
   get diagnostics v_comps = row_count;
-  delete from public.sync_rejects  where user_id = v_user;
-  delete from public.sync_devices  where user_id = v_user;
+  delete from public.sync_rejects  where profile_id = v_user;
+  delete from public.sync_devices  where profile_id = v_user;
 
   return jsonb_build_object('deletedTasks', v_tasks, 'deletedCompletions', v_comps);
 end;
@@ -590,11 +679,11 @@ begin
     order by e ->> 'id', ((e ->> 'updatedAt')::timestamptz) desc
   ),
   applied as (
-    insert into public.sync_tasks as t
-      (user_id, id, updated_at, deleted_at, payload, schema_version, origin_device, server_updated_at)
+    insert into public.tasks as t
+      (profile_id, id, updated_at, deleted_at, payload, schema_version, origin_device, server_updated_at)
     select v_user, i.id, i.updated_at, i.deleted_at, i.payload, i.schema_version, p_device, now()
     from incoming i
-    on conflict (user_id, id) do update
+    on conflict (profile_id, id) do update
       set updated_at        = excluded.updated_at,
           deleted_at        = excluded.deleted_at,
           payload           = excluded.payload,
@@ -607,10 +696,10 @@ begin
   rejected as (
     -- Mọi CTE trong một câu lệnh nhìn CÙNG một snapshot, nên `cur` ở đây là giá trị TRƯỚC upsert.
     -- Với dòng không nằm trong `applied` thì trước == sau, nên so sánh này đúng.
-    insert into public.sync_rejects as sr (user_id, task_id, updated_at, payload, origin_device)
+    insert into public.sync_rejects as sr (profile_id, task_id, updated_at, payload, origin_device)
     select v_user, i.id, i.updated_at, i.payload, p_device
     from incoming i
-    join public.sync_tasks cur on cur.user_id = v_user and cur.id = i.id
+    join public.tasks cur on cur.profile_id = v_user and cur.id = i.id
     where i.id not in (select a.id from applied a)
       and cur.updated_at > i.updated_at
     returning sr.task_id
@@ -618,8 +707,8 @@ begin
   select coalesce(array_agg(r.task_id), '{}'::uuid[]) into v_rejected from rejected r;
 
   -- ── PUSH: completions (chỉ-thêm, không thể xung đột) ──────────────────────────────────────────
-  insert into public.sync_completions as c
-    (user_id, id, task_id, completed_at, payload, server_updated_at)
+  insert into public.completions as c
+    (profile_id, id, task_id, completed_at, payload, server_updated_at)
   select distinct on (e ->> 'id')
          v_user,
          (e ->> 'id')::uuid,
@@ -632,15 +721,15 @@ begin
     and (e ->> 'taskId') is not null
     and (e ->> 'completedAt') is not null
   order by e ->> 'id'
-  on conflict (user_id, id) do nothing;
+  on conflict (profile_id, id) do nothing;
 
   -- ── Ghi nhận máy này đã sync ──────────────────────────────────────────────────────────────────
   -- Chỉ ở ĐÂY, không ở đường nào khác: chỉ máy thật sự đồng bộ mới được ghi tên lên server. Xem
   -- doc của bảng `sync_devices` ở trên về lý do KHÔNG làm registry ping-lúc-khởi-động.
   if p_device is not null then
-    insert into public.sync_devices as d (user_id, device_id, label, first_seen, last_seen)
+    insert into public.sync_devices as d (profile_id, device_id, label, first_seen, last_seen)
     values (v_user, p_device, p_device_label, now(), now())
-    on conflict (user_id, device_id) do update
+    on conflict (profile_id, device_id) do update
       set last_seen = now(),
           label     = coalesce(excluded.label, d.label);
   end if;
@@ -651,8 +740,8 @@ begin
   with page as (
     select t.id, t.updated_at, t.deleted_at, t.payload, t.schema_version,
            t.server_updated_at, t.origin_device
-    from public.sync_tasks t
-    where t.user_id = v_user
+    from public.tasks t
+    where t.profile_id = v_user
       and t.server_updated_at > v_cur_tasks - interval '2 seconds'
     order by t.server_updated_at
     limit v_limit
@@ -680,8 +769,8 @@ begin
   -- ── PULL: completions ─────────────────────────────────────────────────────────────────────────
   with page as (
     select c.id, c.task_id, c.completed_at, c.payload, c.server_updated_at
-    from public.sync_completions c
-    where c.user_id = v_user
+    from public.completions c
+    where c.profile_id = v_user
       and c.server_updated_at > v_cur_comps - interval '2 seconds'
     order by c.server_updated_at
     limit v_limit
@@ -725,8 +814,8 @@ grant execute on function public.sync_exchange(timestamptz, timestamptz, text, t
 -- -----------------------------------------------------------------------------------------------
 -- NOTE (follow-up, KHÔNG implement ở đây) — cùng convention với 0002/0004
 -- -----------------------------------------------------------------------------------------------
--- 1. `sync_tasks` tombstone không bao giờ được dọn. Cần pg_cron:
---       delete from public.sync_tasks
+-- 1. `tasks` tombstone không bao giờ được dọn. Cần pg_cron:
+--       delete from public.tasks
 --        where deleted_at is not null and deleted_at < now() - interval '90 days';
 --    90 ngày là cố ý dài hơn mọi khoảng offline hợp lý. Hệ quả đã biết và CHẤP NHẬN: một máy offline
 --    >90 ngày rồi online lại sẽ HỒI SINH những task nó đã xoá lúc offline — hướng lệch an toàn
