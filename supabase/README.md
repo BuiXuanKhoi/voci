@@ -21,7 +21,8 @@ supabase/
 │   ├── 0001_parse_quota.sql                    # SUPERSEDED — old device-keyed tables, dropped by 0002
 │   ├── 0002_accounts_entitlements.sql          # entitlements (SUPERSEDED shape, see 0003) + usage_counters + consume_quota RPC
 │   ├── 0003_entitlements_multi_source.sql      # entitlements -> one row per (user_id, source); current shape, see "Auth design" below
-│   └── 0004_promo_codes.sql                    # promo_codes / promo_redemptions / promo_attempts + redeem_promo_code RPC; adds 'promo' to entitlements.source
+│   ├── 0004_promo_codes.sql                    # promo_codes / promo_redemptions / promo_attempts + redeem_promo_code RPC; adds 'promo' to entitlements.source
+│   └── 0005_sync_tasks.sql                     # ⚠️ WRITTEN, NOT APPLIED — multi-device sync; see below
 └── functions/
     ├── parse/index.ts         # the parse/breakdown route
     ├── groq/index.ts          # the Groq Speech-to-Text proxy route (both tiers, tiered daily cap)
@@ -30,6 +31,34 @@ supabase/
     └── _shared/               # auth.ts, appstore.ts, quota.ts, schema.ts, gemini.ts, env.ts,
                                 # log.ts, http.ts
 ```
+
+## ⚠️ `0005_sync_tasks.sql` — written, deliberately NOT applied
+
+Design: `../specs/008-sync/design.md` (Opus, 2026-08-09). It adds five tables — `sync_tasks`,
+`sync_completions`, `sync_rejects`, `sync_prefs` (the account-level sync toggle), `sync_devices` —
+plus five RPCs that clients call directly under `POST /rest/v1/rpc/…`: `sync_exchange` (push and
+pull in one transaction), `volar_sync_state`, `volar_set_sync_enabled`, `volar_sync_purge`, and the
+policy helper `volar_sync_allowed`.
+
+Sync is **opt-in**, and the gate is two conditions, not one: `volar_is_pro() AND
+volar_sync_enabled()`. The toggle is per **account**, lives in the database rather than in
+`UserDefaults`, and is enforced inside the RLS policies — so a device that has been offline since
+the user switched sync off on another device still cannot write.
+
+It is **not applied and not deployed**, and must not be until anh Khôi signs off on the design (the
+open questions are listed at the end of that document). Two things about it deviate from every
+earlier migration and are the reason it needs a decision, not just a `db push`:
+
+1. It is the **first migration with real RLS policies**. Every earlier table uses "RLS on, zero
+   policies, service-role only". `sync_tasks` holds task titles, notes, and verbatim speech
+   transcripts — the isolation boundary must be enforced by Postgres, not by remembering to write
+   `.eq("user_id", …)` in TypeScript.
+2. It is the **first path where the client talks to PostgREST directly** instead of going through an
+   Edge Function, and the first time the Pro gate lives in a policy rather than in client code.
+
+Applying it is also the moment task content starts living at rest on this server for the first
+time — `docs/app-store-privacy.md` and the App Store nutrition label must be re-derived before any
+build that enables sync ships.
 
 ## Deploy
 

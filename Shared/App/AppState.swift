@@ -1124,6 +1124,45 @@ final class AppState {
     /// `product.displayPrice` (never a hardcoded "$6.99" — wrong in every non-US storefront).
     var monthlyProduct: Product?
     var yearlyProduct: Product?
+
+    // MARK: - Sync (008-sync, client-contract.md §0 group C — mirrors `SyncAccountClient`
+    // (`Shared/Sync/SyncAccountState.swift`) the same way the properties above mirror
+    // `AccountService`/`Entitlements`: real state lives in a plain, non-`@MainActor` actor, this
+    // `@Observable` type mirrors just what the views need. `SyncState`/`SyncReject`/`SyncFailure`
+    // are pinned VERBATIM by group B's `Shared/Sync/SyncContracts.swift` — never redefined here.
+
+    /// Server truth about the account-level toggle. `.unknown` (all-false/empty, `isPro: false`)
+    /// until the first `refreshSyncState()` completes. Do NOT render any status line off this value
+    /// alone before checking `syncStateLoaded` below — `.unknown.isPro == false` would tell a real
+    /// Pro user "Sync is a Pro feature." for the brief window before the first fetch resolves, which
+    /// is exactly the false statement about their own account §8.2 exists to prevent (Opus review,
+    /// 2026-08-10: "im lặng tốt hơn sai").
+    var syncState: SyncState = .unknown
+    /// True once the first `refreshSyncState()` call has completed — success OR failure, set in a
+    /// `defer` so a failed first fetch still stops the UI from guessing. Both Settings screens MUST
+    /// gate `syncState`-derived status text on this flag: `false` renders NOTHING (no card content,
+    /// or a neutral "Checking…" placeholder), never a state guessed from `.unknown`'s all-false
+    /// defaults. This is the fix for the "Pro required" flash a real Pro user could otherwise see
+    /// for one frame at launch.
+    var syncStateLoaded = false
+    /// True while a sync-account action (`refreshSyncState`/`setSyncEnabled`/`purgeSyncData`) is in
+    /// flight — same "disable the button, don't let a slow network race into a double action" role
+    /// `accountBusy` plays above, kept as its OWN flag rather than reusing `accountBusy` because a
+    /// sync action and a purchase/sign-in action are unrelated and must be able to spin
+    /// independently (e.g. `SyncEnableSheet`'s CTA must not appear disabled just because an
+    /// unrelated `redeemPromoCode` call happens to be in flight).
+    var syncBusy = false
+    /// Text for the SMALL diagnostics line only, never a banner — and deliberately NEVER set for
+    /// `.proRequired`/`.disabled`/`.offline` (see `syncFailureMessage(_:)` below). Those three read
+    /// straight off `syncState`/silence instead, per client-contract.md §1 rule 2: no enum, no
+    /// string, no code path may collapse "needs Pro" / "toggle is off" / "no network" into one
+    /// generic "sync error" — that's exactly what trains a user to go flip a working toggle on
+    /// another device and debug wifi that was never broken.
+    var syncError: String?
+    /// `sync_rejects`, most recent first — populated by `loadSyncRejects()`, read by
+    /// `SyncRejectsView`. Empty (not `nil`) when nothing has ever been rejected, matching that
+    /// view's own empty-state handling.
+    var syncRejects: [SyncReject] = []
     /// T036 (phase5-contract.md §C, contract A `VoiceDone`, `Sources/Speech/VoiceDone.swift`,
     /// sibling-owned — landed). Pure/stateless matcher; constructed once here like every other
     /// collaborator on this line.
@@ -1489,6 +1528,18 @@ final class AppState {
         // every stored property is settled by this point, and this call captures `self`.
         startAccountLifecycle()
 
+        // 008-sync (client-contract.md §8): the FIRST of AppState's exactly-two direct touches of
+        // `SyncEngine` (group B) — attach the real `TaskStore` once, right where it's created, so
+        // `SyncEngine` has a `SyncTaskStoring` to read/write against for the rest of the app's life.
+        // No-op in the no-store fallback (previews/tests), same guard every store-backed feature in
+        // this init already uses. The second touch, `requestSync(reason: .localEdit)`, lives in
+        // `notifySyncOfLocalEdit()` (Account & Entitlements actions section) and fires from
+        // `syncCalendarMirror()`, not from here.
+        if let store {
+            SyncEngine.shared.attach(store: store)
+        }
+        refreshSyncState()
+
         // 006-cues-and-waiting (design.md §2 Việc B): registered ONCE here, in `init`, rather than
         // `activateServices()` — that method is deliberately called TWICE (main window's `.task` +
         // `AppDelegate.applicationDidFinishLaunching`, both documented idempotent for everything
@@ -1697,6 +1748,156 @@ final class AppState {
                 self.accountError = (error as? LocalizedError)?.errorDescription ?? "\(error)"
             }
         }
+    }
+
+    // MARK: - Sync actions (008-sync, client-contract.md §0 group C)
+    //
+    // Same shape as every Account action above: flip a busy flag, one `_Concurrency.Task`, await
+    // the actor call, mirror the result into the `@Observable` properties above, `defer` clears
+    // busy. client-contract.md §8 is explicit that AppState's ONLY two direct touches of
+    // `SyncEngine` (group B's push/pull engine) are `attach(store:)` once and `requestSync(reason:)`
+    // after a write — no polling timer belongs in this file, `SyncEngine` owns its own schedule.
+
+    /// Last successful `sync_exchange` completion, written by `SyncEngine` (group B) to
+    /// `UserDefaults` under the exact key client-contract.md §7 pins (`volar.sync.cursorTasks`'s
+    /// sibling, `volar.sync.lastSuccessAt`). This file only READS it, for the "last synced" line in
+    /// Settings — the key is spelled out as a literal (not a shared constant) because it's owned and
+    /// WRITTEN by `Shared/Sync/SyncEngine.swift`, a file this group does not touch; the literal is
+    /// pinned by the contract doc, so both sides agree on it without either owning the other's file.
+    var lastSyncSuccessAt: Date? {
+        UserDefaults.standard.object(forKey: "volar.sync.lastSuccessAt") as? Date
+    }
+
+    /// Group C's own text for a caught `SyncFailure` (or any other error) from a `SyncAccountClient`
+    /// call. Deliberately does NOT reuse the generic `(error as? LocalizedError)?.errorDescription
+    /// ?? "\(error)"` fallback every OTHER Account action above uses — that pattern is exactly the
+    /// "gộp thành một thông báo sync lỗi" bug client-contract.md §1 rule 2 forbids. `.proRequired`/
+    /// `.disabled` never reach the UI as an error string at all: `SettingsView`/`SettingsIOSView`
+    /// read `syncState.settingsStatusLine` (`SyncAccountState.swift`) directly instead, because
+    /// those two are STATES, not failures. `.offline` is silent by design (client-contract.md §3.3)
+    /// — returning `nil` here is what keeps it silent even if a caller forgets to special-case it.
+    /// Only `.signedOut`/`.server` ever produce visible text, and only in the small diagnostics line
+    /// this property feeds (`syncError`), never a banner.
+    private static func syncFailureMessage(_ error: Error) -> String? {
+        guard let failure = error as? SyncFailure else {
+            return (error as? LocalizedError)?.errorDescription ?? "\(error)"
+        }
+        switch failure {
+        case .proRequired, .disabled:
+            return nil
+        case .offline:
+            return nil
+        case .signedOut:
+            return "Sign in to manage sync."
+        case .server(let status, let message):
+            return "Sync server error (\(status))\(message.map { ": \($0)" } ?? "")."
+        }
+    }
+
+    /// Reads the account-level toggle. Called at launch and at foreground (same two moments
+    /// `startAccountLifecycle()`/`refreshAccountState()` already care about) — `SyncAccountClient
+    /// .fetchState()` hits `volar_sync_state()`, which is deliberately UNGATED server-side (design.md
+    /// §8.2) so this call can succeed and explain WHY even when Pro has lapsed or the toggle is off
+    /// elsewhere, rather than 403ing into "network error."
+    func refreshSyncState() {
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            // Success OR failure both count as "asked" — a failed first fetch must stop the UI from
+            // guessing just as much as a successful one does (Opus review, 2026-08-10).
+            defer { self.syncStateLoaded = true }
+            do {
+                self.syncState = try await SyncAccountClient.shared.fetchState()
+            } catch {
+                self.syncError = Self.syncFailureMessage(error)
+            }
+        }
+    }
+
+    /// `SettingsView`'s toggle calls this directly for OFF (always allowed, no confirmation needed —
+    /// design.md §8.3: "tắt thì LUÔN được, kể cả đã hết Pro"). For ON, the caller is `SyncEnableSheet`
+    /// AFTER the user confirms — this method itself does not gate on `syncState.isPro` because the
+    /// server-side RLS policy on `sync_prefs` is the real gate (client-contract.md §3.3's table);
+    /// calling with `enabled: true` while not Pro just round-trips a `.proRequired` this method
+    /// reports through `syncError` like any other failure — see `syncFailureMessage(_:)`.
+    ///
+    /// Device label comes from `SyncEngine.shared.deviceLabel` (group B, client-contract.md §7), NOT
+    /// a locally-built string — this label lands in `sync_prefs.enabled_by_device`, and `SyncEngine`
+    /// sends its OWN label into `sync_devices` via `sync_exchange`'s `p_device_label`. Two
+    /// independently-built formulas for "this device's name" would let Settings call the same
+    /// machine two different things right next to each other on screen (Opus review, 2026-08-10) —
+    /// there must be exactly one source for that string.
+    func setSyncEnabled(_ enabled: Bool) {
+        syncBusy = true
+        syncError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.syncBusy = false }
+            do {
+                self.syncState = try await SyncAccountClient.shared.setEnabled(
+                    enabled, deviceLabel: SyncEngine.shared.deviceLabel
+                )
+            } catch {
+                self.syncError = Self.syncFailureMessage(error)
+            }
+        }
+    }
+
+    /// The ONE path that deletes sync data server-side (`volar_sync_purge()`) — no job calls this,
+    /// turning the toggle off does not call this, only a user tapping "Delete data on server" does
+    /// (design.md §8.3). Never touches local data: `TaskStore`/`tasks` are untouched by this method
+    /// regardless of outcome — Settings' confirmation copy for this button must say that plainly.
+    func purgeSyncData() {
+        syncBusy = true
+        syncError = nil
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.syncBusy = false }
+            do {
+                _ = try await SyncAccountClient.shared.purge()
+                self.refreshSyncState()
+            } catch {
+                self.syncError = Self.syncFailureMessage(error)
+            }
+        }
+    }
+
+    /// Populates `syncRejects` for `SyncRejectsView`. Read-only, no busy flag of its own (the view
+    /// shows its own empty state while `syncRejects` is still `[]`) — matches how this list is
+    /// explicitly NOT part of the account-action busy/error story above (client-contract.md §9: read
+    /// path only, v1 has no way to act on a reject).
+    func loadSyncRejects() {
+        _Concurrency.Task { @MainActor [weak self] in
+            guard let self else { return }
+            do {
+                self.syncRejects = try await SyncAccountClient.shared.fetchRejects(limit: 200)
+            } catch {
+                if case SyncFailure.offline = error { return }
+                self.syncError = Self.syncFailureMessage(error)
+            }
+        }
+    }
+
+    /// Signals `SyncEngine` (group B) that a local write just happened — the debounced-push half of
+    /// client-contract.md §8's "exactly two calls." Called from `syncCalendarMirror()` below, the
+    /// ONE existing choke point every task-list mutation in this file already funnels through (see
+    /// that method's own doc comment) — deliberately NOT called from all ~15 individual mutator call
+    /// sites: `syncCalendarMirror()` already IS "a task just changed, fan out the side effects" for
+    /// this whole file, so adding a second, parallel fan-out list here would just be two lists that
+    /// could drift apart. This one line is the sole reason `syncCalendarMirror()` — which otherwise
+    /// belongs entirely to the calendar-mirror feature, not this one — gets touched outside this
+    /// section; flagged here explicitly since it's the one deliberate exception to "only touch the
+    /// Account & Entitlements section" in this file.
+    ///
+    /// SAFE EVEN IF THIS METHOD (or `syncCalendarMirror()` itself) ever misses a write path: the
+    /// push queue is a DIRTY FLAG on each row (`isPendingSync`, design.md §7), not an event log —
+    /// `pendingForSync` sweeps the whole store on every sync cycle regardless of whether anyone
+    /// called `requestSync`. A write that doesn't reach this call loses nothing; it just rides the
+    /// next poll (worst case ~30s per `SyncEngine`'s own schedule). `requestSync` only shaves that
+    /// latency down — it is never the thing standing between a write and it eventually syncing, so
+    /// this single call site does not need to be audited against every mutator in this file (Opus
+    /// review, 2026-08-10).
+    private func notifySyncOfLocalEdit() {
+        SyncEngine.shared.requestSync(reason: .localEdit)
     }
 
     // MARK: - Derived task groupings
@@ -2155,6 +2356,15 @@ final class AppState {
     /// (see that method's own early guards, `CalendarSync.swift`).
     private func syncCalendarMirror() {
         calendarSync.reconcile(tasks: tasks)
+        // 008-sync (client-contract.md §8): the SECOND of AppState's exactly-two direct touches of
+        // `SyncEngine` — signal a local write happened. Deliberately placed here, not at each of the
+        // ~15 individual call sites below, because this method is already documented (see its own
+        // header comment two lines up) as "the single seam every task-list mutation choke point ...
+        // calls through" — the one true fan-out point for "a task just changed" in this file. Added
+        // here rather than confined to the Account & Entitlements section — see
+        // `notifySyncOfLocalEdit()`'s own doc comment for why that's a deliberate, single-line
+        // exception rather than an oversight.
+        notifySyncOfLocalEdit()
     }
 
     /// Settings' mirror toggle routes here (never straight to `calendarSync.setMirrorEnabled(_:)`)

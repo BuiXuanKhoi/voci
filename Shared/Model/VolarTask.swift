@@ -138,6 +138,32 @@ final class VolarTask {
     /// `recurrenceData` et al. already rely on, so risk here is materially lower).
     private var cueData: Data?
 
+    // MARK: - Sync metadata (specs/008-sync/client-contract.md §2/§4/§7, design.md §7)
+    //
+    // These three are deliberately NOT threaded through `TaskItem`/`asTaskItem`/`apply(_:)` below
+    // (same "persisted-model-only" seam `isSensitive` above already established) — they are
+    // metadata ABOUT a row, not content of it, and `SyncEngine` (group B) reads/writes them only
+    // via `TaskStore`'s `SyncTaskStoring` conformance, never through the `TaskItem` shape.
+
+    /// The row's logical clock. Stamped in EXACTLY one place, `TaskStore.save()` (client-contract
+    /// §4) — no mutator in `TaskStore.swift` ever assigns this directly. `Date(timeIntervalSince1970:
+    /// 0)` (the literal default, not a static-property reference, matching this file's lightweight-
+    /// migration convention above) means "written before sync existed, never backfilled yet";
+    /// `TaskStore.fetchAll()` backfills it once to `completedAt ?? createdAt`, the same one-time-
+    /// migration shape as `foldLegacyDependsOn()` above.
+    var updatedAt: Date = Date(timeIntervalSince1970: 0)
+    /// Non-nil = this row is a tombstone (`TaskStore.delete(_:)`, client-contract §5). The row
+    /// stays on disk — soft-delete, not `context.delete` — so an offline device that pulls this
+    /// later can apply it instead of reading "gone" as "never existed" and pushing a stale revival.
+    var deletedAt: Date?
+    /// The `updatedAt` value the server has last confirmed for this row, set by
+    /// `TaskStore.markSynced(_:)`. `nil` until the row is pushed for the first time.
+    var syncedAt: Date?
+
+    /// True while this row still needs pushing: either never confirmed at all, or edited again
+    /// since the last confirmation. `SyncTaskStoring.pendingForSync` is the sole reader of this.
+    var isPendingSync: Bool { syncedAt == nil || syncedAt! < updatedAt }
+
     init(
         id: UUID = UUID(),
         title: String,

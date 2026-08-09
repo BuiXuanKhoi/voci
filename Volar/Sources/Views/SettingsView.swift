@@ -111,6 +111,14 @@ struct SettingsView: View {
     /// `.sheet(isPresented: $showPaywall, onDismiss:)` on `accountTab` for the whole reasoning.
     @State private var pendingSignInAfterPaywall = false
 
+    // 008-sync (client-contract.md §0 group C) — same "purely local UI state, real state lives on
+    // AppState" split as every other Account `@State` above. `showSyncEnableSheet` drives
+    // `SyncEnableSheet` (the confirmation screen — never skipped when turning sync ON); turning it
+    // OFF needs no confirmation (design.md §8.3) and calls `appState.setSyncEnabled(false)` directly.
+    @State private var showSyncEnableSheet = false
+    @State private var showSyncRejects = false
+    @State private var showSyncPurgeConfirm = false
+
     @Environment(AppState.self) private var appState
     // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
     // VolarApp.swift) — the guided-tour overlay (agent A, Views/Tour/*) lives IN the main window,
@@ -1148,6 +1156,13 @@ struct SettingsView: View {
                 .foregroundStyle(solid ? .white : VolarColor.textPri)
                 .padding(.horizontal, 14)
                 .frame(height: 30)
+                // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09, commit
+                // `356b72f`) — `.background`/`.overlay` ngay dưới đây nằm NGOÀI `Button`, cùng họ
+                // bug commit đó sửa ở 8 file khác. Đây là helper DÙNG CHUNG cho mọi nút pill trong
+                // cả tab Account (Restore Purchases, Sign out, Redeem, ...) lẫn hai nút sync mới
+                // (008-sync) — bỏ sót trong đợt quét trước vì nó nằm sau một hàm helper thay vì
+                // trực tiếp trong view, không phải vì nó không thuộc cùng họ lỗi.
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(solid ? accentColors.solid : VolarColor.surfaceHi)
@@ -1228,6 +1243,9 @@ struct SettingsView: View {
     private var accountTab: some View {
         VStack(spacing: 12) {
             accountCard
+            if appState.accountEmail != nil {
+                syncCard
+            }
         }
         // `onNeedSignIn`: the paywall's own CTA routes here instead of attempting a doomed purchase
         // while signed out (`Entitlements.purchase` throws `.notSignedIn` — see `PaywallView`'s doc
@@ -1253,6 +1271,18 @@ struct SettingsView: View {
         }
         .sheet(isPresented: $showSignInSheet) {
             SignInSheet()
+        }
+        .sheet(isPresented: $showSyncEnableSheet) {
+            SyncEnableSheet()
+        }
+        .sheet(isPresented: $showSyncRejects) {
+            SyncRejectsView()
+        }
+        // Refetches every time this tab is shown — same "always re-read live state, never trust a
+        // stale value" reasoning as `.onAppear { loginItemStatus = LoginItem.status }` on `body`
+        // above: another device could have flipped this account's toggle since Settings last opened.
+        .onAppear {
+            appState.refreshSyncState()
         }
     }
 
@@ -1295,6 +1325,167 @@ struct SettingsView: View {
         .background(VolarColor.card)
         .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
         .volarHairline(cornerRadius: 11)
+    }
+
+    // MARK: - Sync (008-sync, client-contract.md §0 group C)
+    //
+    // Signed-in only (see `accountTab`'s guard above) — the toggle is an account-level property, so
+    // it's meaningless to show before there's an account to attach it to. Same
+    // "one `VolarColor.card` block" shape as `accountCard`/`claudeCodeCard` above.
+
+    private var syncCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Sync across devices")
+                    .font(.system(size: 13.5, weight: .medium))
+                    .foregroundStyle(VolarColor.textPri)
+                Text("Keeps this Mac's tasks in step with every other device signed in to this account.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineSpacing(2)
+            }
+
+            Toggle(isOn: syncToggleBinding) {
+                Text("Sync across devices")
+            }
+            .labelsHidden()
+            .toggleStyle(.switch)
+            // Rule 3 (task brief): tắt thì LUÔN được, kể cả đã hết Pro — NEVER `.disabled` this
+            // toggle based on `syncState.isPro`. The only thing allowed to disable it is an
+            // in-flight request or the state not having loaded yet (see `syncStateLoaded` below),
+            // same as every other Account control on this tab.
+            .disabled(appState.syncBusy || !appState.syncStateLoaded)
+
+            // THREE distinct lines, matching client-contract.md §3.3's table exactly — never
+            // collapsed into one "sync error" string:
+            //   · not Pro / toggle off  -> `SyncState.settingsStatusLine` (informational tone,
+            //     `VolarColor.textSec`, NOT `reschedule`/`destruct` — this is a STATE, not an error)
+            //   · offline               -> shows NOTHING (silently omitted below)
+            //   · real server/signed-out failure -> `appState.syncError`, in the warning tone every
+            //     other inline error on this tab already uses
+            //
+            // GATED on `syncStateLoaded`: before the first `refreshSyncState()` resolves,
+            // `syncState` is still `.unknown` (`isPro: false`) — rendering `settingsStatusLine` off
+            // that would tell a real Pro user "Sync is a Pro feature." for one frame, which is
+            // exactly the false-statement-about-their-account bug §8.2 exists to prevent. Show
+            // nothing at all until we actually know (Opus review, 2026-08-10: "im lặng tốt hơn sai").
+            if appState.syncStateLoaded {
+                if let statusLine = appState.syncState.settingsStatusLine {
+                    Text(statusLine)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(VolarColor.textSec)
+                } else {
+                    syncEnabledSummary
+                }
+            }
+
+            if let syncError = appState.syncError {
+                Text(syncError)
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.reschedule)
+                    .lineLimit(3)
+            }
+
+            if appState.syncState.syncEnabled {
+                syncDeviceList
+            }
+
+            HStack(spacing: 8) {
+                settingsPillButton("View lost edits") { showSyncRejects = true }
+            }
+
+            // Styled like `signedInAccountBody`'s "Delete account" button (its own `role:
+            // .destructive` Button below, not `settingsPillButton`) rather than a neutral pill —
+            // `VolarColor.destruct` is explicitly allowed for an irreversible action button (task
+            // brief: "destruct chỉ dành cho hành động huỷ diệt không đảo được (nút purge thì
+            // được)"), and this button IS that action: it's the one and only path that deletes
+            // anything on the server (design.md §8.3).
+            Button("Delete data on server", role: .destructive) {
+                showSyncPurgeConfirm = true
+            }
+            .buttonStyle(.plain)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(VolarColor.destruct)
+            .disabled(appState.syncBusy)
+        }
+        .padding(16)
+        .background(VolarColor.card)
+        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
+        .volarHairline(cornerRadius: 11)
+        .confirmationDialog(
+            "Delete this account's data on Volar's server? Your tasks on THIS Mac (and every other signed-in device) are not touched — this only clears the server-side copy. Sync will start re-uploading from whatever devices are still syncing.",
+            isPresented: $showSyncPurgeConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("Delete server data", role: .destructive) { appState.purgeSyncData() }
+            Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    /// Turning ON routes through `SyncEnableSheet` (never a silent flip — design.md §8.1's
+    /// confirmation is mandatory) — but ONLY when the account is actually Pro. A non-Pro attempt is
+    /// a client-side no-op rather than letting the sheet round-trip to the server and land on a
+    /// generic RLS-violation message: `volar_set_sync_enabled`'s failure path (an RLS rejection on
+    /// `sync_prefs`, not a `raise exception`) doesn't carry the friendly `sync_pro_required` string
+    /// `sync_exchange` does, so a real attempt here would surface as an opaque `.server` error
+    /// instead of the clean "Sync is a Pro feature." line — which `syncCard`'s status line already
+    /// shows, so the toggle not moving reads as "explained above," not as "broken." Turning OFF
+    /// calls straight through: design.md §8.3 says it's always allowed and needs no confirmation,
+    /// and it deletes nothing either way.
+    private var syncToggleBinding: Binding<Bool> {
+        Binding(
+            get: { appState.syncState.syncEnabled },
+            set: { newValue in
+                if newValue {
+                    guard appState.syncState.isPro else { return }
+                    showSyncEnableSheet = true
+                } else {
+                    appState.setSyncEnabled(false)
+                }
+            }
+        )
+    }
+
+    private var syncEnabledSummary: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let enabledAt = appState.syncState.enabledAt {
+                Text("Enabled since \(enabledAt.formatted(date: .abbreviated, time: .omitted))")
+            }
+            if let device = appState.syncState.enabledByDevice {
+                Text("Turned on from \(device)")
+            }
+            if let lastSync = appState.lastSyncSuccessAt {
+                Text("Last synced \(lastSync.formatted(date: .omitted, time: .shortened))")
+            }
+        }
+        .font(Font.volarMono(size: 11))
+        .monospacedDigit()
+        // Informational, not the NOW spotlight — `instrument` (ice blue) is exactly the token this
+        // theme reserves for readouts like this one (Theme.swift: "Trạng thái thông tin dùng
+        // VolarColor.instrument (ice blue)"); `nowAccent` never appears outside the NOW task.
+        .foregroundStyle(VolarColor.instrument)
+    }
+
+    private var syncDeviceList: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Devices")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(VolarColor.textMut)
+            ForEach(appState.syncState.devices) { device in
+                HStack(spacing: 6) {
+                    Text(device.label ?? "Unknown device")
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(VolarColor.textSec)
+                    Spacer(minLength: 8)
+                    if let lastSeen = device.lastSeen {
+                        Text(lastSeen.formatted(date: .abbreviated, time: .omitted))
+                            .font(Font.volarMono(size: 10.5))
+                            .monospacedDigit()
+                            .foregroundStyle(VolarColor.textMut)
+                    }
+                }
+            }
+        }
     }
 
     /// The email-OTP form itself now lives in exactly one place, `EmailSignInForm.swift` — this

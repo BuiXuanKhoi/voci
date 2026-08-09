@@ -1,0 +1,172 @@
+// Tests/SyncMergeTests.swift — XCTest coverage for the pure decision surface in
+// `Shared/Sync/SyncMerge.swift`: LWW (`decide`), HTTP failure classification (`classify`), and
+// opaque-cursor advance (`nextCursor`). Every test drives the `enum SyncMerge`'s static functions
+// directly with hand-built values — no `URLSession`/`ModelContext`/`Date()` involved, mirroring
+// `CueFiringTests`/`WaitingModeTests`'s own "drive the pure function directly" style.
+//
+// Group D (Test) — written against code already on disk by groups A/B/C
+// (specs/008-sync/client-contract.md §0). Does NOT touch `Shared/Sync/*.swift` itself.
+//
+// UNVERIFIED (written entirely on Windows — no Xcode/xcodegen/simulator available here): confirm
+// on Mac that `xcodebuild test` picks this file up and every assertion below still holds once
+// compiled for real.
+import XCTest
+import Foundation
+@testable import Volar
+
+final class SyncMergeTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+
+    // MARK: - decide(localUpdatedAt:remoteUpdatedAt:) — client-contract.md §4, design.md §5
+
+    func testDecideLocalNilAlwaysApplies() {
+        // Never seen locally at all (brand-new pull) — nothing to compare against.
+        let decision = SyncMerge.decide(localUpdatedAt: nil, remoteUpdatedAt: now)
+        XCTAssertEqual(decision, .apply)
+    }
+
+    func testDecideRemoteNewerThanLocalApplies() {
+        let local = now
+        let remote = now.addingTimeInterval(1)
+        XCTAssertEqual(SyncMerge.decide(localUpdatedAt: local, remoteUpdatedAt: remote), .apply)
+    }
+
+    /// The ping-pong guard: an EQUAL timestamp is a no-op re-delivery (the 2-second overlap window
+    /// in `sync_exchange`'s SQL is expected to resend already-applied rows), never a conflict to
+    /// re-resolve. Getting this wrong (`>=` instead of `>`, or vice versa applied to the wrong
+    /// side) is exactly the bug that makes two devices push the same row back and forth forever —
+    /// this case gets its own test per client-contract.md's explicit call-out, not folded into the
+    /// "older" case below.
+    func testDecideEqualTimestampsSkipsNotApply() {
+        let same = now
+        XCTAssertEqual(SyncMerge.decide(localUpdatedAt: same, remoteUpdatedAt: same), .skip)
+    }
+
+    func testDecideRemoteOlderThanLocalSkips() {
+        let local = now
+        let remote = now.addingTimeInterval(-1)
+        XCTAssertEqual(SyncMerge.decide(localUpdatedAt: local, remoteUpdatedAt: remote), .skip)
+    }
+
+    // MARK: - classify(status:message:transportError:) — client-contract.md §3.3's ONE lookup table
+    //
+    // All five rows of the table, one test each, plus the disjointness guarantee §8.2 depends on.
+
+    func testClassify403ProRequiredMapsToProRequired() {
+        let failure = SyncMerge.classify(status: 403, message: "sync_pro_required", transportError: nil)
+        XCTAssertEqual(failure, .proRequired)
+    }
+
+    func testClassify403DisabledMapsToDisabled() {
+        let failure = SyncMerge.classify(status: 403, message: "sync_disabled", transportError: nil)
+        XCTAssertEqual(failure, .disabled)
+    }
+
+    func testClassify401MapsToSignedOutRegardlessOfMessage() {
+        // Doc comment: PostgREST can 401 for reasons that never reach `sync_exchange`'s own
+        // `raise exception 'sync_not_authenticated'` (e.g. an already-expired JWT) — every 401
+        // means the same thing to this client, so this must hold even with the "official" message
+        // AND with no message at all.
+        XCTAssertEqual(
+            SyncMerge.classify(status: 401, message: "sync_not_authenticated", transportError: nil),
+            .signedOut
+        )
+        XCTAssertEqual(SyncMerge.classify(status: 401, message: nil, transportError: nil), .signedOut)
+    }
+
+    func testClassifyTransportFailureMapsToOffline() {
+        struct DummyTransportError: Error {}
+        let failure = SyncMerge.classify(status: nil, message: nil, transportError: DummyTransportError())
+        guard case .offline = failure else {
+            return XCTFail("expected .offline, got \(failure)")
+        }
+    }
+
+    func testClassifyNoResponseAndNoTransportErrorStillMapsToOffline() {
+        // Defensive tolerance the doc comment calls out explicitly: a caller bug (no status, no
+        // error) must still produce SOME `SyncFailure`, never throw/crash.
+        let failure = SyncMerge.classify(status: nil, message: nil, transportError: nil)
+        guard case .offline = failure else {
+            return XCTFail("expected .offline, got \(failure)")
+        }
+    }
+
+    func testClassifyOtherStatusMapsToServer() {
+        XCTAssertEqual(
+            SyncMerge.classify(status: 500, message: "internal error", transportError: nil),
+            .server(status: 500, message: "internal error")
+        )
+    }
+
+    func testClassify403WithUnrecognizedMessageMapsToServerNotProOrDisabled() {
+        // A 403 with any message OTHER than the two exact strings this app raises on purpose falls
+        // through to `.server` — it must NOT be guessed into `.proRequired`/`.disabled`.
+        let failure = SyncMerge.classify(status: 403, message: "some_other_reason", transportError: nil)
+        XCTAssertEqual(failure, .server(status: 403, message: "some_other_reason"))
+    }
+
+    /// §8.2's central guarantee, stated as its own test rather than left implicit in the table
+    /// tests above: `.disabled` and `.proRequired` are never equal to each other, and there is no
+    /// input — including one that deliberately tries to LOOK like a gate rejection while actually
+    /// being a transport failure — that classifies as either of them from the offline path. This
+    /// is the exact property "gộp cả ba... là cách chắc chắn nhất để user tắt công tắc ở máy khác
+    /// rồi ngồi debug wifi" (contract §3.3) depends on staying true after future edits.
+    func testDisabledAndProRequiredAreNeverEqualAndOfflineNeverBecomesEither() {
+        XCTAssertNotEqual(SyncFailure.disabled, SyncFailure.proRequired)
+
+        struct DummyTransportError: Error {}
+        // `status: nil` — a transport failure — with a message that HAPPENS to spell one of the
+        // two magic gate strings must still resolve purely from the absent status, never from the
+        // message text alone.
+        let lookalike1 = SyncMerge.classify(
+            status: nil, message: "sync_disabled", transportError: DummyTransportError()
+        )
+        let lookalike2 = SyncMerge.classify(
+            status: nil, message: "sync_pro_required", transportError: DummyTransportError()
+        )
+        XCTAssertNotEqual(lookalike1, .disabled)
+        XCTAssertNotEqual(lookalike1, .proRequired)
+        XCTAssertNotEqual(lookalike2, .disabled)
+        XCTAssertNotEqual(lookalike2, .proRequired)
+        guard case .offline = lookalike1 else { return XCTFail("expected .offline, got \(lookalike1)") }
+        guard case .offline = lookalike2 else { return XCTFail("expected .offline, got \(lookalike2)") }
+    }
+
+    // MARK: - nextCursor(previous:candidate:) — client-contract.md §6, §3.1's `hasMore` note
+
+    func testNextCursorBothNilStaysNil() {
+        XCTAssertNil(SyncMerge.nextCursor(previous: nil, candidate: nil))
+    }
+
+    func testNextCursorCandidateNilKeepsPrevious() {
+        XCTAssertEqual(SyncMerge.nextCursor(previous: "2026-08-09T10:00:00.000000+00:00", candidate: nil), "2026-08-09T10:00:00.000000+00:00")
+    }
+
+    func testNextCursorPreviousNilAdoptsCandidate() {
+        XCTAssertEqual(SyncMerge.nextCursor(previous: nil, candidate: "2026-08-09T10:00:00.000000+00:00"), "2026-08-09T10:00:00.000000+00:00")
+    }
+
+    func testNextCursorCandidateAheadOfPreviousAdvances() {
+        let previous = "2026-08-09T10:00:00.000000+00:00"
+        let candidate = "2026-08-09T10:00:05.000000+00:00"
+        XCTAssertEqual(SyncMerge.nextCursor(previous: previous, candidate: candidate), candidate)
+    }
+
+    func testNextCursorCandidateEqualToPreviousStaysAtCandidate() {
+        // `>=`, not `>` — an unchanged cursor round-tripped back must not be treated as regression.
+        let value = "2026-08-09T10:00:00.000000+00:00"
+        XCTAssertEqual(SyncMerge.nextCursor(previous: value, candidate: value), value)
+    }
+
+    /// The one case client-contract.md §4b's whole "never lose data" story depends on at the
+    /// cursor layer: a candidate that is LEXICALLY BEHIND the stored previous value (a
+    /// misbehaving/rolled-back server, or two responses applied out of order) must never regress
+    /// the cursor — regressing it would make the client re-request rows it has already applied,
+    /// which is harmless, but the DANGEROUS mirror image (silently accepting a bad forward jump)
+    /// is exactly what this guard exists to block.
+    func testNextCursorCandidateBehindPreviousKeepsPrevious() {
+        let previous = "2026-08-09T10:00:05.000000+00:00"
+        let candidate = "2026-08-09T10:00:00.000000+00:00" // lexically (and chronologically) earlier
+        XCTAssertEqual(SyncMerge.nextCursor(previous: previous, candidate: candidate), previous)
+    }
+}

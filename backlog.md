@@ -16,6 +16,12 @@
 > - **Vì sao lọt lưới:** cùng lý do bug `maxItems` — bug này nằm sau bug 400, envelope chưa bao giờ chạy tới nơi nên không ai thấy. Sửa 400 xong nó mới lộ. **Hai bug production liên tiếp trong cùng một đường code chưa từng chạy sống ⇒ luật mới: contract có ≥2 nguồn sự thật (schema hint / validator / prose prompt) thì phải có probe sống ép chúng khớp nhau, unit test không bao giờ bắt được loại lệch này.**
 > - **✅ ĐÃ DEPLOY LẠI + VERIFY 2026-08-09** (cùng lệnh `npx -y supabase@latest ...`, 8 file). Verify theo luật mới (không chỉ smoke biên): smoke 405/401/415 **+ probe sống `probe-task-refs.ts` → ca [04] PASS** (trước fix FAIL 3/3), tổng 11/14. Reverse-dependency đã thật sự chảy qua validator.
 
+> **★ REMINDER BẮN NHẦM TRÊN MÁY ĐANG ĐÓNG APP (2026-08-10, anh Khôi chốt CHỊU cho v1).**
+> - **Triệu chứng sẽ gặp khi dùng thật:** đánh dấu xong một task trên Mac, iPhone đang đóng app không hề biết → **đến giờ nó vẫn rung nhắc đúng việc vừa làm xong**. Reminder được lên lịch cục bộ trên từng máy bằng `UNNotificationRequest`; sync chỉ chạy khi app ở foreground nên lúc user mở app ra thì chuông đã reo rồi — không cứu được sau đó.
+> - **Vì sao không chữa trong v1:** anh Khôi chốt 2026-08-10 là chỉ cần "bật app lên thì auto sync". iOS **không cho** giữ app chạy nền cho mục đích này (suspend sau vài giây; entitlement audio/location/VoIP dùng để lách sẽ bị App Store từ chối). macOS không dính vì Volar vốn là menu bar app có login item nên process vẫn sống.
+> - **Cách chữa rẻ nhất khi cần:** `BGAppRefreshTask` (BackgroundTasks) trên iOS — ~80 dòng, **không cần hạ tầng server nào**. iOS tự đánh thức app vài lần/ngày để kéo sync. Không đảm bảo đúng giờ nhưng chặn được phần lớn ca này. Đắt hơn: silent push APNs (thêm APNs key + bảng device token + edge function gửi push + entitlement), mà Apple vẫn có quyền hoãn/gộp/bỏ nên **vẫn phải giữ cả BGAppRefresh lẫn poll** — là chi phí cộng thêm, không thay thế.
+> - **Điều kiện xét lại:** khi dùng thật thấy bị nhắc nhầm đủ khó chịu. Với app cho người ADHD thì đây không phải phiền nhẹ — bị nhắc một việc mình đã làm xong là thứ làm mất niềm tin vào app, nối thẳng với `docs/adhd-research-v1.md`.
+
 > **★★ LUẬT UI anh Khôi chốt 2026-08-09: VÙNG BẤM PHẢI PHỦ ĐÚNG VÙNG NHÌN THẤY.** Nguyên văn: *"vùng clickable nên rộng ở vùng nhìn thấy nhé, chứ vùng thấy thì rộng mà click có 1 điểm sẽ gây ra ức chế vì không click được"*. Với app cho người ADHD thì đây không phải chuyện tiện tay: một cú bấm trượt là đúng loại ma sát làm người ta bỏ luôn thao tác đang định làm — nối thẳng với `docs/adhd-research-v1.md`.
 > - **Họ bug này nhận biết thế nào:** trong SwiftUI, `.buttonStyle(.plain)` chỉ hit-test phần label THỰC SỰ VẼ RA. `Spacer`, `.padding`, `.frame(maxWidth: .infinity)` đều không vẽ gì. Nên khi `.background(...)` được đặt SAU `.buttonStyle(.plain)` (tức NGOÀI `Button`), cái nền mà mắt thấy không thuộc label ⇒ nút trông rộng cả dải nhưng chỉ ăn click ở đúng chỗ chữ/icon. Dấu hiệu grep được: `.buttonStyle(.plain)` đứng ngay trước `.background(`.
 > - **Ngược lại KHÔNG bug** khi `.background` nằm BÊN TRONG label (label vẽ đầy) — ví dụ plan picker `PaywallView.swift:253` vẫn bấm tốt. Đừng thấy `.buttonStyle(.plain)` là sửa bừa.
@@ -49,7 +55,144 @@
 
 - [ ] **VERIFY TRÊN MAC: titlebar cùng màu body** (`Volar/Sources/App/WindowChrome.swift`, mới, 2026-08-09 — anh Khôi báo khi chạy thật: *"header màu trắng mà body đen nhìn xấu"*). Nguyên nhân: `NSApp.appearance = .darkAqua` (`VolarApp.swift:351`) chỉ làm titlebar thành xám ~#2A2A2E, chênh rõ với `bg` #0F0F11. Fix: `titlebarAppearsTransparent = true` + `titleVisibility = .hidden` + `backgroundColor = bg`, gắn qua `.background(WindowChrome())` ở scene `Window` (`VolarApp.swift:245`). **Viết mù trên Windows, chưa compile.** Cần nhìn tận mắt: (a) titlebar liền màu với body thật không, (b) ba nút đỏ-vàng-xanh còn thấy rõ trên nền #0F0F11 không, (c) `CapturePanel` + dropdown `MenuBarExtra` KHÔNG bị đụng (đã loại `NSPanel` trong code, cần xác nhận bằng mắt), (d) mất chữ "Volar" trên titlebar có chấp nhận được không — đó là lựa chọn thẩm mỹ, đổi `titleVisibility` về `.visible` là xong. Đã cân nhắc `.windowStyle(.hiddenTitleBar)` và **loại**: nó bật `fullSizeContentView` → traffic lights đè lên `greetingHeader` (padding top 20), phải căn lại bằng mắt. `Volar/project.yml` dùng `path: Sources` whole-tree nên xcodegen tự nhặt file mới, không cần sửa project. (2026-08-09)
 
-- [ ] **Ba field cho sync — CHỐT trong `spec.md` §2.3 (nhánh `main`), CHƯA implement ở bản nào** (2026-08-09). Bản macOS/Windows hiện thiếu `updatedAt` (không có thì "last write wins" không xác định được ai là "last") và `deletedAt` tombstone (xoá thẳng hàng ⇒ máy kia sync xong **hồi sinh** task đã xoá — loại lỗi làm user gỡ app). `id` UUID sinh ở client thì **đã đúng sẵn**, chỉ ghi lại để không ai đổi sang id server. Anh Khôi chốt: mọi bản MỚI dựng theo spec phải có sẵn từ đầu; macOS/Windows bổ sung **khi thực sự làm sync**, không phải bây giờ. Rẻ khi thêm lúc chưa có user, đắt khi thêm sau (migration cho từng platform).
+> **★ SYNC — ĐÃ IMPLEMENT v1 NGÀY 2026-08-10 (Opus điều phối + 4 agent Sonnet file-disjoint).**
+> **CHƯA BUILD LẦN NÀO — toàn bộ Swift UNVERIFIED. `0005` VẪN CHƯA APPLY, CHƯA DEPLOY.**
+> ~2.900 dòng mới: `Shared/Sync/` (6 file), `Shared/Views/SyncEnableSheet.swift` +
+> `SyncRejectsView.swift`, `SharedTests/Sync*Tests.swift` (43 test), sửa `VolarTask`/`TaskStore`/
+> `CompletionLog`/`AppState`/`SettingsView`/`SettingsIOSView`.
+> Hợp đồng seam giữa các nhóm: **`specs/008-sync/client-contract.md`** (mới) — đọc nó trước
+> `design.md` nếu định sửa code sync, nó cụ thể hơn.
+> Ba luật sống-còn đã tự kiểm trên code cuối: (1) đẩy hỏng KHÔNG đụng dữ liệu local — không đường
+> nào trong `Shared/Sync/` gọi vào store trên nhánh thất bại; (2) `sync_pro_required`/`sync_disabled`/
+> mất mạng là ba nhánh riêng, `.offline` im lặng tuyệt đối, `.disabled` là TRẠNG THÁI không phải lỗi;
+> (3) `updatedAt` đóng dấu ở đúng `TaskStore.save()`/`saveThrowing()`, cộng đúng MỘT ngoại lệ tường
+> minh có doc (`enforceSingleFrogInvariant`).
+> Phần dưới đây là bản ghi thiết kế gốc, giữ nguyên làm lịch sử.
+>
+> **★ SYNC — THIẾT KẾ XONG 2026-08-09 (bản ghi gốc).**
+> Tài liệu: **`specs/008-sync/design.md`**. Migration đã viết nhưng **CHƯA APPLY, CHƯA DEPLOY**:
+> `supabase/migrations/0005_sync_tasks.sql`. Lý do đột ngột cần sync: anh Khôi chốt 2026-08-09 rằng
+> **watch phải chạy khi không có iPhone bên cạnh** ⇒ `WCSession` không đủ ⇒ sync chặn Phase 3 của
+> plan 007. Thứ tự anh chốt: **sync trước, watch sau**.
+> Khuyến nghị chính đã chốt trong design: **Supabase chứ KHÔNG phải CloudKit** (CloudKit bỏ rơi bản
+> Windows, không ép được cổng tier ở server, và tách danh tính khỏi Supabase Auth) · **LWW mức bản
+> ghi + bảng `sync_rejects` giữ bản thua** · **tombstone `deleted_at` cả server lẫn local** ·
+> **không sync `ReminderRecord`/`ParseCorrection`/settings/focus session** · **cổng Pro nằm trong RLS
+> policy** · **watch lấy danh tính bằng pair-code một lần qua `WCSession`**.
+> Hệ quả tốt kèm theo: chọn Supabase làm mốc chặn "`@Attribute(.unique)` phải gỡ trước khi ship iOS"
+> (mục ở cuối file này) **đóng lại vĩnh viễn** — ràng buộc đó là của CloudKit, không phải của sync.
+>
+> **★ ANH KHÔI CHỐT THÊM 3 ĐIỀU (2026-08-09), đã hợp nhất vào design + `0005`:**
+> **(1) Sync là OPT-IN** — *"nếu pro và user bật sync across device thì sync task lên db"*: điều kiện
+> là **Pro AND toggle bật**, HAI điều kiện. Pro một mình không tự bật sync.
+> **(2) Toggle ở mức TÀI KHOẢN** (anh đã được nêu mặt trái và vẫn chọn): một máy bật là dữ liệu MỌI
+> máy lên cloud, và máy mới đăng nhập sau đó tự sync không hỏi lại. ⇒ toggle sống ở bảng server
+> `sync_prefs`, **không** `UserDefaults`, và **đi thẳng vào RLS policy**:
+> `volar_sync_allowed() = volar_is_pro() AND volar_sync_enabled()`.
+> **(3) Hết hạn Pro KHÔNG xoá gì cả** — *"task tạo ở đâu nằm ở đó thôi; bản gốc luôn ở device tạo ra
+> nó, bản trên cloud chỉ là replica"*. Máy B giữ nguyên replica và **sửa được bình thường**, không
+> đánh dấu chỉ-đọc, không xoá. Tắt toggle cũng vậy. Xoá thật chỉ qua `volar_sync_purge()` do user tự
+> bấm. Mô hình ghi anh xác nhận: **write-through, đẩy cloud hỏng thì TUYỆT ĐỐI không rollback local**.
+
+- [x] **UI công tắc sync — 4 màn** — ĐÃ LÀM 2026-08-10 (`SyncEnableSheet.swift` + tab Account của
+  `SettingsView.swift`/`SettingsIOSView.swift`). Màn xác nhận nói thẳng cả ba điều bắt buộc; danh
+  sách máy đọc từ `syncState.devices`; nút purge có xác nhận riêng và nói rõ local không bị đụng.
+  Chưa nhìn bằng mắt lần nào — cần Mac. Mô tả gốc: (a) **màn xác
+  nhận lần bật đầu tiên**, bắt buộc nói thẳng rằng toggle áp cho cả tài khoản và mọi máy khác cũng
+  sẽ đẩy dữ liệu lên — anh Khôi đã biết mặt trái này nên UI **không được giấu**; (b) Settings hiển
+  thị trạng thái + "đã bật từ ... bởi máy ..."; (c) **danh sách thiết bị đã sync** (đọc từ
+  `volar_sync_state()`); (d) nút **"Xoá dữ liệu đã đồng bộ khỏi server"** gọi `volar_sync_purge()`,
+  có xác nhận riêng. Ước lượng ~220 dòng.
+- [ ] **⚠️ Màn xác nhận lần bật ĐẦU TIÊN không liệt kê được máy nào — giới hạn CỐ Ý, không phải sót**
+  (2026-08-09). Muốn liệt kê thì phải có bảng đăng ký thiết bị mà mọi máy ping vào lúc khởi động =
+  **báo về server sự tồn tại của từng máy TRƯỚC KHI user đồng ý**, đúng cái màn xác nhận sinh ra để
+  bảo vệ. Nên `sync_devices` chỉ được ghi từ trong `sync_exchange`. Lần bật đầu nói **luật**, không
+  bịa danh sách. Nếu anh Khôi muốn có danh sách thật ngay từ lần đầu thì đó là một đánh đổi riêng
+  cần anh quyết.
+- [x] **Ba trạng thái từ chối phải phân biệt được** — ĐÃ LÀM 2026-08-10. `SyncFailure` (5 case) ép
+  bằng kiểu; `AppState.syncFailureMessage` trả `nil` cho `.offline` **và** cho `.proRequired`/
+  `.disabled` (hai cái sau hiện qua `SyncState.settingsStatusLine` như TRẠNG THÁI, không phải lỗi);
+  `SyncEngine` gọi `volar_sync_state()` sau mọi 403. Mô tả gốc (2026-08-09):
+  `sync_pro_required` (403) → gợi ý nâng cấp · `sync_disabled` (403) → gợi ý bật, **KHÔNG phải lỗi**
+  · mất mạng → **im lặng**, không hiện gì. Gộp cả ba là cách chắc chắn nhất để user tắt toggle ở máy
+  khác rồi ngồi debug wifi. `SyncEngine` phải gọi `volar_sync_state()` sau **mọi** 403.
+
+- [ ] **🔴 SYNC LÀM MẤT CỜ `isSensitive` — LỖ RIÊNG TƯ THẬT, PHÁT HIỆN KHI REVIEW 2026-08-10.**
+  `VolarTask.isSensitive` (nghĩa: "đừng đọc to tiêu đề task này") **không nằm trong `TaskItem`** —
+  đó là seam cố ý có từ Phase 4, `TaskItem.swift` không mang field này. Nhưng `SyncPayload` dựng từ
+  `TaskItem`, nên **cờ đó không đi qua sync**. Hệ quả cụ thể: task đánh dấu nhạy cảm trên Mac, sync
+  sang iPhone thành **không nhạy cảm**, và `VoiceReminderChannel.speakReminder` sẽ **đọc to tiêu đề
+  thật** thay vì "You have a reminder". Đây là loại lỗi chỉ lộ ra trước mặt người khác.
+  Chưa sửa trong đợt này vì sửa đúng phải chạm ba tầng cùng lúc (`TaskItem` + `VolarTask.apply` +
+  `TaskPayload`), tức đụng file của cả nhóm A lẫn nhóm B giữa lúc bốn agent chạy song song — churn
+  vào một commit vốn đã chưa compile lần nào. **Phải sửa trước khi bật sync cho người dùng thật**,
+  và sửa cùng lúc với việc thêm `isSensitive` vào `TaskItem` (việc đáng làm độc lập).
+- [ ] **WCSession pair-code cho watch — HOÃN CÓ CHỦ Ý sang đợt watch** (2026-08-10, design §10).
+  KHÔNG viết dòng nào trong đợt này, và đó là quyết định chứ không phải sót. Ba thứ nó phụ thuộc đều
+  **chưa tồn tại**: (1) không có target watchOS nào trong repo (`VolarWatch/` mới chỉ là một dòng
+  trong plan 007, `Volar/project.yml` và `VolarIOS/project.yml` không khai); (2) không có
+  `volar_mint_pair_code()` — `0005` tự ghi rõ là để dành cho `0006_`; (3) không có endpoint
+  `POST /functions/v1/subscription/pair-claim`. Viết `WCSession` bây giờ = đoán mò ngược lại ba thứ
+  chưa có, mà chính §10 cũng đã đánh dấu bước đổi mã lấy session là UNVERIFIED kèm đường lui. Làm
+  cùng lúc dựng watch target.
+- [ ] **★ VERIFY TRÊN MAC: toàn bộ sync v1 chưa từng compile** (2026-08-10). ~2.900 dòng Swift viết
+  mù trên Windows. Thứ tự verify: (1) `xcodegen generate` + `xcodebuild test` scheme macOS —
+  `SharedTests/Sync*Tests.swift` 43 test phải xanh; (2) build `VolarIOS`. **Bốn API SwiftData chưa
+  ai xác nhận**, đều đã ghi UNVERIFIED tại chỗ: `context.insertedModelsArray`/`changedModelsArray`
+  (đường lui viết sẵn trong `client-contract.md` §4 — helper `touch(_:)` gọi tường minh ở 12
+  mutator; **đừng "sửa" bằng cách rải `updatedAt = Date()` khắp nơi**), `fetchCount`,
+  `Set<UUID>.contains` trong `#Predicate`, và `$0.deletedAt == nil` trong `#Predicate`.
+  Chưa push — Mac đỏ thì `git reset` được.
+- [ ] **`SyncMerge.nextCursor` so sánh cursor bằng LEXICAL string** (2026-08-10) — đúng chỉ vì
+  Postgres render timestamptz ở định dạng cố định và Supabase để timezone UTC (`+00:00`). Phân tích
+  tay thì mọi ranh giới đều đúng (phần thập phân bị trim zero, mốc giây, không có phần thập phân),
+  và hướng lệch của bản thân cái guard là an toàn (đoán sai kiểu "candidate cũ hơn" chỉ dẫn tới kéo
+  lại, vô hại). Nhưng nếu timezone của project đổi thì so sánh này sai câm. Kiểm khi có dữ liệu thật.
+- [ ] **Tách 2 API (full-fetch lúc mở app + polling theo `lastFetched`) — ANH KHÔI ĐỀ XUẤT, CHƯA
+  CHỐT, ĐỪNG TỰ LÀM** (2026-08-10). Phản hồi hiện tại: cursor đã lo được ca đó — offline bao lâu thì
+  cursor đứng yên bấy lâu, lượt sau kéo đủ; và full-fetch vốn chỉ là `p_cursor_tasks: null` trên
+  **cùng một API**, không cần API thứ hai. **Nhưng có đúng một ca delta KHÔNG đủ**: máy offline lâu
+  hơn thời gian giữ tombstone (server 90 ngày) sẽ không biết task nào đã bị xoá và sẽ **hồi sinh
+  chúng** — design §6 đã ghi nhận và cố ý chọn hướng lệch này (giữ thừa hơn nuốt mất). Nếu anh Khôi
+  muốn chữa thì đó là một quyết định riêng. Chờ anh quyết.
+- [x] **★ ANH KHÔI DUYỆT `specs/008-sync/design.md`** — đã duyệt, implement xong 2026-08-10. Sáu câu
+  đã gật: (1) Supabase thay CloudKit, lệch với `product-vision-v2.md`
+  Tier-3 mục 10 nói "CloudKit sync"; (2) chấp nhận nội dung task (kể cả `sourceTranscript` nguyên
+  văn) nằm ở trạng thái nghỉ trên server Volar; (3) hết Pro thì dừng CẢ hai chiều (không cho pull
+  đọc lại) — dữ liệu server giữ vô thời hạn, dữ liệu local không đụng; (4) LWW mức bản ghi là đủ,
+  không làm merge theo field; (5) `sync_rejects` giữ bản thua nhưng **chưa có UI** đợt này;
+  (6) chi thêm ~250 dòng cho pair-code watch, hay chấp nhận gõ mã 6 ký tự trên iPhone.
+- [ ] **🔴 ĐIỀU KIỆN TIÊN QUYẾT CỦA SYNC — phải chốt TRƯỚC khi bật sync, không phải sau**
+  (2026-08-09, phát hiện lại khi thiết kế 008): mục "UTC/calendar" ngay dưới đây và mục "conformance
+  test vector" nữa. Trước sync, hai thứ đó vô hình; sau sync chúng thành **hai máy chỉ hai việc khác
+  nhau trên cùng một dữ liệu** — triệu chứng giống hệt lỗi sync nhưng nguyên nhân không nằm ở sync,
+  nên sẽ đốt rất nhiều giờ debug nhầm chỗ. Chi tiết: `specs/008-sync/design.md` §11.
+- [ ] **Riêng tư: `docs/app-store-privacy.md` phải suy lại TỪ ĐẦU trước khi ship bản có sync**
+  (2026-08-09). File đó hiện khẳng định không có server-side sync và tự đặt điều kiện "nếu sau này
+  có server-side sync thì kết luận này phải suy lại từ đầu, không được giả định còn đúng". Sync
+  chính là cái điều kiện đó. Kèm theo: nhãn dinh dưỡng App Store phải khai lưu trữ nội dung user.
+- [ ] **Nổ chuông đa thiết bị — CHẤP NHẬN đợt này, ghi để khỏi tưởng là bug** (2026-08-09).
+  Không sync `ReminderRecord` (nó suy ra được từ task), nên Mac + iPhone + Watch cùng derive và
+  **cùng kêu**. iPhone+Watch ghép đôi thì hệ thống tự dedupe; watch standalone thì không. Chữa đúng
+  cách là cơ chế "claim" phía server — hoãn. `specs/008-sync/design.md` §11.3.
+- [ ] **Bất biến "chỉ một frog" không sống sót qua LWW theo hàng** (2026-08-09). `VolarTask.frog` là
+  bool trên từng task, còn "chỉ một frog" là bất biến TOÀN CỤC. Hai máy offline set hai frog khác
+  nhau ⇒ merge xong có hai frog. Cách chữa rẻ đã ghi trong design (`§3`): lúc đọc thì chọn frog có
+  `updatedAt` mới nhất và để `AppState` tự dọn — **chưa implement**.
+- [ ] **Ba job dọn dẹp pg_cron đang treo, nên gộp làm một lần bật** (2026-08-09): `usage_counters`
+  (treo từ 0002), `sync_tasks` tombstone >90 ngày, `sync_rejects` >90 ngày (cả hai từ 0005).
+  pg_cron **chưa từng được bật** ở project này — không migration nào tạo extension nào.
+- [ ] **`0006_` pair-code cho watch — chưa viết** (2026-08-09). Bảng mã một-lần TTL 5 phút +
+  `volar_mint_pair_code()` + route `POST /functions/v1/subscription/pair-claim`. Cố ý tách khỏi
+  `0005` vì thuộc pha watch chứ không phải pha sync. ⚠️ Bước đổi mã lấy session dựa vào
+  `auth.admin.generateLink({type:'magiclink'})` — **UNVERIFIED**, có đường lui (gõ mã 6 ký tự trên
+  iPhone) nếu API admin không cho.
+- [ ] **Sync domain thứ hai — hoãn có chủ ý** (2026-08-09): global `ReminderPolicy`,
+  `VoiceDeliveryMode` (là preference cấp user thật, đáng sync) và focus session (muốn sync thì phải
+  **persist trước** — hiện chỉ sống trong `AppState`, không lưu đĩa). "Bắt đầu focus trên Mac, thấy
+  đồng hồ đếm trên watch" là tính năng watch mạnh nhất còn bỏ ngỏ.
+
+- [ ] **Ba field cho sync — CHỐT trong `spec.md` §2.3 (nhánh `main`), ĐÃ CÓ THIẾT KẾ (008), CHƯA implement ở bản nào** (2026-08-09). Bản macOS/Windows hiện thiếu `updatedAt` (không có thì "last write wins" không xác định được ai là "last") và `deletedAt` tombstone (xoá thẳng hàng ⇒ máy kia sync xong **hồi sinh** task đã xoá — loại lỗi làm user gỡ app). `id` UUID sinh ở client thì **đã đúng sẵn**, chỉ ghi lại để không ai đổi sang id server. Anh Khôi chốt: mọi bản MỚI dựng theo spec phải có sẵn từ đầu; macOS/Windows bổ sung **khi thực sự làm sync**, không phải bây giờ. Rẻ khi thêm lúc chưa có user, đắt khi thêm sau (migration cho từng platform).
 - [ ] **UTC/calendar: chốt "hôm nay" theo thiết bị hay theo tài khoản** (2026-08-09, gộp với mục "UTC-calendar fix" đang treo). Tầng 2 của engine (`NextTask.swift:164` `isNearTermDeadline`) hỏi "deadline có cùng ngày với `now` không" — đây là câu hỏi **theo lịch**, nên hai máy khác múi giờ **trả lời khác nhau trên cùng dữ liệu**. Không bản nào chốt bằng văn bản, và không test riêng của bản nào bắt được. Điều kiện tiên quyết của sync. Đã ghi thành luật ở `spec.md` §2.4.
 - [ ] **ĐỀ XUẤT CHƯA DUYỆT: bộ conformance test vector cho `nextTask` + `ReminderRecord.derive`** (2026-08-09, em đề xuất, anh Khôi chưa chốt). Vấn đề: hai hàm này được **port tay** sang từng platform (Windows đã viết lại bằng C#, iOS sẽ có bản riêng); lệch một tầng so sánh hoặc một con số trong 8 hằng số của `derive` thì không compiler nào kêu, không test riêng của bản nào fail — chỉ user thấy hai máy chỉ hai việc khác nhau. Spec L1 chặn bằng chữ, nhưng chữ không chạy được. Đề xuất: ~40–60 case JSON (input snapshot + `now` cố định + output kỳ vọng) đặt ở nhánh `main`, mọi bản phải chạy qua và pass. Đây là cách duy nhất bắt drift **tự động** mà không cần chia sẻ code giữa Swift và .NET.
 - [ ] **Ambient background bị nuốt trong Focus mode** (2026-08-09, phát hiện khi viết `docs/app-feature-spec.md`). `AmbientBackground` (mưa/tuyết/than hồng) chỉ được gắn ở `TodayView.swift:46`, KHÔNG gắn trong `FocusOverlay` — mà overlay lại phủ `.ultraThinMaterial` + `VolarColor.bg.opacity(0.78)` lên trên. Nghĩa là đúng lúc user cần khung cảnh tập trung nhất thì nền động gần như biến mất. Cần nhìn tận mắt trên Mac trước khi quyết: (a) chấp nhận (focus cố tình trần trụi), hay (b) đưa `AmbientBackground` vào trong `FocusOverlay` dưới lớp kính. Liên quan trực tiếp tới cách mô tả "focus mode có nền mưa rơi" ra ngoài — chưa quyết thì đừng viết vào marketing.
@@ -554,16 +697,22 @@ bản Mac build xanh**.
   Phase 0 **cố ý KHÔNG sửa**: bỏ `.unique` mà không có compiler/test có thể đẻ task trùng — đổi một
   bug nhìn thấy được lấy một lựa chọn chưa chắc dùng (sync là paid tier, chưa làm). **Phải quyết
   trước khi bản iOS lên App Store**, không phải trước khi làm sync. (2026-07-27)
+  → **CẬP NHẬT 2026-08-09:** `specs/008-sync/design.md` §1 khuyến nghị **Supabase, không CloudKit**.
+  Anh Khôi gật vào đó thì mốc chặn này **đóng vĩnh viễn** — ràng buộc `.unique` là của CloudKit,
+  và bản Windows (1106 test xanh) làm CloudKit thành lựa chọn không dùng được. Xác nhận lại: `.unique`
+  có ở **cả bốn** `@Model` (`VolarTask.swift:71`, `CompletionLog.swift:15`, `ParseCorrection.swift:17`,
+  `ReminderRecord.swift:15`), và với Supabase nó còn **có ích** (upsert theo id an toàn). **Đừng gỡ.**
 - [ ] **iOS Phase 4 — MorningFrog / Triage / Sweep trên iOS**: hoãn, ngoài scope core-first anh Khôi
   chốt 2026-07-27. Đây là mấy màn hình ADHD-differentiator nên sẽ cần làm trước khi bán bản iOS.
 - [ ] **iOS Phase 5 — "glance layer" (widget / Control Center / Live Activity)**: hoãn sau khi core
   xanh trên máy thật. ⚠️ Cần **app group** + dời SwiftData container vào group container — **phải
   làm TRƯỚC khi có người dùng thật**, để sau là migration đau. Đây là thứ thay thế menu bar
   (constitution V glance-and-dismiss) nên không được quên. (2026-07-27)
-- [ ] **Sync Mac ↔ iPhone cho paid tier** — anh Khôi chốt "để sau, sẽ dùng cho paid tier". Ràng buộc
+- [x] ~~**Sync Mac ↔ iPhone cho paid tier** — anh Khôi chốt "để sau, sẽ dùng cho paid tier". Ràng buộc
   đã biết: SwiftData+CloudKit yêu cầu mọi property optional/có default và cấm `@Attribute(.unique)`,
-  **không sửa được sau khi đã có dữ liệu user**. Phase 0 của feature 004 rà `VolarTask.swift` và sửa
-  ngay lúc chưa ai dùng (plan §7.3). Chưa bật CloudKit, chưa thêm entitlement iCloud. (2026-07-27)
+  **không sửa được sau khi đã có dữ liệu user**.~~ (2026-07-27) → **THAY BẰNG `specs/008-sync/design.md`
+  (2026-08-09).** Ràng buộc CloudKit ở trên **không còn áp dụng**: design chọn Supabase. Việc còn lại
+  không phải "quyết có sync hay không" nữa mà là "anh Khôi duyệt design" — xem khối ★ SYNC đầu file.
 - [ ] **Thiếu `PrivacyInfo.xcprivacy` — CẢ BẢN MAC LẪN iOS**: App Store từ chối upload nếu thiếu
   privacy manifest khi app dùng required-reason API (`UserDefaults` = `CA92.1`, file timestamp).
   Bản iOS tạo ở Phase 1/A1; **bản `macos` cũng phải thêm** — chưa có trong

@@ -46,6 +46,13 @@ struct SettingsIOSView: View {
     @State private var accountCodeInput = ""
     @State private var accountCodeSent = false
     @State private var showDeleteAccountConfirm = false
+    // 008-sync (client-contract.md §0 group C) — same split as the rest of this file: purely local
+    // UI state, real state lives on `AppState`. Mirrors `SettingsView.swift`'s (macOS) three sync
+    // `@State` vars exactly — same names, same meaning, so the two files can never drift on what
+    // each flag is for.
+    @State private var showSyncEnableSheet = false
+    @State private var showSyncRejects = false
+    @State private var showSyncPurgeConfirm = false
     /// Gates the one-time "this downloads ~145MB, do it on Wi-Fi" warning before actually calling
     /// `appState.setSpeechEngine(.whisperKit)` — see `voiceSection`'s doc comment on why this is a
     /// UI-level confirmation only, not real network-type gating.
@@ -58,6 +65,7 @@ struct SettingsIOSView: View {
             List {
                 accountSection
                 subscriptionSection
+                syncSection
                 appearanceSection
                 voiceSection
                 privacySection
@@ -79,6 +87,24 @@ struct SettingsIOSView: View {
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("WhisperKit needs a one-time on-device model download (about 145MB) before it can transcribe. This can take a while and use meaningful cellular data — we recommend doing this on Wi-Fi. Volar does not check your connection type before starting the download; that gating isn't implemented yet.")
+            }
+            // 008-sync: "Delete data on server" — note it says SERVER explicitly and nowhere claims
+            // to touch this iPhone's own tasks, matching macOS `SettingsView`'s identical dialog
+            // copy verbatim (client-contract.md §5: the two platforms must not say two things).
+            .alert("Delete this account's synced data on Volar's server?", isPresented: $showSyncPurgeConfirm) {
+                Button("Delete server data", role: .destructive) { appState.purgeSyncData() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Your tasks on THIS iPhone (and every other signed-in device) are not touched — this only clears the server-side copy. Sync will start re-uploading from whatever devices are still syncing.")
+            }
+            .sheet(isPresented: $showSyncEnableSheet) {
+                SyncEnableSheet()
+            }
+            .sheet(isPresented: $showSyncRejects) {
+                SyncRejectsView()
+            }
+            .onAppear {
+                appState.refreshSyncState()
             }
         }
     }
@@ -287,6 +313,111 @@ struct SettingsIOSView: View {
             }
         }
         .frame(minHeight: IOSMetrics.minTouch)
+    }
+
+    // MARK: - 2b. Sync (008-sync, client-contract.md §0 group C)
+    // Ported from `SettingsView.swift`'s `syncCard` (macOS) — same content, same three-state
+    // copy, same account-level toggle; List-section layout instead of a boxed card, matching how
+    // every other section on this screen already trades macOS's card look for a native `Section`.
+    // Signed-in only, same guard `accountSection`'s "Delete account" row already applies.
+
+    @ViewBuilder
+    private var syncSection: some View {
+        if appState.accountEmail != nil {
+            Section {
+                Toggle(isOn: syncToggleBinding) {
+                    Text("Sync across devices").font(IOSMetrics.rowTitle).foregroundStyle(VolarColor.textPri)
+                }
+                .tint(accentColors.solid)
+                .frame(minHeight: IOSMetrics.minTouch)
+                // Rule 3 (task brief): turning OFF must always work, even with lapsed Pro — never
+                // gate this control on `syncState.isPro`. Only an in-flight request, or the state
+                // not having loaded yet (see `syncStateLoaded` below), disables it.
+                .disabled(appState.syncBusy || !appState.syncStateLoaded)
+
+                // GATED on `syncStateLoaded` — before the first `refreshSyncState()` resolves,
+                // `syncState` is still `.unknown` (`isPro: false`); rendering `settingsStatusLine`
+                // off that would tell a real Pro user "Sync is a Pro feature." for one frame. Show
+                // nothing until we actually know (Opus review, 2026-08-10; mirrors macOS
+                // `SettingsView.syncCard` token-for-token so the two platforms can't disagree here).
+                if appState.syncStateLoaded {
+                    if let statusLine = appState.syncState.settingsStatusLine {
+                        Text(statusLine).font(IOSMetrics.caption).foregroundStyle(VolarColor.textSec)
+                    } else {
+                        syncEnabledSummary
+                    }
+                }
+
+                if let syncError = appState.syncError {
+                    Text(syncError).font(IOSMetrics.caption).foregroundStyle(VolarColor.reschedule)
+                }
+
+                if appState.syncState.syncEnabled {
+                    ForEach(appState.syncState.devices) { device in
+                        HStack {
+                            Text(device.label ?? "Unknown device")
+                                .font(IOSMetrics.caption)
+                                .foregroundStyle(VolarColor.textSec)
+                            Spacer()
+                            if let lastSeen = device.lastSeen {
+                                Text(lastSeen.formatted(date: .abbreviated, time: .omitted))
+                                    .font(IOSMetrics.caption)
+                                    .foregroundStyle(VolarColor.textMut)
+                            }
+                        }
+                    }
+                }
+
+                Button("View lost edits") { showSyncRejects = true }
+                    .foregroundStyle(accentColors.solid)
+                    .frame(minHeight: IOSMetrics.minTouch)
+                Button("Delete data on server") { showSyncPurgeConfirm = true }
+                    .foregroundStyle(VolarColor.destruct)
+                    .frame(minHeight: IOSMetrics.minTouch)
+                    .disabled(appState.syncBusy)
+            } header: {
+                sectionHeader("Sync")
+            } footer: {
+                footerText("Keeps this iPhone's tasks in step with every other device signed in to this account. Turning sync off never deletes anything — use \"Delete data on server\" for that.")
+            }
+            .listRowBackground(VolarColor.card)
+        }
+    }
+
+    /// Same "ON routes through the mandatory confirmation sheet ONLY when Pro, OFF calls straight
+    /// through with no confirmation" split as macOS `SettingsView.syncToggleBinding` (see that
+    /// property's doc comment for why a non-Pro attempt is a client-side no-op instead of a round
+    /// trip to the server) — design.md §8.1/§8.3.
+    private var syncToggleBinding: Binding<Bool> {
+        Binding(
+            get: { appState.syncState.syncEnabled },
+            set: { newValue in
+                if newValue {
+                    guard appState.syncState.isPro else { return }
+                    showSyncEnableSheet = true
+                } else {
+                    appState.setSyncEnabled(false)
+                }
+            }
+        )
+    }
+
+    private var syncEnabledSummary: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let enabledAt = appState.syncState.enabledAt {
+                Text("Enabled since \(enabledAt.formatted(date: .abbreviated, time: .omitted))")
+            }
+            if let device = appState.syncState.enabledByDevice {
+                Text("Turned on from \(device)")
+            }
+            if let lastSync = appState.lastSyncSuccessAt {
+                Text("Last synced \(lastSync.formatted(date: .omitted, time: .shortened))")
+            }
+        }
+        .font(IOSMetrics.caption)
+        // Informational readout, not the NOW spotlight — `instrument` (ice blue), matching macOS
+        // `SettingsView.syncEnabledSummary` token-for-token.
+        .foregroundStyle(VolarColor.instrument)
     }
 
     // MARK: - 3. Appearance
