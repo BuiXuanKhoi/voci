@@ -62,7 +62,13 @@ targets:
     settings:
       base:
         INFOPLIST_FILE: Resources/Info.plist
-        PRODUCT_BUNDLE_IDENTIFIER: tech.kioh.Volar.ios
+        # Deliberately IDENTICAL to the macOS target's bundle ID (`Volar/project.yml`). That is not
+        # a copy-paste slip — identical iOS and macOS bundle IDs are the sole precondition for
+        # Universal Purchase: one App Store record, one subscription group, one purchase unlocking
+        # every platform. A `.ios` suffix here would be permanent the day it first ships.
+        # The watchOS target, when it exists, must use this string as its prefix
+        # (`tech.kioh.Volar.watchkitapp`) — Apple requires that shape.
+        PRODUCT_BUNDLE_IDENTIFIER: tech.kioh.Volar
         PRODUCT_NAME: Volar
         IPHONEOS_DEPLOYMENT_TARGET: "17.0"
         SWIFT_VERSION: "6.0"
