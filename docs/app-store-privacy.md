@@ -14,9 +14,20 @@ Baseline used for "what does the app do": `specs/002-workflow-command-center/con
 `contracts/parse-proxy.md`, `supabase/functions/groq/README.md`, and the current Swift sources
 under `Volar/Sources/Speech/`, `Volar/Sources/Account/`, `Volar/Sources/Parsing/`.
 
+**Revised 2026-08-10 for feature 008 (device sync).** Sync changes this document more than any
+previous feature has: it is the first time Volar stores the *content of the user's tasks* on
+Volar's own server at rest, and the first time Volar keeps a per-device identifier. Two rows below
+(**Identifiers › Device ID** and **User Content**) said the opposite before this revision and were
+wrong from the moment sync landed in the codebase. Added to the baseline for that revision:
+`specs/008-sync/design.md` (§3 what is and isn't synced, §6 retention, §8 the two gates, §9
+privacy), `specs/008-sync/client-contract.md`, `supabase/migrations/0005_sync_schema.sql`, and the
+Swift under `Shared/Sync/`.
+
 > Volar's core loop (capture → task → reminder → focus) never requires an account and never talks
 > to the network at all. Everything below is scoped to the **optional, opt-in** cloud paths: an
-> account (Sign in with Apple or email OTP), the Pro subscription, cloud parse, and cloud speech.
+> account (Sign in with Apple or email OTP), the Pro subscription, cloud parse, cloud speech, and
+> **device sync** — the last of which is the only one that leaves user content sitting on Volar's
+> server after the request that carried it has finished.
 
 ---
 
@@ -55,11 +66,64 @@ under `Volar/Sources/Speech/`, `Volar/Sources/Account/`, `Volar/Sources/Parsing/
 - **Purpose:** App Functionality (identify the account for quota/tier gating).
 
 ### Identifiers › Device ID
-- **Collected:** No. The prior design (DeviceCheck-token free tier + Apple App Attest) has been
-  **deleted entirely** in favor of account-based identity; there is no device fingerprint/token
-  collected anywhere in the current architecture.
-  Source: `contracts/account-auth.md` §0 ("App Attest bị xoá hoàn toàn").
-  *(If App Attest or DeviceCheck is ever reintroduced, this row must flip to Yes.)*
+- **Collected: Yes.** *(This row said "No" until 2026-08-10. That was correct when written and
+  became false when feature 008 — device sync — landed. Read the whole entry; the reason it flipped
+  is not the reason the old entry was watching for.)*
+- **What it is NOT:** the prior DeviceCheck-token free tier and Apple App Attest are still deleted
+  entirely and are not coming back through this row (`contracts/account-auth.md` §0, "App Attest bị
+  xoá hoàn toàn"). Volar reads no hardware identifier, no IDFA, no IDFV, no serial number, and no
+  fingerprint derived from device characteristics.
+- **What it IS:** sync needs to tell one of the user's own machines from another, so `SyncEngine`
+  generates a **random UUID the first time this device syncs** and keeps it. It is not derived from
+  anything about the device — a freshly installed copy on the same Mac gets a different one.
+  - Where it lives on device: `UserDefaults`, key `volar.sync.deviceId`
+    (`Shared/Sync/SyncEngine.swift`, the `deviceId` lazy property; the key is pinned by
+    `specs/008-sync/client-contract.md` §7).
+  - How long it lives: **indefinitely** — it survives app relaunches, OS updates, and sign-out. It
+    changes only if the app is deleted and reinstalled, or the user's defaults are reset.
+  - How it travels: sent as `p_device` on **every** `sync_exchange` call
+    (`POST /rest/v1/rpc/sync_exchange`), alongside `p_device_label`.
+  - Where it is stored server-side, and for how long: `public.sync_devices (profile_id, device_id,
+    label, first_seen, last_seen)`, `supabase/migrations/0005_sync_schema.sql`. **Retained
+    indefinitely** — no expiry, no cleanup job. It is removed only when the user presses "Delete
+    data on server" (`volar_sync_purge()`) or deletes their account, which cascades `auth.users` →
+    `profiles` → `sync_devices`. The same identifier is also stamped onto each synced row as
+    `tasks.origin_device` and `sync_rejects.origin_device`.
+- **Linked to identity: Yes**, and there is no judgment call here (unlike the Audio Data row
+  below): `sync_devices.profile_id` is a foreign key to `public.profiles.id`, and
+  `profiles.id` **is** `auth.users.id`. The identifier is stored keyed to the account by
+  construction, not merely observable alongside it.
+- **Used for tracking: No.** It never leaves Volar's own Supabase project, is never shared with any
+  third party, and is never used to correlate the user across other companies' apps or websites.
+- **Purpose:** App Functionality only — (a) Settings lists which of the user's devices are
+  currently syncing, with the last time each was seen (`design.md` §8.1/§8.2 — the list is the
+  user's own visibility into their account); (b) `origin_device` makes a conflict in
+  `sync_rejects` traceable to the machine that wrote the losing edit.
+- **When it is NOT collected:** with no account there is no session, so `SyncClient.exchange`
+  fails before any request is built and the identifier never leaves the device
+  (`Shared/Sync/SyncClient.swift`). See the transmitted-while-gated-off caveat below for the
+  free-account case.
+- **⚠️ Judgment call for anh Khôi — the accompanying label may contain the user's name.**
+  Along with the UUID, the client sends `p_device_label`, built as
+  `"\(Host.current().localizedName) · macOS"` on Mac and `"\(UIDevice.current.name) · iOS"` on
+  iPhone (`SyncEngine.deviceLabel`), and it is stored in `sync_devices.label`. Those OS values are
+  whatever the user named their machine, which on a default iOS setup is very often literally
+  *"Khôi's iPhone"*. That means a **personal name can be stored server-side, linked to the
+  account**, as a side effect of a row whose purpose is device identification. Two honest options,
+  pick one before submission:
+  1. **Declare `Contact Info › Name: Yes`** (linked to identity, App Functionality, not used for
+     tracking). Conservative, costs a visible extra category on the label, never wrong.
+  2. **Stop sending the raw OS device name** — send only the model/OS part, or let the user type
+     the label — after which this row genuinely carries no name and option 1 is unnecessary.
+     Cheaper on the label, costs a small code change in one property.
+  Recommendation: option 2 if there is time before submission, option 1 otherwise. Do **not** ship
+  with the raw name being sent and the Name row answered "No".
+- **⚠️ Over-declaration caveat (also logged as a defect, see §3).** Today the client sends
+  `p_device` on every attempted round *even when the account is free or the sync toggle is off* —
+  `SyncEngine` has no client-side gate, and the RPC raises `sync_pro_required`/`sync_disabled`
+  before writing anything, so nothing is stored. The value still reaches Volar's server. Because
+  "reached the server but was rejected" is a fragile thing to build a label answer on, this row is
+  answered **Yes** regardless of the user's tier.
 
 ### Purchases
 - **Collected:** Yes — subscription tier and status (`free`/`pro`, `expiresAt`, `productId`).
@@ -109,7 +173,17 @@ under `Volar/Sources/Speech/`, `Volar/Sources/Account/`, `Volar/Sources/Parsing/
 - **Used for tracking:** No.
 
 ### User Content (transcripts / text)
-- **Collected — cloud-parse only, opt-in:** Yes, on `POST /functions/v1/parse`, which is
+
+**Answer for App Store Connect: Collected — Yes, Linked to identity — Yes, Used for tracking — No,
+Purpose — App Functionality.** There are now **two independent paths** that collect user content,
+and they are not variations of each other: one sends text off-device to be processed and keeps
+nothing, the other **stores the user's task content on Volar's server indefinitely**. Answering
+this section from path 1 alone (as this document did before 2026-08-10) understates what the app
+does by a wide margin.
+
+#### Path 1 — cloud parse (`POST /functions/v1/parse`): transmitted, not retained
+
+- **Collected — cloud-parse, opt-in:** Yes, on `POST /functions/v1/parse`, which is
   text-only (never accepts audio — `contracts/parse-proxy.md`: "Text only. Audio is never
   accepted by this route"). This is the cloud NLP path that turns an utterance into structured
   task fields; it is separate from, and independent of, the Groq speech path above.
@@ -127,6 +201,88 @@ under `Volar/Sources/Speech/`, `Volar/Sources/Account/`, `Volar/Sources/Parsing/
   that would need to be re-verified against the provider's DPA and reflected here; not verified as
   part of this task).
 - **Purpose:** App Functionality (parse a voice utterance into a task) only.
+
+#### Path 2 — device sync (`POST /rest/v1/rpc/sync_exchange`): **stored at rest, indefinitely**
+
+*New with feature 008. This is a materially different privacy commitment from path 1, not a wider
+version of it: parse sends a sentence, gets an answer, and forgets it. Sync makes the content of
+the user's tasks **live on Volar's server** until the user removes it.*
+(`specs/008-sync/design.md` §9 states the same thing in the design's own words: *"Bật sync = nội
+dung task nằm ở trạng thái nghỉ trên server Volar. Đây là cam kết mới."*)
+
+- **Collected: Yes — and only under TWO conditions, both required** (`design.md` §8, enforced in
+  the RLS policy `volar_sync_allowed() = volar_is_pro() AND volar_sync_enabled()`, i.e. by the
+  database, not merely by client code):
+  1. the account has an active **Pro** subscription, **and**
+  2. the user has themself turned on the account-level **"Sync across devices"** switch.
+  The switch defaults **off**, and turning it on requires passing a confirmation screen
+  (`Shared/Views/SyncEnableSheet.swift`) that says in plain words that the user's tasks —
+  *including their verbatim spoken text* — will be uploaded, that the switch applies to the whole
+  account rather than this one device, and that turning it back off does not delete what was
+  already uploaded.
+- **What is stored, exactly:** the whole task record, as a JSON blob, in `public.tasks.payload`
+  (`supabase/migrations/0005_sync_schema.sql`; the wire shape is `TaskPayload` in
+  `Shared/Sync/SyncPayload.swift`). The free-text fields in it are the ones that matter here:
+  - `title` — what the user is trying to do, in their own words;
+  - `details`, `notes`, `resumeNote` — longer free text the user typed or dictated;
+  - **`sourceTranscript` — the verbatim text of the sentence the user spoke**, kept as-is;
+  - `delegation.label` / `delegation.cwdHint` — who a task was handed to, which in practice is
+    frequently **another person's name**, so a synced task can carry information about someone who
+    is not the user;
+  - `cue`, `conditions` — free-text trigger/context strings ("after standup", "when I open Xcode").
+  Alongside those, the structured fields: `deadline`, `startTime`, `durationMinutes`, `priority`,
+  `status`, `when`, `frog`, `recurrence`, `reminderOverride`, `parentId`, `createdAt`,
+  `completedAt`, `isSensitive`.
+  - **Completions:** `public.completions.payload` carries a `titleSnapshot` — the task's title
+    frozen at the moment it was completed — so completed-task titles are stored too, as an
+    append-only history that is never updated or deleted by ordinary use.
+  - **Losing edits:** when two devices edited the same task while offline, the version that loses
+    is not discarded but written verbatim into `public.sync_rejects.payload` (`design.md` §5's
+    "black box"). That row contains the same free text as above.
+- **Retention: indefinite, on purpose.** There is no expiry and no cleanup job. `design.md` §8.3 is
+  explicit that **letting Pro lapse deletes nothing** and **turning the sync switch off deletes
+  nothing** — the server copy is kept so the user can resume later without losing work. Data is
+  removed only by:
+  1. the user pressing **"Delete data on server"** in Settings (`volar_sync_purge()` — the only
+     path in the whole system that deletes live rows; no scheduled job calls it), or
+  2. **account deletion**, which cascades `auth.users` → `public.profiles` → `tasks`,
+     `completions`, `sync_prefs`, `sync_devices`, `sync_rejects` (Apple Guideline 5.1.1(v) is
+     satisfied by this cascade).
+  - **Known gap, stated rather than glossed:** tasks the user deletes become tombstones and are
+    *intended* to be swept from the server after 90 days, but that sweep is a `pg_cron` job that
+    is **written down as a follow-up and not implemented** (`0005_sync_schema.sql`, closing NOTE
+    §1–3; `pg_cron` has never been enabled on this project). Until it is, a deleted task's content
+    stays on the server as well. Do not describe deleted tasks as removed after 90 days anywhere
+    user-facing until that job actually exists.
+- **Linked to identity: Yes — with no ambiguity.** Unlike the Audio Data and path-1 rows above,
+  where "linked" is a judgment call about a bearer-authenticated request, here every stored row has
+  a `profile_id` column that is a foreign key to `public.profiles.id`, and `profiles.id` **is**
+  `auth.users.id`. The content is stored keyed to the account.
+- **Not end-to-end encrypted — say so, do not imply otherwise.** In transit it is TLS; at rest it
+  is whatever Postgres/Supabase provide. It is **not** encrypted with a key only the user holds, so
+  Volar (and Supabase as its infrastructure provider) is technically able to read it. `design.md`
+  §9 records that E2EE was considered and deliberately rejected: identity here is email OTP, so
+  there is no password to derive a key from, and the alternatives (a recovery phrase, or escrowing
+  the key on the server) either risk permanent data loss or provide no real protection.
+- **Not logged.** `Shared/Sync/SyncClient.swift` never prints a request or response body — only
+  status codes and already-classified failures; `design.md` §9 states `payload` must not be logged
+  anywhere.
+- **Not shared with any third party.** The data goes to Volar's own Supabase project and nowhere
+  else. Sync moves content **between the user's own signed-in devices**; that is not disclosure to
+  a third party. No LLM is involved at any point in this path — it is a plain Postgres upsert, so
+  the model-training question that applies to path 1 does not arise here at all.
+- **Used for tracking: No.** Never used for advertising, never shared with a data broker, never
+  used to correlate the user across other companies' apps or websites.
+- **Purpose:** App Functionality only (keep the user's own task list consistent across their own
+  devices). Not Analytics, not Product Personalization, not Advertising.
+- **⚠️ Over-declaration caveat (also logged as a defect, see §3).** `SyncEngine` currently has no
+  client-side gate: on a signed-in **free** account, or with the sync switch **off**, it still
+  builds and sends a `sync_exchange` request carrying the device's pending task payloads, and the
+  RPC rejects it (`sync_pro_required` / `sync_disabled`) before writing anything. Nothing is
+  stored — the whole RPC is one transaction and the rejection aborts it — but the bytes do reach
+  Volar's server. That is narrower than "collected" under Apple's definition, but it is not
+  something to build a "No" answer on, and it undercuts the consent screen's purpose. The answer
+  above is therefore **Yes**, and the underlying behavior is filed as a defect to fix.
 
 ### What is explicitly NOT collected
 State these as "No" across the board in App Store Connect:
@@ -191,16 +347,44 @@ State these as "No" across the board in App Store Connect:
     Backing usage-description keys: `NSCalendarsFullAccessUsageDescription` (macOS 14+) and
     `NSCalendarsUsageDescription` (legacy fallback), both in `Info.plist` — both now describe read
     AND write, matching this entry.
-  - **Nutrition-label reasoning:** Apple's "Data Collected" categories are about data gathered BY
-    the developer (transmitted off-device, linked to identity, used for tracking/analytics/etc.),
-    not simply "does the app read or write this data locally for its own on-device functionality."
-    Volar's calendar read is a local status count; Volar's calendar write is the user's own task
-    data, written locally, into a calendar Volar itself owns, with zero network transmission either
-    direction. Under that definition the answer stays **"Data Not Collected"** for calendar data —
-    but unlike the old read-only version of this entry, that conclusion now rests on "nothing is
-    transmitted off-device," not on "Volar doesn't write anything." If a future revision adds any
-    server-side sync of calendar/event data, this conclusion must be re-derived from scratch, not
-    assumed to still hold.
+  - **🔴 Re-derived 2026-08-10, because server-side sync shipped.** The previous revision of this
+    entry rested its answer on the sentence *"nothing is transmitted off-device"* and instructed
+    that the conclusion be **re-derived from scratch** — not assumed — if server-side sync ever
+    landed. Feature 008 landed. That sentence is no longer true of the app as a whole, so it can no
+    longer carry this entry. The answer below was rebuilt against the sync code rather than
+    inherited, and it happens to land in the same place for different reasons:
+    1. **Nothing EventKit-sourced enters the sync payload.** `TaskPayload`
+       (`Shared/Sync/SyncPayload.swift`) is a field-for-field list with no calendar, event,
+       `EKEvent`, or event-identifier field in it; a search of the whole `Shared/Sync/` directory
+       for `calendar`/`event`/`EKEvent` returns no data-carrying hit. The only thing Volar ever
+       reads from the user's other calendars remains a **count** used for a Settings status line —
+       it is never stored, so there is nothing for sync to pick up even in principle.
+    2. **`CalendarSync`'s own bookkeeping is deliberately excluded.** The mapping from tasks to
+       mirrored events (`eventMap`) and the created calendar's identifier (`volarCalendarID`) live
+       in `UserDefaults`, and `specs/008-sync/design.md` §3 lists settings/`UserDefaults` in the
+       **not synced** column with a stated reason (per-device state). So no event identifier — not
+       even one belonging to an event Volar created itself — reaches the server.
+    3. **What sync DOES transmit, stated plainly so this isn't read as a loophole:** the task's own
+       `deadline`, `startTime` and `durationMinutes` — which are exactly the values `CalendarSync`
+       *derives* a mirrored event from. Someone reading a synced payload can therefore reconstruct
+       when a mirrored "Volar" calendar event would sit. That is not calendar data being collected:
+       those fields are Volar's own task fields, they exist whether or not the user ever granted
+       calendar access, the mirror is downstream of them rather than their source, and they are
+       already declared under **User Content › Path 2** above. Declaring them a second time as
+       Calendar data would be inaccurate in the other direction.
+  - **Nutrition-label answer: still "Data Not Collected" for Calendar** — now on the narrower and
+    more durable ground that **no data obtained from EventKit ever leaves the device**, rather than
+    the old, now-false ground that nothing leaves the device at all. Apple's "Data Collected"
+    categories are about data gathered BY the developer; Volar's calendar read is a local status
+    count that is never stored or transmitted, and Volar's calendar write is the user's own task
+    data going into a calendar Volar itself created.
+  - **What would flip this answer** (check these specifically, not "does the app use sync"):
+    (a) any `EKEvent` identifier, calendar identifier, or `CalendarSync` mapping entering
+    `TaskPayload` or any other synced structure; (b) busy-time reading landing
+    (`AppState.busyIntervals` stops being hardcoded `[]`) **and** those intervals being persisted
+    onto a synced model; (c) any future decision to sync `UserDefaults`, which would sweep
+    `eventMap`/`volarCalendarID` along with it by default. Any one of the three means calendar-
+    derived data leaves the device linked to an account, and this entry must be re-answered again.
 - **Health & Fitness, Financial Info (beyond Purchases), Sensitive Info, Browsing History, Search
   History:** Not collected — nothing in the app's scope touches any of these categories.
 - **Device ID / App Attest / DeviceCheck:** Removed entirely, see the Identifiers row above.
@@ -227,7 +411,44 @@ State these as "No" across the board in App Store Connect:
   mirrored "Volar" calendar events off-device** → the Calendar entry's nutrition-label reasoning
   ("nothing is transmitted off-device") becomes false the moment this ships; re-derive the label
   answer from scratch per that entry's own closing note, do not assume "Data Not Collected" still
-  holds.
+  holds. *(Partly triggered already: feature 008 made "nothing is transmitted off-device" false for
+  the app as a whole, and the Calendar entry was re-derived on 2026-08-10 on narrower grounds — no
+  EventKit-sourced data leaves the device. The three specific flips are listed there.)*
+- **Add a field to `TaskPayload`** (`Shared/Sync/SyncPayload.swift`) → that field is now stored on
+  Volar's server, keyed to the account, indefinitely. Ask what it contains before adding it: a
+  free-text field extends the User Content › Path 2 list; an identifier of any kind may open a new
+  Identifiers row; anything sourced from EventKit flips the Calendar entry outright. The wire shape
+  is the label's boundary — this is the single highest-leverage line to review in the whole sync
+  feature.
+- **Sync anything that is currently in the "not synced" column of `design.md` §3** — `UserDefaults`
+  /settings, focus sessions, `ReminderRecord`, and above all **`ParseCorrection`** → `ParseCorrection`
+  holds verbatim transcripts kept for on-device parser correction and carries an explicit written
+  promise that it never leaves the machine (`ParseCorrection.swift`, FR-044). Syncing it would turn
+  "a transcript held briefly to parse one sentence" into "a training-shaped corpus at rest on
+  Volar's server", which is a different promise, not a bigger one. Requires anh Khôi's separate
+  sign-off per `design.md` §3, and a rewrite of User Content › Path 2 if it ever happens.
+- **Change what `p_device_label` sends** (`SyncEngine.deviceLabel`) → this is the open judgment call
+  flagged in the Identifiers › Device ID row. Narrowing it so it no longer carries the OS device
+  name removes the `Contact Info › Name` question; widening it, or adding any second
+  device-descriptive field, makes that row's "declare Name: Yes" option mandatory rather than
+  optional.
+- **Implement the 90-day tombstone sweep, or any other server-side retention job** (`0005`'s
+  closing NOTE §1–3, currently unimplemented — `pg_cron` has never been enabled on this project) →
+  the User Content › Path 2 retention paragraph's "known gap" note must be updated, and only then
+  may any user-facing text claim deleted tasks are removed from the server after 90 days.
+- **Add a client-side Pro/toggle gate to `SyncEngine`** (the defect noted in §3) → the two
+  "over-declaration caveat" paragraphs (Identifiers › Device ID, User Content › Path 2) become
+  stale and should be rewritten to say collection begins only once sync is actually enabled. The
+  *answers* stay Yes either way; only the reasoning narrows.
+- **Turn sync on by default, drop the confirmation sheet, or make Pro alone sufficient without the
+  user's own switch** → the User Content › Path 2 framing of "two conditions, both required,
+  default off, confirmed on a screen that says so" becomes false. This is the sync equivalent of
+  the `allowServerFallback` row below and carries far more weight, because this path retains data
+  rather than passing it through.
+- **Apply migration `0005` and enable sync in a shipped build** → until that happens no user content
+  has ever actually reached a Volar server through this path (see §3). The label must be correct at
+  submission regardless, but the "never yet exercised in production" note in §3 stops being true
+  and should be removed rather than left to rot.
 - **Widen `CalendarSync`'s write scope beyond the app-created "Volar" calendar** (e.g. letting it
   update an event in a calendar it didn't create) → this would break the entire "structurally
   impossible to touch a foreign calendar" claim in the Calendar entry above; treat any such change
@@ -263,6 +484,40 @@ State these as "No" across the board in App Store Connect:
   yet — other work on the account feature was in flight concurrently with this task). The
   *behavior* described above is per the account-auth.md contract that flow is being built against,
   not independently confirmed against a finished UI. Re-check this doc once that flow ships.
-- "Linked to identity: Yes" for Audio Data / User Content is the conservative reading of Apple's
-  guidance given bearer-token-authenticated requests; Apple's own review team is the final
-  authority on this specific judgment call.
+- "Linked to identity: Yes" for Audio Data / User Content **Path 1** is the conservative reading of
+  Apple's guidance given bearer-token-authenticated requests; Apple's own review team is the final
+  authority on this specific judgment call. This caveat does **not** extend to User Content Path 2
+  (sync) or to Identifiers › Device ID — those are stored with an account foreign key and are
+  linked by construction, with nothing left to judge.
+
+### Added 2026-08-10 with feature 008 (sync)
+
+- **Sync has never run against production, and `0005` has not been applied.**
+  `supabase/migrations/0005_sync_schema.sql` — which creates `profiles`, `tasks`, `completions`,
+  `sync_prefs`, `sync_devices`, `sync_rejects` — is written but **not applied**, and the Swift under
+  `Shared/Sync/` has **never been compiled** (Windows dev machine, no Swift/Xcode). Everything in
+  the two revised rows above is derived from reading the migration and the client contract, not
+  from observing a running system. Re-verify both rows once sync has actually run on a Mac against
+  a real project, before submission.
+- **🔴 Defect, not a labeling question: task payloads are transmitted while the gate is closed.**
+  `SyncEngine` (`Shared/Sync/SyncEngine.swift`) attaches unconditionally and polls on its own
+  schedule; nothing on the client checks `syncState.isPro` / `syncState.syncEnabled` before calling
+  `sync_exchange`. A signed-in **free** user — or a Pro user who deliberately left the switch
+  **off** — therefore has their pending task payloads (titles, notes, and `sourceTranscript`) plus
+  their device id and device label **sent to Volar's server**, where the RPC raises
+  `sync_pro_required` / `sync_disabled` and aborts the transaction before writing anything.
+  Nothing is stored, and this is why both affected rows above are answered "Yes" conservatively
+  rather than argued down. But it means data crosses the wire *before the consent screen that
+  exists to authorize exactly that crossing* — `design.md` §8.1 built that screen precisely so the
+  server learns nothing about a device until the user agrees. The fix is small (one guard before
+  building the request) and belongs to the sync feature, not to this document.
+  **Action for anh Khôi:** fix the guard, then simplify the two caveats. Logged in `backlog.md`.
+- **Whether Supabase (as infrastructure provider) counts as a "third party" for App Store Connect's
+  sharing question.** The position taken above is no — Supabase hosts Volar's own database and
+  processes data on Volar's behalf, the same way a hosting provider does, and Apple's questionnaire
+  is aimed at disclosure to *other* parties for their own purposes. Not independently verified
+  against Apple's current wording. If the label ends up needing a "Data shared with third parties"
+  answer, this is the row it would come from.
+- **The `Contact Info › Name` question raised by `p_device_label`** (Identifiers › Device ID row) is
+  an open decision, not a documented fact. It must be resolved — either by declaring Name, or by
+  changing what the label sends — before submission.
