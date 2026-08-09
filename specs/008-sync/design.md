@@ -306,9 +306,58 @@ Soft-delete phía **local** là quyết định đáng cân hơn. Hai cách:
 con) và vẫn trả `eligibilityDiff` — chỉ đổi `context.delete(target)` thành đặt `deletedAt`.
 
 **Giữ tombstone bao lâu:** server **90 ngày**, sau đó pg_cron dọn (ghi note, KHÔNG implement — đúng
-convention của 0002/0004). Local **30 ngày**. Hệ quả cố ý: một máy offline **>90 ngày** rồi online
-lại sẽ **hồi sinh** những task nó đã xoá lúc offline. Đó là hướng lệch an toàn (giữ thừa hơn nuốt
-mất) và được chọn có ý thức, không phải sót.
+convention của 0002/0004). Local **30 ngày**.
+
+### 6.1 Hai van cho ca "offline lâu hơn tombstone" (anh Khôi duyệt 2026-08-10)
+
+Bản đầu của §6 dừng ở chỗ này: *"Hệ quả cố ý: một máy offline >90 ngày rồi online lại sẽ hồi sinh
+những task nó đã xoá lúc offline. Đó là hướng lệch an toàn và được chọn có ý thức, không phải sót."*
+Câu đó **sai ở chữ "an toàn"**, và đây là chỗ sửa lại.
+
+Hồi sinh không dừng ở cái máy đi lạc. Nó **đẩy ngược lên và lan ra mọi máy khác**: máy cũ pull về
+danh sách task còn sống, không thấy tombstone (bằng chứng đã bị dọn), nên coi bản sao cũ của mình là
+sự thật và push lên; LWW xử nó thắng vì `updated_at` của nó mới hơn tombstone đã biến mất. Kết quả
+là **task người dùng đã cố ý xoá tự mọc lại trên cả bốn máy**. Với sản phẩm ADHD, một danh sách tự
+đẻ thêm việc đã chết phá đúng thứ nó tồn tại để bảo vệ — nó không cùng loại với "giữ thừa một hàng".
+⇒ anh Khôi chốt đóng lại bằng **hai van**, cả hai đều chỉ làm đúng một việc: **đặt cursor về `null`**.
+
+**Van 1 — tự reset cursor khi nó quá cũ.** Cursor đang giữ cũ hơn **60 ngày** thì coi như không còn
+đáng tin: đặt `null`, kéo lại từ đầu.
+
+- `SyncMerge.cursorMaxAgeDays = 60` và `SyncMerge.serverTombstoneRetentionDays = 90`, khai **cạnh
+  nhau** trong `Shared/Sync/SyncMerge.swift`, kèm comment nói rõ **quan hệ `60 < 90` mới là thứ có
+  nghĩa, không phải hai con số rời**. Sửa một số mà không sửa số kia là mở lại đúng lỗ hổng này —
+  nên có thêm một test ghim thẳng bất biến đó (`SharedTests/SyncMergeTests.swift`).
+- 30 ngày chênh lệch là biên cho lệch đồng hồ, cho máy bật lên đúng lúc job dọn đang chạy, và cho
+  mọi lần đổi lịch dọn phía server sau này.
+- Hàm thuần `SyncMerge.cursorAfterStalenessCheck(_:now:)`; `SyncEngine.trustedCursor(forKey:)` gọi
+  nó lúc dựng request và **xoá luôn khoá** khi nó trả `nil` — không xoá thì `nextCursor` cuối vòng
+  đọc lại giá trị cũ và ghi thẳng trở lại, huỷ mất lần reset.
+- Cursor **không đọc được** cũng trả `nil`. Giá của việc đoán sai là một lần pull thừa; giá của việc
+  đoán đúng mà bỏ qua là task chết sống lại.
+- ⚠️ Đây là **ngoại lệ DUY NHẤT** của luật "cursor là chuỗi mờ, không bao giờ parse thành `Date`"
+  (client-contract §6). Nó không phạm vào lý do của luật: luật sinh ra để cursor **không đi vòng
+  qua `Date` rồi serialize lại** (Postgres có 6 chữ số thập phân, `Date` không giữ nổi, ghi lại là
+  nhảy sót hàng). Ở đây giá trị parse ra chỉ dùng để **trả lời một câu hỏi có/không**; chuỗi gửi
+  lên dây luôn là chuỗi gốc nguyên văn, hoặc không gì cả.
+
+**Van 2 — nút "Re-sync from scratch"** trong Settings (`SettingsView.swift` macOS +
+`SettingsIOSView.swift` iOS, **một khái niệm, một câu chữ**, chỉ khác danh từ máy). Cùng một hành
+động: đặt cursor về `null`. Dành cho ca nghi dữ liệu local đã lệch mà không đợi được 60 ngày.
+
+🔴 **Kéo lại từ đầu KHÔNG phải "xoá rồi tải lại", và không được biến thành thứ đó.** Nó là **một
+lượt sync bình thường** tình cờ bắt đầu từ cursor `null`: mọi hàng đi xuống, `SyncMerge.decide` phân
+xử từng hàng bằng LWW y như mọi lượt khác, hàng local mới hơn thì thắng và ở lại. **Không xoá task
+local nào, không bỏ hàng đang chờ đẩy, không xoá `syncedAt`.** Giá phải trả chỉ là băng thông và
+thời gian tỉ lệ với số task — nên nút phải nói thẳng điều đó ra, và vì nó vô hại theo cấu trúc nên
+**không cần hộp thoại xác nhận**.
+
+**Cái bẫy của van 2, đã vá:** nếu người dùng bấm nút đúng lúc một lượt sync đang bay, lượt đó đã gửi
+cursor CŨ đi rồi; lúc nó về, `nextCursor(previous: nil, candidate: ...)` sẽ nhận luôn cursor server
+trả cho một trang bắt đầu từ vị trí cũ — **reset bị xoá sổ trước khi kịp có tác dụng, và nút trông
+như đã chạy**. Vá bằng một bộ đếm `cursorEpoch`: lượt sync chụp giá trị lúc bắt đầu và **từ chối ghi
+cursor** nếu giá trị đã đổi giữa chừng (nó vẫn áp mọi dữ liệu đã kéo về — dữ liệu đó là thật và đã
+nằm trên đĩa; nó chỉ không được phép dời một cái cursor mà nó không còn quyền dời).
 
 ---
 
@@ -361,8 +410,15 @@ thì đặt `= completedAt ?? createdAt`, y hệt cơ chế `foldLegacyDependsOn
 (`VolarTask.swift:241`) — idempotent, chạy mãi cũng không sao.
 
 **Khi nào chạy** (anh Khôi sửa 2026-08-10, xem ngay dưới): app vào foreground · sau mỗi lần sửa
-(debounce ~2s) · **mỗi ~30 giây khi app đang FOREGROUND** · watch: lúc activate + lúc refresh
-complication. **Không realtime, không websocket, không APNs** đợt này (§12).
+(debounce ~2s) · **mỗi ~30 giây khi app đang FOREGROUND** · mạng vừa khôi phục (`NWPathMonitor`,
+xem dưới) · **user bấm "Re-sync from scratch"** (§6.1 van 2, `SyncReason.manualResync`) · watch:
+lúc activate + lúc refresh complication. **Không realtime, không websocket, không APNs** đợt này
+(§12).
+
+Mọi trigger đều đi qua đúng một cửa `requestSync(reason:)` — kể cả van 2. Nó **không** tự chạy một
+lượt sync riêng: nó xoá hai khoá cursor rồi xin một lượt như mọi trigger khác, nên "chỉ một chỗ
+quyết định có chạy round bây giờ không" vẫn đúng, và debounce 2 giây tự gộp nếu nó trùng một lần
+sửa local.
 
 **Vì sao 30 giây chứ không phải 5 phút — anh Khôi chốt 2026-08-10.** Bản đầu của §7 viết "mỗi 5
 phút khi đang mở". Câu hỏi làm lộ vấn đề: *hai máy cùng đang mở thì bên kia biết lúc nào?* Với 5
@@ -382,7 +438,9 @@ Ba ràng buộc đi kèm, **không được bỏ sót cái nào**:
    (30s → 60s → 120s → 240s, **trần 300s**); gặp `.offline` thì lùi ngay một nấc. **Về lại 30 giây
    ngay lập tức** khi có bất kỳ dấu hiệu nào rằng cửa sổ này đang sống: user sửa gì đó local · app
    vừa vào foreground · lượt vừa rồi kéo về được thay đổi thật · **mạng vừa khôi phục** (xem ngay
-   dưới). Nghĩa là **một máy đang được dùng thì luôn ở 30 giây**; chỉ máy mở mà bỏ đó mới trôi ra
+   dưới) · **user bấm "Re-sync from scratch"** — một yêu cầu tường minh là bằng chứng mạnh nhất có
+   thể rằng cửa sổ này đang được dùng. Nghĩa là **một máy đang được dùng thì luôn ở 30 giây**; chỉ
+   máy mở mà bỏ đó mới trôi ra
    xa. Không có backoff thì một laptop mở cả ngày = ~2.880 request/ngày/máy thuần tiếng ồn, nhân
    bốn máy — tốn quota mà không mua được gì.
 

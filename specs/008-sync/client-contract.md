@@ -367,6 +367,11 @@ cần biết nữa.
 - **Cursor là CHUỖI MỜ.** Không bao giờ parse `cursorTasks`/`cursorCompletions` thành `Date`. Lưu
   nguyên văn vào `UserDefaults`, gửi lại nguyên văn. Postgres trả timestamptz có 6 chữ số thập
   phân; đi vòng qua `Date` là mất độ chính xác và cursor nhảy sai.
+- ⚠️ **Ngoại lệ DUY NHẤT, thêm 2026-08-10 (design §6.1 van 1):**
+  `SyncMerge.cursorAfterStalenessCheck(_:now:)` được parse cursor — **chỉ để trả lời "cái này đã cũ
+  hơn `cursorMaxAgeDays` chưa"**, không bao giờ để serialize lại. Chuỗi đi lên dây vẫn luôn là chuỗi
+  gốc nguyên văn, hoặc `nil`. Đó là lý do ngoại lệ này không phạm vào lý do của luật ở trên. **Đừng
+  mở rộng nó**: mọi nhu cầu "so sánh cursor" khác vẫn phải đi qua `SyncMerge.nextCursor` (so lexical).
 - `updatedAt`/`deletedAt`/`completedAt` thì **phải** parse (LWW cần so sánh). B viết đúng một cặp
   helper trong `SyncPayload.swift`, không ai hand-roll cái thứ hai:
 
@@ -412,12 +417,38 @@ Ba ràng buộc của chu kỳ 30 giây, không được bỏ sót:
 2. **Không áp cho watch** — watch giữ activate-based. LTE + poll 30s = hết pin trước bữa trưa.
 3. **Backoff, làm trong v1.** Sau **4 lượt liên tiếp không có gì mới** thì nhân đôi (30 → 60 → 120 →
    240, **trần 300 giây**); gặp `.offline` thì lùi ngay một nấc. **Reset về 30 giây ngay** khi:
-   user sửa gì đó local · app vừa vào foreground · lượt vừa rồi kéo về được thay đổi thật. Máy đang
+   user sửa gì đó local · app vừa vào foreground · lượt vừa rồi kéo về được thay đổi thật · mạng
+   vừa khôi phục (`.networkRestored`) · user bấm "Re-sync from scratch" (`.manualResync`). Máy đang
    được dùng thì luôn ở 30 giây; chỉ máy mở-rồi-bỏ-đó mới trôi ra xa.
 
-AppState chỉ gọi đúng hai thứ: `SyncEngine.shared.attach(store:)` một lần lúc có `TaskStore`, và
-`SyncEngine.shared.requestSync(reason: .localEdit)` sau khi ghi. Không realtime, không websocket,
-không APNs (design §12).
+AppState gọi đúng ba thứ: `SyncEngine.shared.attach(store:)` một lần lúc có `TaskStore`,
+`SyncEngine.shared.requestSync(reason: .localEdit)` sau khi ghi, và
+`SyncEngine.shared.resyncFromScratch()` khi user bấm nút ở Settings (đi qua
+`AppState.resyncFromScratch()`). Không realtime, không websocket, không APNs (design §12).
+
+### 8.1 Van 2 — "Re-sync from scratch" (design §6.1, bổ sung 2026-08-10)
+
+`SyncEngine.resyncFromScratch()` làm **đúng ba việc**: tăng `cursorEpoch`, xoá
+`volar.sync.cursorTasks` + `volar.sync.cursorCompletions`, rồi `requestSync(reason: .manualResync)`.
+Nó **không** tự chạy một lượt sync riêng và **không** đụng vào bất cứ thứ gì khác.
+
+🔴 **Không xoá dữ liệu local. Không xoá cờ pending. Không xoá `syncedAt`.** Cái chạy sau đó là một
+lượt sync bình thường với cursor `nil`; LWW phân xử từng hàng như mọi lượt khác. "Xoá rồi tải lại"
+là một tính năng KHÁC và không ai được lặng lẽ biến nút này thành nó.
+
+**`cursorEpoch` giải quyết ca đua duy nhất của van này.** Bấm nút trong lúc một lượt đang bay: lượt
+đó đã gửi cursor CŨ, nên cursor nó mang về mô tả một trang bắt đầu từ vị trí cũ; ghi lại là **huỷ
+mất lần reset mà không có tín hiệu nào cho người dùng**. Nên: `runOneExchange` chụp `cursorEpoch`
+ngay dòng đầu, và **chỉ ghi cursor khi giá trị chưa đổi**. `markSynced` / `markCompletionsSynced` /
+`lastSuccessAt` **nằm ngoài** guard đó — chúng mô tả việc đã thật sự xảy ra, không phụ thuộc epoch.
+Van 1 **không** cần epoch: `trustedCursor` xoá khoá lúc DỰNG request, nên lượt đó thật sự đã gửi
+`nil` và cursor nó mang về là hợp lệ.
+
+Nút ở **cả hai** `Volar/Sources/Views/SettingsView.swift` và
+`VolarIOS/Sources/Views/SettingsIOSView.swift`, chỉ hiện khi `syncState.syncEnabled`, **cùng một câu
+chữ** (chỉ khác danh từ máy: "this Mac" / "this iPhone"), **không có hộp thoại xác nhận** — hành
+động vô hại theo cấu trúc và dòng chú thích dưới nút nói thẳng điều đó cùng với việc nó có thể lâu
+nếu nhiều task.
 
 ---
 

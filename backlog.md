@@ -156,18 +156,27 @@
   mutator; **đừng "sửa" bằng cách rải `updatedAt = Date()` khắp nơi**), `fetchCount`,
   `Set<UUID>.contains` trong `#Predicate`, và `$0.deletedAt == nil` trong `#Predicate`.
   Chưa push — Mac đỏ thì `git reset` được.
+  **Bổ sung 2026-08-10 (hai van an toàn, cũng UNVERIFIED):** `SyncMerge.cursorAfterStalenessCheck`
+  + hai hằng số, `SyncEngine.trustedCursor(forKey:)` / `resyncFromScratch()` / `cursorEpoch` /
+  `SyncReason.manualResync`, `AppState.resyncFromScratch()`, và nút "Re-sync from scratch" ở **cả**
+  `SettingsView.swift` (macOS) lẫn `SettingsIOSView.swift` (iOS). Số test lên **51** (8 test mới
+  trong `SyncMergeTests.swift`). Cần **QA bằng mắt** hai nút đó — vùng bấm có phủ đúng vùng nhìn
+  thấy không, và dòng chú thích dưới nút có xuống dòng đẹp trong cả hai chiều rộng cửa sổ không.
 - [ ] **`SyncMerge.nextCursor` so sánh cursor bằng LEXICAL string** (2026-08-10) — đúng chỉ vì
   Postgres render timestamptz ở định dạng cố định và Supabase để timezone UTC (`+00:00`). Phân tích
   tay thì mọi ranh giới đều đúng (phần thập phân bị trim zero, mốc giây, không có phần thập phân),
   và hướng lệch của bản thân cái guard là an toàn (đoán sai kiểu "candidate cũ hơn" chỉ dẫn tới kéo
   lại, vô hại). Nhưng nếu timezone của project đổi thì so sánh này sai câm. Kiểm khi có dữ liệu thật.
-- [ ] **Tách 2 API (full-fetch lúc mở app + polling theo `lastFetched`) — ANH KHÔI ĐỀ XUẤT, CHƯA
-  CHỐT, ĐỪNG TỰ LÀM** (2026-08-10). Phản hồi hiện tại: cursor đã lo được ca đó — offline bao lâu thì
-  cursor đứng yên bấy lâu, lượt sau kéo đủ; và full-fetch vốn chỉ là `p_cursor_tasks: null` trên
-  **cùng một API**, không cần API thứ hai. **Nhưng có đúng một ca delta KHÔNG đủ**: máy offline lâu
-  hơn thời gian giữ tombstone (server 90 ngày) sẽ không biết task nào đã bị xoá và sẽ **hồi sinh
-  chúng** — design §6 đã ghi nhận và cố ý chọn hướng lệch này (giữ thừa hơn nuốt mất). Nếu anh Khôi
-  muốn chữa thì đó là một quyết định riêng. Chờ anh quyết.
+- [x] **Tách 2 API (full-fetch lúc mở app + polling theo `lastFetched`) — ĐÃ TRẢ LỜI XONG
+  2026-08-10: KHÔNG cần API thứ hai, và cái lỗ thật sự đã được vá.** Câu trả lời cho phần "hai API"
+  vẫn là không: full-fetch vốn chỉ là `p_cursor_tasks: null` trên **cùng một API**. Còn ca delta
+  KHÔNG đủ — máy offline lâu hơn thời gian giữ tombstone (server 90 ngày) không biết task nào đã bị
+  xoá nên **hồi sinh chúng và lan ra mọi máy** — anh Khôi duyệt đóng lại, và đã làm bằng **hai van**
+  (design §6.1, client-contract §8.1): **van 1** tự đặt cursor về `null` khi nó cũ hơn 60 ngày
+  (`SyncMerge.cursorMaxAgeDays = 60` < `serverTombstoneRetentionDays = 90`, có test ghim bất biến);
+  **van 2** nút "Re-sync from scratch" ở Settings (cả macOS lẫn iOS) cũng chỉ đặt cursor về `null`.
+  Cả hai **không xoá dữ liệu local** — chỉ là một lượt sync bình thường với cursor `nil`, LWW phân
+  xử như thường. ⚠️ Swift UNVERIFIED (chưa build Mac).
 - [x] **★ ANH KHÔI DUYỆT `specs/008-sync/design.md`** — đã duyệt, implement xong 2026-08-10. Sáu câu
   đã gật: (1) Supabase thay CloudKit, lệch với `product-vision-v2.md`
   Tier-3 mục 10 nói "CloudKit sync"; (2) chấp nhận nội dung task (kể cả `sourceTranscript` nguyên
@@ -180,10 +189,64 @@
   test vector" nữa. Trước sync, hai thứ đó vô hình; sau sync chúng thành **hai máy chỉ hai việc khác
   nhau trên cùng một dữ liệu** — triệu chứng giống hệt lỗi sync nhưng nguyên nhân không nằm ở sync,
   nên sẽ đốt rất nhiều giờ debug nhầm chỗ. Chi tiết: `specs/008-sync/design.md` §11.
-- [ ] **Riêng tư: `docs/app-store-privacy.md` phải suy lại TỪ ĐẦU trước khi ship bản có sync**
-  (2026-08-09). File đó hiện khẳng định không có server-side sync và tự đặt điều kiện "nếu sau này
-  có server-side sync thì kết luận này phải suy lại từ đầu, không được giả định còn đúng". Sync
-  chính là cái điều kiện đó. Kèm theo: nhãn dinh dưỡng App Store phải khai lưu trữ nội dung user.
+- [x] **Riêng tư: `docs/app-store-privacy.md` đã suy lại TỪ ĐẦU cho sync — xong 2026-08-10.**
+  Hai mục đang khai SAI với Apple đã sửa: **(1) Identifiers › Device ID** lật từ "Collected: No"
+  sang **Yes** (`volar.sync.deviceId` — UUID sinh một lần, sống vô thời hạn, lưu vào
+  `sync_devices` gắn `profile_id`, chỉ mất khi user bấm "Delete data on server" hoặc xoá tài
+  khoản); **(2) User Content** tách thành **hai đường** — cloud-parse (gửi đi rồi thôi) và **sync
+  (nằm lại trên server VÔ THỜI HẠN**, gồm `title`/`details`/`notes`/`resumeNote`/
+  `delegation.label` và **`sourceTranscript` nguyên văn**), gắn danh tính bằng khoá ngoại nên
+  **không còn là judgment call**, và chỉ xảy ra khi **Pro VÀ user tự bật công tắc**. Kèm: mục
+  Calendar đã **suy lại từ đầu** (kết luận vẫn "Data Not Collected" nhưng trên lập luận mới —
+  không có gì từ EventKit vào `TaskPayload`, `eventMap`/`volarCalendarID` là `UserDefaults` và
+  design §3 cố ý không sync; ghi rõ 3 điều kiện lật ngược), §2 thêm 8 dòng trigger cho sync, §3
+  thêm phần giả định của 008. **Còn phải quyết trước khi nộp:** hai mục 🔴 ngay dưới đây.
+- [ ] **🔴 LỖI THẬT, không phải chuyện nhãn: client GỬI nội dung task lên server KHI CỔNG ĐANG ĐÓNG**
+  (2026-08-10, phát hiện khi viết lại `app-store-privacy.md`). `SyncEngine.attach()` được gọi vô
+  điều kiện và poll theo lịch riêng; **không có chỗ nào ở client kiểm `syncState.isPro` /
+  `syncState.syncEnabled` trước khi gọi `sync_exchange`**. Hệ quả: một user **free** đã đăng nhập —
+  hoặc một user Pro cố ý để công tắc TẮT — vẫn bị gửi lên server toàn bộ task đang pending (kể cả
+  `sourceTranscript` nguyên văn) cùng `p_device`/`p_device_label`. Server raise
+  `sync_pro_required`/`sync_disabled` và abort transaction nên **không lưu gì**, nhưng dữ liệu đã
+  qua dây. Điều đó **đi ngược thẳng mục đích của màn xác nhận ở design §8.1** — màn đó sinh ra để
+  server không biết gì về một máy trước khi user đồng ý. Chữa nhỏ: một guard trước khi dựng request
+  (đọc `SyncState` đã cache; đang offline/chưa biết thì vẫn cho thử, đừng tự khoá mình). Làm xong
+  thì sửa lại hai đoạn "over-declaration caveat" trong `app-store-privacy.md` (câu trả lời vẫn là
+  "Yes", chỉ lập luận hẹp lại). Cũng tiết kiệm băng thông cho mọi user free.
+- [ ] **🔴 QUYẾT TRƯỚC KHI NỘP APP STORE: `p_device_label` đang chở TÊN NGƯỜI DÙNG** (2026-08-10).
+  `SyncEngine.deviceLabel` = `Host.current().localizedName` (Mac) / `UIDevice.current.name` (iOS),
+  lưu vào `sync_devices.label`. Mặc định iOS thường là **"Khôi's iPhone"** ⇒ một **tên người** nằm
+  trên server, gắn với tài khoản, như tác dụng phụ của một dòng vốn để nhận diện máy. Hai đường,
+  chọn một: **(a)** khai `Contact Info › Name: Yes` trên nhãn dinh dưỡng (an toàn, tốn thêm một
+  hạng mục hiện rõ trên App Store); **(b)** đừng gửi tên máy thô nữa — chỉ gửi phần model/OS, hoặc
+  cho user tự đặt nhãn — rồi (a) thành không cần. Khuyến nghị **(b)** nếu kịp, **(a)** nếu không.
+  **Cấm** ship kiểu vẫn gửi tên thật mà khai Name = "No". Chi tiết: `docs/app-store-privacy.md`
+  mục Identifiers › Device ID.
+- [ ] **Epoch guard của van 2 KHÔNG có test bảo vệ** (2026-08-10). `cursorEpoch` trong
+  `SyncEngine.runOneExchange` là logic sửa **race condition** — bấm "Re-sync from scratch" đúng lúc
+  một lượt đang bay thì lượt cũ sẽ ghi đè cursor và nút thành **no-op im lặng**. Hiện **không có
+  test nào** chạm tới nó: `cursorEpoch` và `runOneExchange` đều `private`, và cần một lượt gọi mạng
+  thật mới chạy tới, trong khi `SharedTests` chỉ có test hàm thuần. Sonnet **cố ý không** nới access
+  control cũng không dựng mock layer — đúng, vì đó là thay đổi kiến trúc ngoài phạm vi. Nhưng ghi
+  lại cho rõ: **ai đó dọn `runOneExchange` sáu tháng nữa, bỏ hai dòng `if epoch == cursorEpoch`, thì
+  mọi test vẫn xanh và nút lại hỏng im lặng.** Cách chữa: cho `SyncClient` một seam test bơm được
+  response (protocol + injected fake), rồi test được cả epoch guard lẫn thứ tự apply-rồi-mới-ghi-
+  cursor (§4b) — hiện §4b cũng chỉ được bảo vệ bằng comment. **Đáng làm khi** có thêm một lỗi thứ
+  hai trong vòng đời một lượt exchange, hoặc khi bắt đầu sửa `SyncEngine` thường xuyên.
+- [ ] **Máy ma trong `sync_devices` sau khi cài lại app** (2026-08-10). `deviceId` là
+  `UUID().uuidString` sinh lần đầu, lưu ở `UserDefaults` key `volar.sync.deviceId`. Gỡ app là mất ⇒
+  cài lại sinh UUID mới ⇒ **cùng một máy vật lý hiện thành máy MỚI** trong danh sách Settings. Cài
+  lại vài lần thì user nhìn một danh sách máy không nhận ra cái nào là cái nào. Keychain **không**
+  cứu được: từ iOS 10.3 Apple xoá keychain khi gỡ app, nên không có chỗ nào bền hơn `UserDefaults`.
+  Chữa rẻ vì `sync_devices` đã có sẵn `first_seen`/`last_seen`: **(a)** ẩn hoặc dọn máy có
+  `last_seen` quá cũ (ví dụ 90 ngày), hoặc **(b)** cho user tự xoá một máy khỏi danh sách. Chưa cần
+  chọn.
+  🔴 **Quyết định nền, ghi để người sau khỏi "sửa cho đúng chuẩn": CỐ Ý KHÔNG dùng
+  `identifierForVendor`/`ANDROID_ID`.** Hai lý do: (1) không identifier nào của hệ điều hành tồn tại
+  trên cả năm nền tảng (macOS không có IDFV, Windows không có gì, Play hạn chế `ANDROID_ID`);
+  (2) quan trọng hơn — UUID tự sinh **không liên kết được với app nào khác**, nên câu khai *"Used
+  for tracking: No"* trong `app-store-privacy.md` là **sự thật cấu trúc**, không phải lời hứa. IDFV
+  chia sẻ giữa mọi app cùng nhà phát hành, dùng nó là làm câu khai đó yếu đi.
 - [ ] **Nổ chuông đa thiết bị — CHẤP NHẬN đợt này, ghi để khỏi tưởng là bug** (2026-08-09).
   Không sync `ReminderRecord` (nó suy ra được từ task), nên Mac + iPhone + Watch cùng derive và
   **cùng kêu**. iPhone+Watch ghép đôi thì hệ thống tự dedupe; watch standalone thì không. Chữa đúng
