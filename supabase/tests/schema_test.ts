@@ -28,6 +28,7 @@ import {
   validateDreadMessage,
   validateNextActionMessage,
   validateParsedTaskArray,
+  validateParsedTaskArrayWithCues,
   validateRequestBody,
 } from "../functions/_shared/schema.ts";
 
@@ -894,4 +895,136 @@ Deno.test("back-compat: a parse request with no client_caps validates identicall
     assertEquals(result.value.timezone, "Asia/Ho_Chi_Minh");
     assertEquals(result.value.clientCaps, undefined);
   }
+});
+
+// ---------------------------------------------------------------------------------------------
+// 17. `task_cues_v1` model-output validation (`validateCue`, exercised through
+//     `validateParsedTaskArrayWithCues`) — Opus design 2026-08-08,
+//     `specs/006-cues-and-waiting/design.md` §2 Việc B + tasks.md T1.2/T1.4.
+//     `validateCue` itself is not exported (same posture as `validateCondition`/
+//     `validateReminderOverride` etc — internal helpers are exercised through the public array
+//     validators, never unit-tested in isolation, so a test can never diverge from what the real
+//     response path actually runs).
+// ---------------------------------------------------------------------------------------------
+
+function rawTaskWithCue(cue: unknown, title = "Test feature này"): Record<string, unknown> {
+  const raw = validRawTask(title);
+  raw.cue = cue;
+  return raw;
+}
+
+Deno.test("cue: well-formed cue (kind + verbatim) survives when cues are enabled", () => {
+  const raw = rawTaskWithCue({ kind: "wake", verbatim: "ngủ dậy thì" });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertExists(result);
+  assertEquals(result!.tasks.length, 1);
+  assertEquals(result!.tasks[0].cue, { kind: "wake", verbatim: "ngủ dậy thì" });
+});
+
+Deno.test("cue: all three kinds (wake, dayEnd, unknown) survive as given", () => {
+  for (const kind of ["wake", "dayEnd", "unknown"] as const) {
+    const raw = rawTaskWithCue({ kind, verbatim: "sau khi họp xong" });
+    const result = validateParsedTaskArrayWithCues([raw]);
+    assertEquals(result!.tasks[0].cue?.kind, kind);
+  }
+});
+
+Deno.test("cue: unrecognized kind string is coerced to 'unknown', verbatim kept (fail-open on kind)", () => {
+  const raw = rawTaskWithCue({ kind: "bogus-kind", verbatim: "tới văn phòng thì" });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertExists(result);
+  assertEquals(result!.tasks.length, 1, "the TASK must survive even though kind was garbage");
+  assertEquals(result!.tasks[0].cue, { kind: "unknown", verbatim: "tới văn phòng thì" });
+});
+
+Deno.test("cue: missing kind entirely is coerced to 'unknown', verbatim kept", () => {
+  const raw = rawTaskWithCue({ verbatim: "khi mở laptop" });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertEquals(result!.tasks[0].cue, { kind: "unknown", verbatim: "khi mở laptop" });
+});
+
+Deno.test("cue: empty verbatim drops the cue, task survives with everything else intact (fail-closed on verbatim)", () => {
+  const raw = rawTaskWithCue({ kind: "wake", verbatim: "" });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertExists(result);
+  assertEquals(result!.tasks.length, 1);
+  assertEquals(result!.tasks[0].cue, undefined);
+  assertExists(result!.tasks[0].title);
+  assertExists(result!.tasks[0].deadline, "the rest of the task must be completely untouched");
+});
+
+Deno.test("cue: whitespace-only verbatim drops the cue, task survives", () => {
+  const raw = rawTaskWithCue({ kind: "wake", verbatim: "   " });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertEquals(result!.tasks[0].cue, undefined);
+  assertExists(result!.tasks[0].title);
+});
+
+Deno.test("cue: verbatim over MAX_TASK_TITLE_CHARS drops the cue, task survives", () => {
+  const raw = rawTaskWithCue({ kind: "dayEnd", verbatim: "x".repeat(MAX_TASK_TITLE_CHARS + 1) });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertEquals(result!.tasks[0].cue, undefined);
+  assertExists(result!.tasks[0].title);
+});
+
+Deno.test("cue: verbatim exactly MAX_TASK_TITLE_CHARS is kept", () => {
+  const verbatim = "x".repeat(MAX_TASK_TITLE_CHARS);
+  const raw = rawTaskWithCue({ kind: "unknown", verbatim });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertEquals(result!.tasks[0].cue, { kind: "unknown", verbatim });
+});
+
+Deno.test("cue: missing verbatim entirely drops the cue, task survives", () => {
+  const raw = rawTaskWithCue({ kind: "wake" });
+  const result = validateParsedTaskArrayWithCues([raw]);
+  assertEquals(result!.tasks[0].cue, undefined);
+  assertExists(result!.tasks[0].title);
+});
+
+Deno.test("cue: garbage shapes (string/number/array/null) all drop the cue, task survives every time", () => {
+  for (const garbage of ["just a string", 123, [], null, true]) {
+    const raw = rawTaskWithCue(garbage);
+    const result = validateParsedTaskArrayWithCues([raw]);
+    assertExists(result, `garbage cue ${JSON.stringify(garbage)} must not take down the whole array`);
+    assertEquals(result!.tasks.length, 1);
+    assertEquals(result!.tasks[0].cue, undefined);
+    assertExists(result!.tasks[0].title);
+  }
+});
+
+Deno.test("cue: absent cue field entirely -> no cue on the task, everything else validates normally", () => {
+  const result = validateParsedTaskArrayWithCues([validRawTask()]);
+  assertExists(result);
+  assertEquals(result!.tasks[0].cue, undefined);
+  assertExists(result!.tasks[0].title);
+  assertExists(result!.tasks[0].deadline);
+});
+
+Deno.test("cue: a broken cue among 3 tasks only costs that ONE task its cue, the other two keep theirs", () => {
+  const t1 = rawTaskWithCue({ kind: "wake", verbatim: "ngủ dậy thì" }, "Task 1");
+  const t2 = rawTaskWithCue({ kind: "bogus", verbatim: "" }, "Task 2"); // both fields broken
+  const t3 = rawTaskWithCue({ kind: "dayEnd", verbatim: "trước khi ngủ" }, "Task 3");
+  const result = validateParsedTaskArrayWithCues([t1, t2, t3]);
+  assertExists(result);
+  assertEquals(result!.tasks.length, 3, "a broken cue must never drop the task itself");
+  assertEquals(result!.tasks[0].cue, { kind: "wake", verbatim: "ngủ dậy thì" });
+  assertEquals(result!.tasks[1].cue, undefined);
+  assertEquals(result!.tasks[2].cue, { kind: "dayEnd", verbatim: "trước khi ngủ" });
+});
+
+// --- Back-compat: the load-bearing property for the whole capability -----------------------------
+Deno.test("cue: back-compat — validateParsedTaskArray (no cues cap) NEVER surfaces cue, even if the model emits one unprompted", () => {
+  const raw = rawTaskWithCue({ kind: "wake", verbatim: "ngủ dậy thì" });
+  const result = validateParsedTaskArray([raw]); // the OLD/plain entry point — cuesEnabled defaults false
+  assertExists(result);
+  assertEquals(result!.tasks.length, 1);
+  assertEquals(
+    (result!.tasks[0] as unknown as Record<string, unknown>).cue,
+    undefined,
+    "a client that never declared task_cues_v1 must get a response with no cue key at all",
+  );
+  // every other field on the task is completely unaffected by task_cues_v1 existing at all
+  assertExists(result!.tasks[0].title);
+  assertExists(result!.tasks[0].deadline);
+  assertExists(result!.tasks[0].notes);
 });

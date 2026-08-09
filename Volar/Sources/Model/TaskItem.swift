@@ -68,6 +68,12 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     var reminderOverride: ReminderPolicy?
     /// "Save game" note surfaced on re-entry (FR-042).
     var resumeNote: String?
+    /// Implementation-intention cue (specs/006-cues-and-waiting/design.md §2 Việc B) — the user's
+    /// own if-then utterance ("ngủ dậy thì test feature này"), read back verbatim at the right
+    /// moment. SURFACING ONLY (design.md §1): this field never gates eligibility and is not a
+    /// `VolarCore.Condition` — a task with a cue is eligible exactly as if it had none. See
+    /// `Reminders/CueFiring.swift` for the pure decision logic that reads it.
+    var cue: TaskCue?
     /// Đổi-gió counter; ≥3 triggers a one-time breakdown suggestion (FR-030).
     var switchAwayCount: Int
     /// Latest completion instant; full history lives in `CompletionEvent` — recurrence resets
@@ -103,7 +109,8 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         switchAwayCount: Int = 0,
         completedAt: Date? = nil,
         parentId: UUID? = nil,
-        delegation: DelegationMeta? = nil
+        delegation: DelegationMeta? = nil,
+        cue: TaskCue? = nil
     ) {
         self.id = id
         self.title = title
@@ -127,6 +134,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         self.completedAt = completedAt
         self.parentId = parentId
         self.delegation = delegation
+        self.cue = cue
     }
 
     /// Derived: "done" is purely the engine status, never a separately stored bool.

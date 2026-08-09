@@ -158,6 +158,21 @@ struct ParsedTask: Sendable, Equatable {
     var conditions: [ParsedCondition] = [] // taskDone(by fuzzy title ref) / afterDate / external
     var subtasks: [String] = [] // breakdown step titles (may be empty)
     var followUpReview: Bool = false // "when done, review it" → a second .review task
+    /// task_cues_v1 (`specs/006-cues-and-waiting/design.md`): populated only when the utterance
+    /// anchored this task to a real EVENT in the user's day ("ngủ dậy thì...", "sau khi ăn trưa
+    /// thì...") rather than a clock time. A SURFACING signal only (design.md §1) — carries no
+    /// eligibility/gating meaning, and MUST NEVER be turned into `deadline`/a `.afterDate`
+    /// condition anywhere in this codebase; that exact conflation (forcing an event-anchored
+    /// utterance into a fabricated clock time) is the live bug this feature exists to fix.
+    /// `TaskCue`/`CueKind` are owned by a parallel agent (`Model/TaskCue.swift`) — referenced
+    /// here by name only, never redefined.
+    ///
+    /// DEFAULTED (`= nil`) for the same "many pre-existing call sites" reason `startTime` above
+    /// is defaulted — every call site that predates this field (`HeuristicNLParser.parseOne`
+    /// twice in this file, `IntentRouter.titleOnlyTask`, every hand-built test fixture across
+    /// `Volar/Tests/`) keeps compiling untouched, and a payload encoded before this field existed
+    /// still decodes via `decodeIfPresent` below (same treatment `startTime`/`deadline` get).
+    var cue: TaskCue? = nil
     var sourceTranscript: String // verbatim utterance, ALWAYS retained
 }
 
@@ -179,7 +194,7 @@ extension ParsedTask: Codable {
     /// this extension exists at all).
     private enum CodingKeys: String, CodingKey {
         case title, notes, deadline, startTime, deadlineIsEstimated, estimateMinutes, priority,
-             reminderOverride, recurrence, kind, conditions, subtasks, followUpReview, sourceTranscript
+             reminderOverride, recurrence, kind, conditions, subtasks, followUpReview, cue, sourceTranscript
     }
 
     init(from decoder: Decoder) throws {
@@ -197,6 +212,7 @@ extension ParsedTask: Codable {
         conditions = try container.decodeIfPresent([ParsedCondition].self, forKey: .conditions) ?? []
         subtasks = try container.decodeIfPresent([String].self, forKey: .subtasks) ?? []
         followUpReview = try container.decodeIfPresent(Bool.self, forKey: .followUpReview) ?? false
+        cue = try container.decodeIfPresent(TaskCue.self, forKey: .cue)
         sourceTranscript = try container.decode(String.self, forKey: .sourceTranscript)
     }
 
@@ -215,6 +231,7 @@ extension ParsedTask: Codable {
         try container.encode(conditions, forKey: .conditions)
         try container.encode(subtasks, forKey: .subtasks)
         try container.encode(followUpReview, forKey: .followUpReview)
+        try container.encodeIfPresent(cue, forKey: .cue)
         try container.encode(sourceTranscript, forKey: .sourceTranscript)
     }
 }
@@ -686,21 +703,27 @@ struct HeuristicNLParser: NLParser {
 /// `IntentRouter`'s always-available floor route (`IntentParsing.swift`'s `heuristic: IntentParser`
 /// default arg + `heuristic.breakdown(...)` call).
 extension HeuristicNLParser: IntentParser {
-    /// Template floor for breakdown mode: no real step-by-step reasoning (this parser is pure
-    /// keyword/regex text-in/`ParsedTask`-out, per its own header comment — it has no model to ask
-    /// "what are the steps?"), just a generic 5-step scaffold shaped to satisfy the contract's
-    /// "3…9 step titles" bound so the confirm card always has SOMETHING to show even when FM and
-    /// Cloud both fell through. Never crashes; an empty/whitespace-only title yields `[]` rather
-    /// than fabricating steps for nothing (constitution II — never silently guess).
+    /// DEAD-CODE CLEANUP (`specs/006-cues-and-waiting/design.md` §0.1, 2026-08-08): this used to
+    /// return a hard-coded 5-step English scaffold ("Gather what's needed for X", "Start the
+    /// first small piece", "Work through the middle of it", "Check the result", "Wrap up X") so
+    /// the confirm card always had SOMETHING to show even when FM and Cloud both fell through.
+    /// It never actually reached a user: `IntentRouter.breakdown`/`.breakdownWithContext` stopped
+    /// calling into `HeuristicNLParser` entirely on 2026-07-28 (anh Khôi chốt — see
+    /// `IntentParsing.swift`'s `IntentRouter` class doc comment), and the one real app call site
+    /// (`AppState.fetchBreakdown`) passes `heuristicFloor: []`. Repo-wide grep before this change
+    /// confirmed there is no remaining production call site for this method — `design.md` §0.1
+    /// verified this precisely so this cleanup wouldn't be a guess.
+    ///
+    /// Returning `[]` instead of deleting the method (still required for `IntentParser`
+    /// conformance, which `IntentRouter`'s dormant reconnect path — see that class's doc comment
+    /// — depends on `HeuristicNLParser` still satisfying) follows the SAME reasoning anh Khôi
+    /// already applied 2026-07-29 when he rejected a hard-coded 3-to-9-step `too_big` floor: a
+    /// pure keyword/regex parser with no model has no honest way to know what the physical steps
+    /// of an arbitrary task actually are, so a fixed English template dressed up as "the plan" is
+    /// fabrication, not a floor (constitution II — never silently guess). `[]` is the honest
+    /// answer; a caller that ever reconnects this tier is responsible for telling the user
+    /// breakdown needs a real model, never for showing invented steps.
     func breakdown(title: String, notes: String?) async -> [String] {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return [] }
-        return [
-            "Gather what's needed for \(trimmedTitle)",
-            "Start the first small piece",
-            "Work through the middle of it",
-            "Check the result",
-            "Wrap up \(trimmedTitle)"
-        ]
+        []
     }
 }

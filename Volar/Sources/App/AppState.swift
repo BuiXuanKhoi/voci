@@ -704,6 +704,20 @@ struct UpcomingDayGroup: Identifiable, Equatable {
     let tasks: [TaskItem]
 }
 
+/// One implementation-intention cue currently on screen (`AppState.cueBanner`'s value type,
+/// specs/006-cues-and-waiting/design.md §2 Việc B / §3). A thin DISPLAY projection of `TaskCue` —
+/// never the type itself, and `CueKind` is deliberately NOT carried through here at all: design.md
+/// §3 forbids ever rendering "wake"/"dayEnd"/"unknown" on screen, and the surest way to guarantee
+/// that is to not even hand the renderer a `kind` to accidentally interpolate. `createdAt` is
+/// carried only so the view can phrase a calm, date-aware lead-in ("Tối qua anh nói…" vs "Anh
+/// nói…") without reaching back into `AppState`/`TaskCue` for it.
+struct CueBanner: Identifiable, Equatable {
+    var id: UUID { taskId }
+    let taskId: UUID
+    let verbatim: String
+    let createdAt: Date
+}
+
 @Observable
 @MainActor
 final class AppState {
@@ -1243,6 +1257,15 @@ final class AppState {
     /// everyone through it again just by bumping the suffix, without touching this file's read/write
     /// call sites (`init` below / `endTour()` further down).
     private static let hasSeenTourKey = "volar.hasSeenTourV1"
+    /// 006-cues-and-waiting (design.md §2 Việc B) / backlog.md "(A) RE-ENTRY": last moment the app
+    /// genuinely became active — an APP-scoped key, deliberately NOT `lastTouchedAt` on `TaskItem`
+    /// (the re-entry/decay backlog item's own PER-TASK staleness clock, a different concern the
+    /// task brief for this feature explicitly says not to conflate). Named to match exactly what
+    /// backlog.md's "(A) RE-ENTRY" entry already proposes for its own future use ("khoá UserDefaults
+    /// `volar.lastActiveAt`"), so whichever feature lands second reads/writes the SAME key instead
+    /// of inventing a duplicate. Read+written only by `recordAppBecameActive(now:)` below — see that
+    /// method's own doc comment for the read-before-write ordering this key's correctness depends on.
+    static let lastActiveAtKey = "volar.lastActiveAt"
 
     init(
         store: TaskStore? = nil,
@@ -1450,6 +1473,30 @@ final class AppState {
         // kicks off. Called last, same reasoning as `appLinkHandler?.onCapture` immediately above:
         // every stored property is settled by this point, and this call captures `self`.
         startAccountLifecycle()
+
+        // 006-cues-and-waiting (design.md §2 Việc B): registered ONCE here, in `init`, rather than
+        // `activateServices()` — that method is deliberately called TWICE (main window's `.task` +
+        // `AppDelegate.applicationDidFinishLaunching`, both documented idempotent for everything
+        // currently inside it). A `NotificationCenter` observer has no such idempotency: registering
+        // it there would attach a SECOND handler on the second call, so every real activation would
+        // fire `recordAppBecameActive` twice — two handlers racing to read the same "previous"
+        // `lastActiveAt` before either writes `now`, silently breaking that method's own
+        // read-before-write contract. `init` runs exactly once per `AppState` instance, and there is
+        // exactly one instance for the app's lifetime (`VolarApp.init()`'s own doc comment), so this
+        // is the one place a single registration is guaranteed. `@Sendable` + explicit
+        // `Task { @MainActor in ... }` hop for the same reason `AppDelegate`'s own notification
+        // closures need it (`VolarApp.swift`'s `requestAuthorization`/wake-observer comments): a
+        // MainActor-inferred closure literal invoked by a system API that doesn't itself run on
+        // `@MainActor` traps at runtime under Swift 6 isolation checking — `queue: .main` here makes
+        // that moot in practice (the callback DOES land on main), but the hop costs nothing and keeps
+        // this immune to that gotcha regardless.
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { @Sendable [weak self] _ in
+            _Concurrency.Task { @MainActor in
+                self?.recordAppBecameActive()
+            }
+        }
     }
 
     // MARK: - Account & Entitlements actions
@@ -1662,6 +1709,133 @@ final class AppState {
             return overridden
         }
         return activeTask
+    }
+
+    // MARK: - 006-cues-and-waiting: cue banner + waiting-mode holder (T5, wire UI)
+    //
+    // Both surfaces below follow the SAME ambient contract (design.md §3, this task's own brief):
+    // no push notification, no sound, no full-screen takeover, no badge/count. `TodayView` is the
+    // one screen that renders them (see that file's `todayScrollView`), alongside the other
+    // "renders nothing when there's nothing to show" ambient banners already living there
+    // (`SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/`DelegationAmbientSection`).
+
+    /// One cue on screen right now, or `nil`. Written ONLY by `recordAppBecameActive`/
+    /// `noteNaturalCueTouch` below — never a live computed property, because `CueFiring.firing`'s
+    /// wake-gap math is only meaningful measured against the value of `lastActiveAtKey` from
+    /// BEFORE it gets overwritten for this activation; a computed property re-reading the (by then
+    /// already-updated) key on every render would see a gap of zero forever.
+    private(set) var cueBanner: CueBanner?
+
+    /// design.md §3 ("Cue chỉ nhắc một lần mỗi lần fire. Im lặng = 'đừng hỏi nữa', không phải 'hỏi
+    /// to hơn'."): `CueFiring.firing`/`.pending` are pure functions with no memory of their own by
+    /// design (see that file's own header) — this is the caller-side bookkeeping the task brief
+    /// explicitly assigns to T5. Keyed by task id (a task carries at most one `TaskCue` —
+    /// `TaskItem.cue: TaskCue?` — so the task's own id is a sufficient identity for "already shown
+    /// this one"). In-memory only, matching every other "this session" concept already in this file
+    /// (`captureSession`/`resurfaceSession`): a fresh launch is a fresh session, on purpose — this
+    /// is NOT the same thing as `TaskCue.expiresAt` (the 48h swallow-proof floor lives in the data
+    /// itself; this is purely "don't repeat myself within one run").
+    private var shownCueTaskIDs: Set<UUID> = []
+
+    /// Every open task's cue, paired with its owning task id — the exact shape `CueFiring.firing`/
+    /// `.pending` take as their `cues:` parameter. `openTasks`, not `tasks`: a cue on a `.done`/
+    /// `.archived` task has nothing left to remind anyone about (mirrors every other ambient
+    /// surface in this file reading `openTasks` rather than the raw store).
+    private var openCues: [(taskId: UUID, cue: TaskCue)] {
+        openTasks.compactMap { task in task.cue.map { (taskId: task.id, cue: $0) } }
+    }
+
+    /// Picks the first candidate id not already shown this session — factored out as a `static`,
+    /// zero-dependency function (no `Date()`, no `UserDefaults`, no `self`) purely so it's
+    /// unit-testable on its own, per this task's own instruction to pull decision logic out of
+    /// `AppState` wherever it can be (precedent: `FullScreenEscalationDecision.swift`). Trivial by
+    /// design — the interesting logic already lives in `CueFiring`; this is only the "don't repeat"
+    /// half that has to live somewhere stateful.
+    static func firstUnshownCue(_ candidates: [UUID], alreadyShown: Set<UUID>) -> UUID? {
+        candidates.first { !alreadyShown.contains($0) }
+    }
+
+    /// The app genuinely became active (`NSApplication.didBecomeActiveNotification`, registered
+    /// once in `init` above) — the ONLY call site allowed to run `CueFiring.firing`'s wake-gap math,
+    /// and the ONLY writer of `Self.lastActiveAtKey`.
+    ///
+    /// ORDER IS LOAD-BEARING (flagged explicitly per this task's own brief, so nobody "cleans up"
+    /// the ordering later): the OLD value must be read and handed to `CueFiring.firing` BEFORE the
+    /// new value overwrites it. Write first and every gap becomes `now - now == 0`, which never
+    /// clears `CueFiring.wakeGapHours`, which means the wake cue silently never fires again — a
+    /// bug no test can catch (nothing here is wrong in isolation; only the ORDER of two correct
+    /// lines is), which is exactly why this comment exists.
+    func recordAppBecameActive() {
+        // `clock()`, never a bare `Date()` default — this file's established seam for "now" (every
+        // other action method reads it the same way, e.g. `activateServices()`'s own call sites)
+        // specifically so tests can inject a fixed clock via `AppState.init(clock:)` rather than
+        // fighting the real wall clock. A default-parameter expression can't reference `self.clock`
+        // anyway (default values may not capture `self`), which is the other reason this reads it
+        // from inside the body instead of as `now: Date = ...`.
+        let now = clock()
+        let previous = UserDefaults.standard.object(forKey: Self.lastActiveAtKey) as? Date
+        let firingIDs = CueFiring.firing(now: now, lastActiveAt: previous, cues: openCues)
+        UserDefaults.standard.set(now, forKey: Self.lastActiveAtKey)
+
+        guard let chosenID = Self.firstUnshownCue(firingIDs, alreadyShown: shownCueTaskIDs),
+              let cue = openTasks.first(where: { $0.id == chosenID })?.cue
+        else { return }
+        shownCueTaskIDs.insert(chosenID)
+        cueBanner = CueBanner(taskId: chosenID, verbatim: cue.verbatim, createdAt: cue.createdAt)
+    }
+
+    /// The "natural touch point" half of design.md §2 Việc B ("Ở điểm chạm tự nhiên (mở popover):
+    /// dùng CueFiring.pending(...), cũng ambient"). Called from `TodayView`'s `.onAppear` — the main
+    /// window becoming visible is this app's most central "the user is looking at Volar right now"
+    /// moment; `PopoverView` was deliberately NOT used for this (judgment call, flagged in this
+    /// task's final report): it is capture-flow-specific (recording/confirm cards for a brand-new
+    /// utterance), and surfacing an unrelated already-saved task's cue in the middle of capturing a
+    /// different one would read as a non-sequitur, not an ambient aside.
+    ///
+    /// Never overwrites an already-showing banner (`cueBanner != nil` guard) — a wake cue that just
+    /// fired this activation takes priority over a merely-pending one; this only fills the slot in
+    /// when nothing is on screen yet.
+    func noteNaturalCueTouch() {
+        guard cueBanner == nil else { return }
+        let now = clock() // same `clock()`-not-`Date()` seam as `recordAppBecameActive` above.
+        let pendingIDs = CueFiring.pending(now: now, cues: openCues)
+        guard let chosenID = Self.firstUnshownCue(pendingIDs, alreadyShown: shownCueTaskIDs),
+              let cue = openTasks.first(where: { $0.id == chosenID })?.cue
+        else { return }
+        shownCueTaskIDs.insert(chosenID)
+        cueBanner = CueBanner(taskId: chosenID, verbatim: cue.verbatim, createdAt: cue.createdAt)
+    }
+
+    /// `WaitingMode.decide`'s live reading, or `nil` when there's no anchor in the next 4 hours
+    /// (design.md §2 Việc C: silence is the default — an empty horizon must never be dressed up
+    /// into ambient noise). A plain computed property, unlike `cueBanner` above: `WaitingMode.decide`
+    /// has no gap-since-an-overwritten-value hazard the way `CueFiring.firing` does, so recomputing
+    /// it fresh on every render (same "no cached state that can drift" convention `activeTask`
+    /// itself already documents) is both safe and simpler than latching it.
+    var waitingModeDecision: WaitingMode.Decision? {
+        let now = clock()
+        return WaitingMode.decide(now: now, tasks: tasks, eligibleOrder: Self.eligibleOrder(from: tasks, now: now))
+    }
+
+    /// The FULL eligible-task ordering — `WaitingMode.decide`'s `eligibleOrder:` parameter contract
+    /// (design.md §2 Việc C): "phải là danh sách eligible ĐẦY ĐỦ engine trả về, KHÔNG được cắt
+    /// top-N."
+    ///
+    /// 2026-08-09 (Opus review of T5, specs/006-cues-and-waiting): this used to be a hand-copied
+    /// reimplementation of `VolarCore.eligibleTasks`'s filter rule, written because that function
+    /// (and the ordered list this needs) had no public entry point at the time. That copy was a
+    /// live silent-drift risk — a future change to `NextTask.swift`'s eligibility rule would compile
+    /// cleanly here while this file quietly kept computing the OLD rule, corrupting
+    /// `WaitingMode.Decision.anchorIsEligible` with no compiler error and no test able to catch it.
+    /// `VolarCore.eligibleTasksOrdered(from:now:calendar:)` is now public for exactly this caller
+    /// (see that function's own doc comment in `NextTask.swift`) — this is a thin wrapper, not a
+    /// second copy of the rule. `static` + taking `tasks`/`now` as plain parameters (no `self`) so
+    /// it stays unit-testable without an `AppState` instance, same reasoning as `firstUnshownCue`
+    /// above; the tests in `Volar/Tests/AppStateCueAndWaitingTests.swift` now exercise the real
+    /// engine rule through this wrapper instead of a parallel one.
+    static func eligibleOrder(from tasks: [TaskItem], now: Date) -> [UUID] {
+        let snapshot = tasks.map { $0.snapshot() }
+        return VolarCore.eligibleTasksOrdered(from: snapshot, now: now, calendar: .current).map(\.id)
     }
 
     // MARK: - Sidebar sections (Upcoming/Inbox) — 2026-07-27, port of Windows
@@ -4400,6 +4574,16 @@ final class AppState {
             for condition in resolvedConditions(draft) where !merged.conditions.contains(condition) {
                 merged.conditions.append(condition)
             }
+            // 006-cues-and-waiting (design.md §2 Việc B, task brief: "Cue phải sống sót qua cả
+            // đường tạo mới lẫn đường merge"): same scalar-overwrite convention as `deadline`/
+            // `startTime`/`priority`/`estimate`/`reminder` above (present wins outright) — NOT
+            // the `notes` append exception, since a cue is a single if-then utterance, not
+            // free-text that accumulates. Only overwrites when the new draft actually carries one;
+            // "xong task A" (an update utterance with no fresh cue) never blanks out a cue the
+            // existing task already had.
+            if let cue = draft.task.cue {
+                merged.cue = cue
+            }
             return merged
         }
     }
@@ -4505,7 +4689,15 @@ final class AppState {
             sourceTranscript: task.sourceTranscript,
             kind: kind,
             recurrence: recurrence,
-            reminderOverride: reminder
+            reminderOverride: reminder,
+            // 006-cues-and-waiting (design.md §2 Việc B): straight pass-through, never resolved/
+            // gated the way `deadline`/`priority`/etc. are above — `TaskCue` carries no
+            // `ParsedValue`/confidence wrapper (unlike every other scalar attribute here) and no
+            // confirm-card chip exists to dismiss/accept it this round, so there is nothing to
+            // gate on. `nil` when the parse didn't produce one (no `task_cues_v1` cap, or no real
+            // event anchor in the utterance — see `IntentParsing.validateCue`'s own doc comment),
+            // exactly like every other optional field here that's simply absent when unparsed.
+            cue: task.cue
         )
     }
 

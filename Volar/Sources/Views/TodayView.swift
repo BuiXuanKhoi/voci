@@ -65,6 +65,15 @@ struct TodayView: View {
                 FocusOverlay()
             }
         }
+        // 006-cues-and-waiting (design.md §2 Việc B): the "natural touch point" trigger for
+        // `CueFiring.pending` — design.md's own words: "Ở điểm chạm tự nhiên (mở popover)". The
+        // main window becoming visible is the closest equivalent this app has to that (see
+        // `AppState.noteNaturalCueTouch`'s own doc comment for why `PopoverView`'s capture-flow
+        // popup was deliberately NOT used instead). Not overlay-producing, so — unlike the two
+        // `.overlay`/`.overlayPreferenceValue` modifiers below — its position in this chain carries
+        // no z-order meaning; placed here, right after the `ZStack` closes, purely because it reads
+        // most naturally as "the very first thing that happens once this view is on screen."
+        .onAppear { appState.noteNaturalCueTouch() }
         // Reminder banner (`NotificationView`): a plain `.overlay`, attached BEFORE the guided
         // tour's `.overlayPreferenceValue` below — see that block's own comment for why ORDER
         // (not `.zIndex`) is what actually decides which of the two draws on top here.
@@ -236,6 +245,24 @@ struct TodayView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: appState.density.sectionGap) {
                 nowSpotlight
+
+                // 006-cues-and-waiting (design.md §2 Việc B/C, §3): the two new ambient surfaces
+                // this feature adds, both "renders nothing when there's nothing to show" like every
+                // other banner in this stack. `cueBanner` prefers a just-fired `.wake` cue (set by
+                // `AppState.recordAppBecameActive`, driven off real app activation) but also carries
+                // a `.pending` dayEnd/unknown cue surfaced at this exact natural touch point — see
+                // `.onAppear` below.
+                if let banner = appState.cueBanner {
+                    CueReminderRow(banner: banner)
+                }
+                if let decision = appState.waitingModeDecision {
+                    WaitingModeRow(
+                        decision: decision,
+                        suggestedTitle: decision.suggestedTaskId.flatMap { id in
+                            appState.tasks.first { $0.id == id }?.title
+                        }
+                    )
+                }
 
                 // FR-030: the one-time "want to split this up?" invite, whenever one's pending —
                 // shared with `FocusOverlay`'s own copy of the same banner (both read the exact
@@ -1398,6 +1425,100 @@ private struct DelegationAmbientSection: View {
         .overlay(
             RoundedRectangle(cornerRadius: 8, style: .continuous)
                 .stroke(solid ? Color.clear : VolarColor.borderHi, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+// MARK: - 006-cues-and-waiting: cue reminder + waiting-mode holder (T5, wire UI)
+//
+// Both rows below share `DelegationAmbientSection`'s own card shell (`VolarColor.card` +
+// `VolarColor.border` hairline, 8pt corner radius) so the three ambient surfaces in this file read
+// as one family, not three competing styles. Neither row carries an icon/color the way
+// `softLimitHint`/`needsReviewCard` above do — design.md §3's anti-shame/anti-nag rule ("Cấm đỏ,
+// cấm badge... giọng chữ điềm tĩnh") is why this is plain text with no accent tint at all, closer
+// to `SweepView`'s calm copy than to an instrument-tinted status card.
+
+/// `AppState.cueBanner`, read back verbatim — design.md §2 Việc B: "hiện đúng MỘT việc, kèm trích
+/// NGUYÊN VĂN lời user." Never renders `CueKind`/`kind` (`CueBanner` itself doesn't even carry
+/// one — see that struct's own doc comment) — only `verbatim`, plus a date-aware lead-in so the
+/// copy never overclaims ("Tối qua anh nói…" only when `createdAt` really was yesterday).
+private struct CueReminderRow: View {
+    let banner: CueBanner
+
+    /// UNVERIFIED (product-phrasing judgment call, not a Mac-only concern): design.md §2's own
+    /// worked example is fixed as "Tối qua anh nói…", which reads naturally for the common case
+    /// this cue exists for (say it near bedtime, `.wake` fires on the next ≥6h-gap session — almost
+    /// always the next morning). But a cue can sit unfired for up to `TaskCue.expiresAt`'s 48h floor,
+    /// so a literal "Tối qua" would be a false claim outside that common case. This checks the real
+    /// day relationship instead of hardcoding the phrase, falling back to a time-neutral "Anh nói…"
+    /// whenever "last night" isn't actually true — never a bug fix Mac verification would catch (no
+    /// crash either way), just a calm-voice-accuracy call flagged for review.
+    private var leadIn: String {
+        Calendar.current.isDateInYesterday(banner.createdAt) ? "Tối qua anh nói" : "Anh nói"
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text("\(leadIn): \u{201C}\(banner.verbatim)\u{201D}")
+                .font(.system(size: 12.5))
+                .foregroundStyle(VolarColor.textSec)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VolarColor.border, lineWidth: 0.5)
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+    }
+}
+
+/// `AppState.waitingModeDecision`, read as one calm line — design.md §2 Việc C: "một dòng điềm
+/// tĩnh: mốc đang được giữ + thời gian còn lại." Three distinct phrasings, matching
+/// `WaitingMode.Decision.suggestedTaskId`'s own doc comment on why the "anchor is itself eligible"
+/// case is NOT the same thing as "nothing fits":
+///   - anchor is itself actionable right now (`anchorIsEligible`) → just the hold line, no second
+///     suggestion (suggesting a substitute against the user's own deadline is the exact bug
+///     `WaitingMode.swift`'s header comment documents fixing).
+///   - a task fits the remaining time → name it, as an invitation ("Có thể tranh thủ…"), never an
+///     instruction.
+///   - nothing fits → say so plainly ("Chưa có việc nào khít") and stop — design.md §2: "không ép."
+private struct WaitingModeRow: View {
+    let decision: WaitingMode.Decision
+    let suggestedTitle: String?
+
+    private var lineText: String {
+        let time = decision.anchorAt.formatted(.dateTime.hour().minute())
+        let holding = "Đang giữ mốc \u{201C}\(decision.anchorTitle)\u{201D} lúc \(time) — còn \(decision.minutesUntil) phút."
+        if decision.anchorIsEligible {
+            return holding
+        }
+        guard let suggestedTitle else {
+            return holding + " Chưa có việc nào khít."
+        }
+        return holding + " Có thể tranh thủ \u{201C}\(suggestedTitle)\u{201D}."
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(lineText)
+                .font(.system(size: 12.5))
+                .foregroundStyle(VolarColor.textSec)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 8)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(VolarColor.card)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .stroke(VolarColor.border, lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
     }

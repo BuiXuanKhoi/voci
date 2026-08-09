@@ -64,7 +64,23 @@ The single task the menu bar should show right now, or `nil` if none is eligible
 eligible when: its `status` is `.todo`/`.inProgress`, every one of its `conditions` is satisfied,
 and it is not itself the `parentId` of some other still-open task (a breakdown parent is never
 directly selectable while it has open children). Among eligible tasks, the result is the minimum
-under `Task.orderedBefore(_:now:calendar:)`.
+under `Task.orderedBefore(_:now:calendar:)` — literally `eligibleTasksOrdered(from:now:calendar:)
+.first` (see below), not just documented to agree with it.
+
+```swift
+public func eligibleTasksOrdered(from snapshot: [Task], now: Date, calendar: Calendar) -> [Task]
+public func eligibleTasks(in snapshot: [Task], now: Date) -> [Task]
+```
+Added 2026-08-09 (specs/006-cues-and-waiting) for callers that need more than just the single
+winner — e.g. a "waiting mode" feature deciding what fits in the gap before a held deadline needs
+the FULL eligible ranking, not only the top pick. `eligibleTasksOrdered` is every eligible task
+(same eligibility rule as `nextTask`), sorted by the same `Task.orderedBefore(_:now:calendar:)`
+total order `nextTask` selects its winner from — `nextTask` is defined in terms of it, so the two
+can never diverge. `eligibleTasks` is the unordered eligible set, for a caller (like
+`eligibilityDiff` below) that only needs membership, not ranking. Before these were public, the
+only way to approximate either from outside this package was to hand-copy the eligibility rule
+into app code — a copy with no compiler tie back to this file, which is exactly the silent-drift
+risk exposing them removes.
 
 ```swift
 extension Task {

@@ -955,4 +955,288 @@ final class CloudParserTests: XCTestCase {
     func testTaskRefsCapabilityWireLiteralIsStable() {
         XCTAssertEqual(CloudParser.taskRefsCapability, "task_refs_v1")
     }
+
+    // MARK: - task_cues_v1 (`specs/006-cues-and-waiting/design.md`, 2026-08-08)
+    //
+    // Same layer every other decode/validation test in this file already uses (`JSONDecoder`
+    // straight into the `Raw*` wire structs, then `ParsedTaskValidation.validate`/
+    // `.validateCapture` — never a live network call, see this file's own header). `now` is
+    // passed explicitly and FIXED throughout so `TaskCue.createdAt`/`.expiresAt` are
+    // deterministic to assert against, never a `Date()` read at test-run time.
+
+    private static let cueTestNow = Date(timeIntervalSince1970: 1_800_000_000)
+
+    /// task_cues_v1's wire capability literal never silently drifts — mirrors
+    /// `testTaskRefsCapabilityWireLiteralIsStable` right above for the sibling cap.
+    func testCuesCapabilityWireLiteralIsStable() {
+        XCTAssertEqual(CloudParser.cuesCapability, "task_cues_v1")
+    }
+
+    /// Both caps are sent SIDE BY SIDE on every parse request, never one replacing the other —
+    /// pins the exact literal array `performParse` builds (`CloudParser.swift`'s `client_caps`
+    /// payload field), since there's no `URLRequest`-interception seam in this file to assert on
+    /// the real wire body (same limitation this file's task_refs_v1 section documents for its own
+    /// analogous "(h)" test).
+    func testBothCapabilitiesAreDistinctStableLiterals() {
+        XCTAssertNotEqual(CloudParser.taskRefsCapability, CloudParser.cuesCapability)
+    }
+
+    /// (a) All three `CueKind` values decode correctly: `wake`.
+    func testDecodeCueWakeKind() throws {
+        let json = """
+        {
+          "title": {"value": "Test feature", "confidence": 0.9},
+          "cue": {"kind": "wake", "verbatim": "ngủ dậy thì test feature này"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        let cue = try XCTUnwrap(task.cue)
+        XCTAssertEqual(cue.kind, .wake)
+        XCTAssertEqual(cue.verbatim, "ngủ dậy thì test feature này")
+        XCTAssertEqual(cue.createdAt, Self.cueTestNow)
+        XCTAssertEqual(cue.expiresAt, TaskCue.defaultExpiry(from: Self.cueTestNow), "expiresAt must follow TaskCue's own pinned 48h default, never a second hand-rolled copy of that constant")
+    }
+
+    /// (a) `dayEnd`.
+    func testDecodeCueDayEndKind() throws {
+        let json = """
+        {
+          "title": {"value": "Read a book", "confidence": 0.9},
+          "cue": {"kind": "dayEnd", "verbatim": "tối trước khi ngủ thì đọc sách"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertEqual(task.cue?.kind, .dayEnd)
+        XCTAssertEqual(task.cue?.verbatim, "tối trước khi ngủ thì đọc sách")
+    }
+
+    /// (a) `unknown` — a machine-unresolvable anchor ("tới văn phòng thì...") is still a VALID,
+    /// common cue (never dropped for being unresolvable — `CueKind.unknown`'s own doc comment).
+    func testDecodeCueUnknownKind() throws {
+        let json = """
+        {
+          "title": {"value": "Ask Nam", "confidence": 0.9},
+          "cue": {"kind": "unknown", "verbatim": "tới văn phòng thì hỏi Nam"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertEqual(task.cue?.kind, .unknown)
+        XCTAssertEqual(task.cue?.verbatim, "tới văn phòng thì hỏi Nam")
+    }
+
+    /// (b) An unrecognized `kind` string (schema drift, a future server value this client
+    /// doesn't know yet) maps to `.unknown` — NEVER dropped, since `verbatim` (not `kind`) is
+    /// the thing actually read back to the user.
+    func testDecodeCueUnrecognizedKindMapsToUnknown() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "cue": {"kind": "some_future_kind_this_client_does_not_know", "verbatim": "khi nào đó thì làm"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertEqual(task.cue?.kind, .unknown, "an unrecognized kind must map to .unknown, never be dropped")
+        XCTAssertEqual(task.cue?.verbatim, "khi nào đó thì làm")
+    }
+
+    /// A `cue` object present but MISSING its `kind` key entirely (not just an unrecognized
+    /// value) must ALSO map to `.unknown`, not throw — `RawParsedCue.kind` is `String?`
+    /// specifically so an absent key never kills the decode.
+    func testDecodeCueMissingKindKeyMapsToUnknown() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "cue": {"verbatim": "một mốc nào đó"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertEqual(task.cue?.kind, .unknown)
+        XCTAssertEqual(task.cue?.verbatim, "một mốc nào đó")
+    }
+
+    /// (c) Back-compat: a response with NO `cue` key at all (server hasn't redeployed
+    /// task_cues_v1 yet, or a rollback) decodes `cue` as `nil` and leaves every OTHER field on
+    /// the task completely untouched — the exact "server chưa deploy vẫn chạy y nguyên" contract
+    /// this feature's own instruction requires a test for.
+    func testDecodeMissingCueKeyDefaultsToNilOtherFieldsIntact() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "deadline": {"value": "2026-08-08T17:00:00+07:00", "confidence": 0.8}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        XCTAssertNil(raw.cue, "server not yet returning cue must decode as nil, not fail")
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertNil(task.cue)
+        XCTAssertEqual(task.title, "Test task")
+        XCTAssertEqual(task.deadline?.value, ParsedTaskValidation.parseISO8601("2026-08-08T17:00:00+07:00"))
+    }
+
+    /// (d) Empty `verbatim` drops the WHOLE cue (nothing worth surfacing) but keeps the task —
+    /// mirrors every other per-attribute fail-open rule in this file.
+    func testDecodeCueWithEmptyVerbatimDropsCueKeepsTask() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "cue": {"kind": "wake", "verbatim": ""}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertNil(task.cue, "empty verbatim carries nothing worth surfacing")
+        XCTAssertEqual(task.title, "Test task", "the task itself must survive a dropped cue")
+    }
+
+    /// Whitespace-only `verbatim` is treated the same as empty — trimmed first, then dropped.
+    func testDecodeCueWithWhitespaceOnlyVerbatimDropsCueKeepsTask() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "cue": {"kind": "wake", "verbatim": "   "}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertNil(task.cue)
+        XCTAssertEqual(task.title, "Test task")
+    }
+
+    /// A `cue` object present but MISSING its `verbatim` key entirely (not just empty) must not
+    /// throw through the whole decode — `RawParsedCue.verbatim` is `String?`, not `String`,
+    /// specifically to guard against the "non-optional key throws the whole envelope" trap this
+    /// repo has hit before (`RawParsedRecurrence.everyDays`, 2026-08-01).
+    func testDecodeCueObjectMissingVerbatimKeyDropsCueKeepsTask() throws {
+        let json = """
+        {
+          "title": {"value": "Test task", "confidence": 0.9},
+          "cue": {"kind": "wake"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertNil(task.cue)
+        XCTAssertEqual(task.title, "Test task")
+    }
+
+    /// Defensive length cap: a verbatim over 300 chars (`MAX_TASK_TITLE_CHARS` server-side) is
+    /// TRUNCATED, never dropped entirely — the cue is still worth partially surfacing.
+    func testDecodeCueVerbatimOverCapIsTruncatedNotDropped() throws {
+        let longVerbatim = String(repeating: "a", count: 400)
+        let raw = RawParsedTask(
+            title: RawConfidence(value: "Test task", confidence: 0.9),
+            cue: RawParsedCue(kind: "wake", verbatim: longVerbatim)
+        )
+
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        let cue = try XCTUnwrap(task.cue)
+        XCTAssertEqual(cue.verbatim.count, 300)
+    }
+
+    /// A cue NEVER becomes a `deadline`/`.afterDate` condition — the exact conflation
+    /// 006-cues-and-waiting exists to fix. A task carrying both a real spoken deadline AND a cue
+    /// on the SAME response must keep both, completely independent of each other.
+    func testCueNeverBecomesDeadlineOrCondition() throws {
+        let json = """
+        {
+          "title": {"value": "Meeting prep", "confidence": 0.9},
+          "deadline": {"value": "2026-08-08T15:00:00+07:00", "confidence": 0.9},
+          "cue": {"kind": "wake", "verbatim": "ngủ dậy thì chuẩn bị họp"}
+        }
+        """.data(using: .utf8)!
+
+        let raw = try JSONDecoder().decode(RawParsedTask.self, from: json)
+        let task = ParsedTaskValidation.validate(raw, sourceTranscript: "test", now: Self.cueTestNow)
+
+        XCTAssertEqual(task.deadline?.value, ParsedTaskValidation.parseISO8601("2026-08-08T15:00:00+07:00"), "the real spoken deadline must survive untouched")
+        XCTAssertEqual(task.cue?.verbatim, "ngủ dậy thì chuẩn bị họp")
+        XCTAssertTrue(task.conditions.isEmpty, "a cue must never manifest as a .afterDate/.taskDone condition")
+    }
+
+    /// (e) Envelope carrying BOTH `task_refs_v1`-shape fields (`taskRefs`/`updates`) and a `cue`
+    /// on its `tasks[]` entry AT THE SAME TIME still decodes correctly — the two caps are
+    /// independent and neither one's presence should perturb the other's decode path.
+    func testEnvelopeWithBothTaskRefsAndCueDecodeTogether() throws {
+        let json = """
+        {
+          "tasks": [
+            {
+              "title": {"value": "New task", "confidence": 0.9},
+              "cue": {"kind": "wake", "verbatim": "ngủ dậy thì làm task này"}
+            }
+          ],
+          "taskRefs": [
+            {"titleQuery": {"value": "Old task", "confidence": 0.8}}
+          ],
+          "updates": [
+            {"refIndex": 1, "set": {"priority": {"value": 2, "confidence": 0.8}}}
+          ]
+        }
+        """.data(using: .utf8)!
+
+        let envelope = try JSONDecoder().decode(RawParseEnvelope.self, from: json)
+        let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: "test transcript", now: Self.cueTestNow)
+
+        XCTAssertEqual(capture.tasks.count, 1)
+        XCTAssertEqual(capture.tasks.first?.cue?.kind, .wake)
+        XCTAssertEqual(capture.tasks.first?.cue?.verbatim, "ngủ dậy thì làm task này")
+        XCTAssertEqual(capture.taskRefs.count, 1)
+        XCTAssertEqual(capture.taskRefs.first?.titleQuery, "Old task")
+        XCTAssertEqual(capture.updates.count, 1)
+        XCTAssertEqual(capture.updates.first?.priority?.value, 2)
+    }
+
+    /// `ParsedTask`'s hand-rolled `Codable` (`Model/NLParser.swift`) must round-trip `cue` through
+    /// encode/decode, and a payload that PREDATES this field (or any hand-built JSON that simply
+    /// omits it) must still decode, defaulting to `nil` — same "missing key never throws"
+    /// contract `deadlineIsEstimated`'s own back-compat test pins down elsewhere in this file.
+    func testParsedTaskCodableRoundTripsCueAndDefaultsToNilWhenMissing() throws {
+        let cue = TaskCue(
+            kind: .wake, verbatim: "ngủ dậy thì test", createdAt: Self.cueTestNow,
+            expiresAt: TaskCue.defaultExpiry(from: Self.cueTestNow)
+        )
+        var task = ParsedTaskValidation.validate(
+            RawParsedTask(title: RawConfidence(value: "Test task", confidence: 0.9)),
+            sourceTranscript: "test", now: Self.cueTestNow
+        )
+        task.cue = cue
+
+        let encoded = try JSONEncoder().encode(task)
+        let decoded = try JSONDecoder().decode(ParsedTask.self, from: encoded)
+        XCTAssertEqual(decoded.cue, cue)
+
+        let jsonWithoutCue = """
+        {
+          "title": "Test task",
+          "sourceTranscript": "test task"
+        }
+        """.data(using: .utf8)!
+        let decodedWithoutCue = try JSONDecoder().decode(ParsedTask.self, from: jsonWithoutCue)
+        XCTAssertNil(decodedWithoutCue.cue, "missing cue key must decode as nil, never throw")
+    }
 }

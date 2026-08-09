@@ -628,6 +628,31 @@ export interface ParsedSubtaskOut {
   estimateMinutes: ConfidenceValue<number>;
 }
 
+/** `task_cues_v1` capability (Opus design 2026-08-08, `specs/006-cues-and-waiting/design.md` §2
+ *  Việc B — implementation-intention cues, "ngủ dậy thì test feature này"): the model's belief
+ *  that this task is anchored to an EVENT in the user's day rather than to a clock time. NOT
+ *  wrapped in `ConfidenceValue` like most other optional fields on `ParsedTaskOut` — see
+ *  `cueSchema`'s doc comment in gemini.ts for why a confidence number doesn't map cleanly onto
+ *  this field. Only ever populated when the request declared the `task_cues_v1` client cap (see
+ *  `validateParsedTaskArrayWithCues` below) — a client that never declares it gets a response with
+ *  no `cue` key at all, byte-identical to before this capability existed. */
+export interface CueOut {
+  /** Coarse hint for WHEN this cue's moment tends to occur, used by the client
+   *  (`Volar/Sources/Reminders/CueFiring.swift`, a sibling task of this same feature) to decide
+   *  when it's worth surfacing — `wake`/`dayEnd` fire on their own cadence, `unknown` never fires
+   *  on a timer and is only shown at a natural touch point. `unknown` is a normal, common, VALID
+   *  value, never a failure state: the model failing to classify a cue's rough timing must never
+   *  cost the user the cue's own words (see `verbatim` below, and `validateCue`'s fail-open rule
+   *  for this exact field). */
+  kind: "wake" | "dayEnd" | "unknown";
+  /** The user's OWN anchor clause, verbatim — e.g. "ngủ dậy thì" from "ngủ dậy thì test feature
+   *  này". This, not `kind`, is where this capability's entire value lives: it is what gets read
+   *  back to the user later, unlike `kind`, which is only ever consumed internally to decide
+   *  timing. FAIL-CLOSED in `validateCue` below — a `cue` with no usable `verbatim` carries no
+   *  information at all and is dropped whole, never kept as "a cue with unknown wording." */
+  verbatim: string;
+}
+
 export interface ParsedTaskOut {
   title: ConfidenceValue<string>;
   notes?: ConfidenceValue<string>;
@@ -641,6 +666,7 @@ export interface ParsedTaskOut {
   kind?: ConfidenceValue<"task" | "review">;
   subtasks?: ParsedSubtaskOut[];
   followUpReview?: ConfidenceValue<boolean>;
+  cue?: CueOut;
 }
 
 export interface BreakdownStepOut {
@@ -875,6 +901,23 @@ function validateSubtask(v: unknown): ParsedSubtaskOut | undefined {
   return { title, estimateMinutes };
 }
 
+/** Validates a single `cue` field (`task_cues_v1`, Opus design 2026-08-08). FAIL-CLOSED on
+ *  `verbatim`: a cue with no quoted words is not "a cue with unknown wording," it is nothing at
+ *  all — there is no anchor left to read back to the user, so the whole `cue` is dropped (the
+ *  TASK itself is untouched either way, per `validateParsedTask`'s per-field fail-open convention
+ *  below — losing `cue` never costs the user the rest of the task). FAIL-OPEN on `kind`: an
+ *  unrecognized or missing `kind` is coerced to `"unknown"` rather than dropping the cue —
+ *  `verbatim` is the field carrying the actual product value (`CueOut`'s own doc comment), so a
+ *  model that writes the right words but a wrong/missing classification must not lose them. Length
+ *  capped at `MAX_TASK_TITLE_CHARS` — reusing the title cap rather than inventing a new constant,
+ *  since a spoken anchor clause is the same order of magnitude as a task title, never a paragraph. */
+function validateCue(v: unknown): CueOut | undefined {
+  if (!isPlainObject(v)) return undefined;
+  if (!isNonEmptyString(v.verbatim) || v.verbatim.length > MAX_TASK_TITLE_CHARS) return undefined;
+  const kind = v.kind === "wake" || v.kind === "dayEnd" || v.kind === "unknown" ? v.kind : "unknown";
+  return { kind, verbatim: v.verbatim };
+}
+
 /** Validates a single model-produced task object. FAIL-OPEN per field, FAIL-CLOSED on `title`
  *  only (decision: anh Khôi, 2026-07-28).
  *
@@ -904,8 +947,20 @@ function validateSubtask(v: unknown): ParsedSubtaskOut | undefined {
  *  those two functions behave EXACTLY as they did before this change. Present (only from
  *  `validateParseEnvelope` via `validateParsedTaskArray`'s internal helper) -> unlocks the
  *  `taskStart` condition kind and the `refIndex`/`offsetMinutes`/`offsetKind`/`anchor` extension
- *  fields, all of which need to resolve against `taskRefs[]`. */
-function validateParsedTask(v: unknown, ctx?: ParseEnvelopeCtx): ParsedTaskOut | undefined {
+ *  fields, all of which need to resolve against `taskRefs[]`.
+ *
+ *  `cuesEnabled` (task_cues_v1, Opus design 2026-08-08): OPTIONAL, and DELIBERATELY a separate
+ *  parameter rather than a new field on `ParseEnvelopeCtx` — `task_cues_v1` and `task_refs_v1` are
+ *  INDEPENDENT capabilities (`ParseRequest.clientCaps`'s doc comment: a client may declare either,
+ *  neither, or both), so folding `cue` gating into the same `ctx` object that also gates
+ *  `taskStart`/`refIndex`/`anchor` would wrongly couple the two — a bare-mode caller that only
+ *  wants cues must NOT also unlock envelope-only condition kinds just because `ctx` became
+ *  "present" for a different reason. Falsy/absent (every pre-existing call site, and the plain
+ *  `validateParsedTaskArray`/`validateParseEnvelope` entry points below) -> `v.cue` is never even
+ *  inspected, so a request that never declared `task_cues_v1` gets a response with no `cue` key at
+ *  all — byte-identical to before this capability existed, the same guarantee `ctx` already gives
+ *  `task_refs_v1`. */
+function validateParsedTask(v: unknown, ctx?: ParseEnvelopeCtx, cuesEnabled?: boolean): ParsedTaskOut | undefined {
   if (!isPlainObject(v)) return undefined;
 
   const title = validateConfidenceValue(v.title, (s) =>
@@ -999,6 +1054,15 @@ function validateParsedTask(v: unknown, ctx?: ParseEnvelopeCtx): ParsedTaskOut |
     if (followUpReview) out.followUpReview = followUpReview;
   }
 
+  // `cue` (task_cues_v1, Opus design 2026-08-08): gated on `cuesEnabled`, NOT merely on
+  // `v.cue !== undefined` — see this function's own doc comment for why a client that never
+  // declared the capability must get a response with no `cue` key at all, even in the (unlikely,
+  // but possible) case the model emits one unprompted.
+  if (cuesEnabled && v.cue !== undefined) {
+    const cue = validateCue(v.cue);
+    if (cue) out.cue = cue;
+  }
+
   return out;
 }
 
@@ -1028,16 +1092,21 @@ function validateParsedTask(v: unknown, ctx?: ParseEnvelopeCtx): ParsedTaskOut |
  *  envelope path (where `tasks[]` validation needs to know `taskRefs.length` to resolve
  *  `refIndex`/`anchor` fields) without duplicating it. `validateParsedTaskArray`, the pre-existing
  *  EXPORTED function every bare-array caller already uses, keeps its exact original signature and
- *  behavior below — it is now a one-line call into this with `ctx` left `undefined`. */
+ *  behavior below — it is now a one-line call into this with `ctx` left `undefined`.
+ *
+ *  `cuesEnabled` (task_cues_v1, Opus design 2026-08-08): threaded straight through to
+ *  `validateParsedTask` unchanged — see that function's doc comment for why this is a separate
+ *  parameter from `ctx` rather than a field folded into it. */
 function validateParsedTaskArrayCtx(
   v: unknown,
   ctx?: ParseEnvelopeCtx,
+  cuesEnabled?: boolean,
 ): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
   if (!Array.isArray(v)) return undefined;
   const tasks: ParsedTaskOut[] = [];
   let invalidCount = 0;
   for (const item of v) {
-    const task = validateParsedTask(item, ctx);
+    const task = validateParsedTask(item, ctx, cuesEnabled);
     if (task) {
       tasks.push(task);
     } else {
@@ -1054,6 +1123,22 @@ function validateParsedTaskArrayCtx(
 
 export function validateParsedTaskArray(v: unknown): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
   return validateParsedTaskArrayCtx(v);
+}
+
+/** `task_cues_v1`-aware counterpart to `validateParsedTaskArray` above (Opus design 2026-08-08,
+ *  `specs/006-cues-and-waiting/design.md` §2 Việc B) — for a `parse`-mode request that declared
+ *  ONLY `task_cues_v1` (not `task_refs_v1`), i.e. the response stays the plain bare-array shape
+ *  (see `buildParseResponseSchemaWithCues`/`SYSTEM_PREAMBLE_TASK_CUES` in gemini.ts), just with
+ *  each task's optional `cue` field now recognized. `ctx` is deliberately left `undefined` here —
+ *  `task_cues_v1` and `task_refs_v1` are INDEPENDENT capabilities (`ParseRequest.clientCaps`'s doc
+ *  comment: a client may declare either, neither, or both), and `taskStart`/`refIndex`/`anchor`
+ *  must not silently unlock just because a request asked for cues. A future caller wanting BOTH
+ *  capabilities together in one request needs its own combined entry point — not built here; see
+ *  this task's final report for why. */
+export function validateParsedTaskArrayWithCues(
+  v: unknown,
+): { tasks: ParsedTaskOut[]; droppedCount: number } | undefined {
+  return validateParsedTaskArrayCtx(v, undefined, true);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1220,9 +1305,20 @@ function validateTaskUpdate(v: unknown, refCount: number, validatedTaskCount: nu
  *  dropped/truncated, refs dropped/truncated, updates dropped/truncated) — `parse/index.ts` also
  *  logs `taskRefs.length`/`updates.length` alongside it so the aggregate and the per-array shape
  *  are both visible to operators, mirroring how `validateParsedTaskArray`'s own `droppedCount` is
- *  logged today. */
+ *  logged today.
+ *
+ *  `cuesEnabled` (task_cues_v1, Opus review of T1 2026-08-08 — the combo path every REAL client
+ *  actually takes, since `CloudParser.swift` always sends `["task_refs_v1", "task_cues_v1"]`
+ *  together): OPTIONAL, defaults to `false`/absent, threaded straight through to
+ *  `validateParsedTaskArrayCtx` exactly like `validateParsedTaskArray`/`validateParsedTaskArrayWithCues`
+ *  already do for the bare-array path — see `validateParsedTask`'s own doc comment for why this is
+ *  a separate parameter from `ctx` rather than a field folded into it (the two capabilities must
+ *  stay independently gate-able even though THIS function's `ctx` is always present here). Every
+ *  pre-existing call site (`parse/index.ts`'s `task_refs_v1`-only branch) calls this with ONE
+ *  argument and is therefore byte-identical to before this parameter existed. */
 export function validateParseEnvelope(
   v: unknown,
+  cuesEnabled?: boolean,
 ): { tasks: ParsedTaskOut[]; taskRefs: TaskRefOut[]; updates: TaskUpdateOut[]; droppedCount: number } | undefined {
   const envelope: Record<string, unknown> = Array.isArray(v)
     ? { tasks: v, taskRefs: [], updates: [] }
@@ -1246,8 +1342,9 @@ export function validateParseEnvelope(
   const validRefs = taskRefs.slice(0, MAX_TASK_REFS);
   const ctx: ParseEnvelopeCtx = { taskRefCount: validRefs.length };
 
-  // --- tasks SECOND, threading `ctx` down so refIndex/anchor fields can resolve against `taskRefs`. ---
-  const tasksResult = validateParsedTaskArrayCtx(envelope.tasks, ctx);
+  // --- tasks SECOND, threading `ctx` down so refIndex/anchor fields can resolve against `taskRefs`,
+  // and `cuesEnabled` down so `cue` is only ever read when the caller actually asked for it. ---
+  const tasksResult = validateParsedTaskArrayCtx(envelope.tasks, ctx, cuesEnabled);
   if (!tasksResult) return undefined;
 
   // --- updates LAST: needs both `ctx.taskRefCount` and the validated/truncated task count. ---

@@ -258,6 +258,15 @@ struct CloudParser: Sendable {
     /// never lost to a decode failure regardless of which server version answers.
     static let taskRefsCapability = "task_refs_v1"
 
+    /// Wire capability for `cue` (implementation-intention surfacing, `specs/006-cues-and-waiting/
+    /// design.md`) — sent ALONGSIDE `taskRefsCapability` in `"client_caps"`, never replacing it
+    /// (both are independent, additive handshakes; a server can recognize either, both, or
+    /// neither). Same additive-handshake contract as `taskRefsCapability` documents in full above:
+    /// a server that doesn't yet recognize this string (not redeployed, or a rollback) simply
+    /// never populates `cue` on its response, which decodes as `nil` here either way — see
+    /// `RawParsedTask.cue`'s own doc comment for the back-compat mechanics this depends on.
+    static let cuesCapability = "task_cues_v1"
+
     /// task_refs_v1: the full-`ParsedCapture` sibling of `CloudParseOutcome` — identical
     /// quota/unavailable semantics, but the success case carries the full validated `ParsedCapture`
     /// (tasks + taskRefs + updates) instead of just `[ParsedTask]`. A SEPARATE type from
@@ -322,11 +331,13 @@ struct CloudParser: Sendable {
         var payload: [String: Any] = [
             "transcript": trimmed,
             "now": Self.makeRequestFormatter().string(from: now),
-            // task_refs_v1 (anh Khôi, 2026-08-02): advertised on EVERY parse request,
-            // unconditionally — see `taskRefsCapability`'s own doc comment for the additive-
-            // handshake contract this relies on (a server that doesn't recognize this string yet,
-            // or has been rolled back, simply ignores the field and answers exactly as before).
-            "client_caps": [Self.taskRefsCapability],
+            // task_refs_v1 (anh Khôi, 2026-08-02) + task_cues_v1 (006-cues-and-waiting, 2026-08-08):
+            // both advertised on EVERY parse request, unconditionally, side by side — see
+            // `taskRefsCapability`'s own doc comment for the additive-handshake contract this
+            // relies on (a server that doesn't recognize a given string yet, or has been rolled
+            // back, simply ignores THAT field and answers exactly as before; the two caps are
+            // independent, neither gates the other).
+            "client_caps": [Self.taskRefsCapability, Self.cuesCapability],
         ]
         if !openTaskTitles.isEmpty {
             payload["open_task_titles"] = Array(openTaskTitles.prefix(100)).map { Self.utf16Prefix($0, 200) }
@@ -381,14 +392,18 @@ struct CloudParser: Sendable {
             // without throwing — this is the one thing standing between a server-version mismatch
             // and losing the user's utterance entirely.
             if let envelope = try? JSONDecoder().decode(RawParseEnvelope.self, from: data) {
-                let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: transcript)
+                // `now: now` (task_cues_v1): the SAME instant this request declared as its own
+                // wall clock — see `ParsedTaskValidation.validate`'s `now:` doc comment for why
+                // this, not a fresh `Date()` read at decode time, is what stamps a decoded cue's
+                // `TaskCue.createdAt`.
+                let capture = ParsedTaskValidation.validateCapture(envelope, sourceTranscript: transcript, now: now)
                 return .capture(capture)
             }
             guard let raws = try? JSONDecoder().decode([RawParsedTask].self, from: data) else {
                 return .unavailable
             }
             let capped = Array(raws.prefix(IntentRouter.maxTaskCap))
-            let validated = ParsedTaskValidation.validateAll(capped, sourceTranscript: transcript)
+            let validated = ParsedTaskValidation.validateAll(capped, sourceTranscript: transcript, now: now)
             return .capture(ParsedCapture(tasks: validated, taskRefs: [], updates: []))
         case 429:
             let quota = try? JSONDecoder().decode(QuotaResponse.self, from: data)

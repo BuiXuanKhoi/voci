@@ -10,16 +10,23 @@
 //     — `now` must already be the user's LOCAL wall-clock time with its real UTC offset (never
 //     `Z`/UTC); `timezone` is an optional IANA id (e.g. "Asia/Ho_Chi_Minh") given as extra context
 //     for the model on top of that offset. Older clients that don't send `timezone` still work.
-//     `client_caps` (task_refs_v1, anh Khôi 2026-08-02 task-refs design): a capability handshake,
-//     NOT a version gate — App Store clients fragment across versions while this function
-//     redeploys freely, so a client instead lists response shapes it knows how to consume. Absent
-//     -> today's behavior, BYTE-IDENTICAL (bare `ParsedTaskOut[]`, `SYSTEM_PREAMBLE`,
-//     `buildParseResponseSchema()`, `validateParsedTaskArray`) — see `wantsEnvelope` below. Present
-//     with `"task_refs_v1"` -> an ENVELOPE response `{ tasks, taskRefs, updates }` letting the
-//     model reference/update existing tasks ("làm task này khi xong task kia", "task kia phải xong
-//     hôm nay"); the client always user-confirms before applying any `updates` entry, never
-//     auto-commits. See `_shared/schema.ts`'s `ParseRequest.clientCaps`/`TaskRefOut`/
-//     `TaskUpdateOut` doc comments for the full wire contract.
+//     `client_caps` (task_refs_v1, anh Khôi 2026-08-02 task-refs design; task_cues_v1, Opus design
+//     2026-08-08, `specs/006-cues-and-waiting/`): a capability handshake, NOT a version gate — App
+//     Store clients fragment across versions while this function redeploys freely, so a client
+//     instead lists response shapes it knows how to consume. Absent -> today's behavior,
+//     BYTE-IDENTICAL (bare `ParsedTaskOut[]`, `SYSTEM_PREAMBLE`, `buildParseResponseSchema()`,
+//     `validateParsedTaskArray`) — see `wantsEnvelope`/`wantsCues` below. The two caps are
+//     INDEPENDENT (present with `"task_refs_v1"` alone -> an ENVELOPE response `{ tasks, taskRefs,
+//     updates }` letting the model reference/update existing tasks ("làm task này khi xong task
+//     kia", "task kia phải xong hôm nay"); present with `"task_cues_v1"` alone -> bare array with
+//     an optional `cue` field per task, an implementation-intention anchor like "ngủ dậy thì..."
+//     kept verbatim instead of being forced into a fabricated deadline; present with BOTH -> the
+//     envelope shape WITH `cue` on each task — this last combination is what every real client
+//     actually sends, since `CloudParser.swift` declares both caps unconditionally) — the client
+//     always user-confirms before applying any `updates` entry, never auto-commits. See
+//     `_shared/schema.ts`'s `ParseRequest.clientCaps`/`TaskRefOut`/`TaskUpdateOut`/`CueOut` doc
+//     comments and `_shared/gemini.ts`'s `SYSTEM_PREAMBLE_TASK_REFS_CUES` doc comment for the full
+//     wire contract.
 //   breakdown mode:          { mode: "breakdown", task_title, notes?, source_transcript?,
 //                              deadline?, existing_subtasks? }
 //     — the four fields after `notes` are the OPTIONAL 2026-07-29 "richer context" addendum (see
@@ -97,6 +104,7 @@ import {
   validateNextActionMessage,
   validateParseEnvelope,
   validateParsedTaskArray,
+  validateParsedTaskArrayWithCues,
   validateRequestBody,
   validateResolveCompletion,
   type ResolveCompletionOut,
@@ -107,7 +115,9 @@ import {
   NEXT_ACTION_SYSTEM_PREAMBLE,
   RESOLVE_COMPLETION_SYSTEM_PREAMBLE,
   SYSTEM_PREAMBLE,
+  SYSTEM_PREAMBLE_TASK_CUES,
   SYSTEM_PREAMBLE_TASK_REFS,
+  SYSTEM_PREAMBLE_TASK_REFS_CUES,
   buildBreakdownContents,
   buildBreakdownResponseSchema,
   buildDreadContents,
@@ -116,7 +126,9 @@ import {
   buildNextActionResponseSchema,
   buildParseContents,
   buildParseEnvelopeResponseSchema,
+  buildParseEnvelopeResponseSchemaWithCues,
   buildParseResponseSchema,
+  buildParseResponseSchemaWithCues,
   buildResolveCompletionContents,
   buildResolveCompletionResponseSchema,
   callGemini,
@@ -277,6 +289,15 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
       // new envelope shape. See `ParseRequest.clientCaps`'s doc comment in `_shared/schema.ts` for
       // the full compat rationale (unrecognized caps are ignored, never rejected).
       const wantsEnvelope = body.clientCaps?.includes("task_refs_v1") ?? false;
+      // task_cues_v1 capability handshake (Opus design 2026-08-08, `specs/006-cues-and-waiting/`):
+      // same posture as `wantsEnvelope` above — absent (or unrecognized) -> the model is never even
+      // asked about cues, and `cue` never appears on the wire. `task_refs_v1` and `task_cues_v1` are
+      // INDEPENDENT (a request may carry either, neither, or both), which is exactly why there are
+      // FOUR branches below instead of a single boolean fork — see `SYSTEM_PREAMBLE_TASK_REFS_CUES`'s
+      // doc comment in `_shared/gemini.ts`: the combo branch (both caps present) is the one every
+      // REAL client actually takes, since `CloudParser.swift` always sends
+      // `["task_refs_v1", "task_cues_v1"]` together and never just one.
+      const wantsCues = body.clientCaps?.includes("task_cues_v1") ?? false;
 
       const contents = buildParseContents({
         transcript: body.transcript,
@@ -285,6 +306,58 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
         openTaskTitles: body.openTaskTitles,
         timezone: body.timezone,
       });
+
+      if (wantsEnvelope && wantsCues) {
+        // COMBO branch (Opus review of T1, 2026-08-08) — the path every real request actually
+        // takes. Same envelope response shape/logging as the `wantsEnvelope`-alone branch right
+        // below, differing ONLY in which preamble/schema/validator is used (the `_Cues` variants,
+        // which add the optional `cue` field onto each task inside `tasks`) and in the `cues: true`
+        // log field. Kept as its OWN branch rather than folded into the one below specifically so
+        // the `wantsEnvelope`-alone branch's code stays byte-for-byte untouched (see its own
+        // comment) — a client sending only `task_refs_v1` must never notice `task_cues_v1` exists.
+        const raw = await callGemini({
+          apiKey: geminiCfg.values.GEMINI_API_KEY,
+          model,
+          systemInstruction: SYSTEM_PREAMBLE_TASK_REFS_CUES,
+          contents,
+          responseSchema: buildParseEnvelopeResponseSchemaWithCues(),
+          timeoutMs,
+          reqId,
+        });
+        const result = validateParseEnvelope(raw, true);
+        if (!result) {
+          logError("parse_output_invalid", {
+            reqId,
+            tier: authResult.tier,
+            mode: "parse",
+            envelope: true,
+            cues: true,
+          });
+          return finish(errorResponse(502, "upstream_error"), { reason: "model_output_invalid" });
+        }
+        logEvent("parse_request", {
+          reqId,
+          userIdHash,
+          tier: authResult.tier,
+          status: 200,
+          mode: "parse",
+          envelope: true,
+          cues: true,
+          transcriptChars: body.transcript.length,
+          openTaskTitleCount: body.openTaskTitles.length,
+          hasTimezone: body.timezone !== undefined, // boolean only — never the raw value, see module doc comment
+          taskCount: result.tasks.length,
+          taskRefCount: result.taskRefs.length,
+          updateCount: result.updates.length,
+          droppedCount: result.droppedCount,
+          quotaUsed,
+          latencyMs: Math.round(performance.now() - startedAt),
+        });
+        return finish(
+          jsonResponse(200, { tasks: result.tasks, taskRefs: result.taskRefs, updates: result.updates }),
+          { reason: "success" },
+        );
+      }
 
       if (wantsEnvelope) {
         const raw = await callGemini({
@@ -324,7 +397,45 @@ async function handle(req: Request, startedAt: number, reqId: string): Promise<R
         );
       }
 
-      // Unchanged from before task_refs_v1: exact same prompt/schema/validator/response body.
+      if (wantsCues) {
+        // task_cues_v1 alone (no task_refs_v1) — bare-array response shape, same as the final
+        // fallback below, with the `_Cues` preamble/schema/validator swapped in so each task may
+        // carry the optional `cue` field. See `SYSTEM_PREAMBLE_TASK_CUES`'s doc comment: this
+        // branch is for an isolated/future single-cap caller — the real client always takes the
+        // combo branch above instead, since it sends both caps together.
+        const raw = await callGemini({
+          apiKey: geminiCfg.values.GEMINI_API_KEY,
+          model,
+          systemInstruction: SYSTEM_PREAMBLE_TASK_CUES,
+          contents,
+          responseSchema: buildParseResponseSchemaWithCues(),
+          timeoutMs,
+          reqId,
+        });
+        const result = validateParsedTaskArrayWithCues(raw);
+        if (!result) {
+          logError("parse_output_invalid", { reqId, tier: authResult.tier, mode: "parse", cues: true });
+          return finish(errorResponse(502, "upstream_error"), { reason: "model_output_invalid" });
+        }
+        logEvent("parse_request", {
+          reqId,
+          userIdHash,
+          tier: authResult.tier,
+          status: 200,
+          mode: "parse",
+          cues: true,
+          transcriptChars: body.transcript.length,
+          openTaskTitleCount: body.openTaskTitles.length,
+          hasTimezone: body.timezone !== undefined, // boolean only — never the raw value, see module doc comment
+          taskCount: result.tasks.length,
+          droppedCount: result.droppedCount,
+          quotaUsed,
+          latencyMs: Math.round(performance.now() - startedAt),
+        });
+        return finish(jsonResponse(200, result.tasks), { reason: "success" });
+      }
+
+      // Unchanged from before task_refs_v1/task_cues_v1: exact same prompt/schema/validator/response body.
       const raw = await callGemini({
         apiKey: geminiCfg.values.GEMINI_API_KEY,
         model,

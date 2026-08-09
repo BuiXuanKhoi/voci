@@ -736,6 +736,31 @@ struct RawParsedReminderOverride: Sendable {
 }
 extension RawParsedReminderOverride: Decodable {}
 
+/// Wire shape for `cue` (task_cues_v1, `specs/006-cues-and-waiting/design.md` §2) — mirrors
+/// `CueOut` in `supabase/functions/_shared/schema.ts` (`{ kind: "wake"|"dayEnd"|"unknown";
+/// verbatim: string }`). BOTH fields optional here even though the server always sends
+/// `verbatim`: this is the exact "a non-optional key throws the WHOLE decode" trap
+/// `RawParsedRecurrence.everyDays`'s 2026-08-01 doc comment already documents for a numeric
+/// field — the same trap applies just as much to a missing STRING key, since `JSONDecoder`
+/// throws on ANY absent non-optional key, not just a type-mismatched one. `RawParsedTask.cue:
+/// RawParsedCue?` only protects against the `cue` KEY being absent (`decodeIfPresent`); a
+/// present-but-malformed `cue` object (e.g. missing `verbatim`) would still throw through to the
+/// whole task/array/envelope decode if `verbatim` here were non-optional. The REAL fail-open
+/// rules live in `ParsedTaskValidation.validateCue` below: missing/empty `verbatim` drops the
+/// cue (keeps the task), and an unrecognized `kind` string maps to `CueKind.unknown` rather than
+/// dropping anything (`.unknown` is valid and common per that case's own doc comment in
+/// `Model/TaskCue.swift`, T2-owned — referenced here BY NAME ONLY, never redefined).
+struct RawParsedCue: Sendable {
+    // Defaulted (`= nil`), NOT bare `String?`, for the same synthesized-memberwise-init
+    // omittability reason `RawParsedTaskRef.assumeExisting` documents at length: a bare
+    // `Optional` stored property alone does NOT earn a default in this codebase's observed
+    // convention, so any direct-construction test call site that wants to omit one field needs
+    // this written explicitly.
+    var kind: String? = nil
+    var verbatim: String? = nil
+}
+extension RawParsedCue: Decodable {}
+
 struct RawParsedSubtask: Sendable {
     var title: RawConfidence<String>
     /// OPTIONAL even though the server always sends it (`_shared/schema.ts`'s `validateSubtask`
@@ -774,6 +799,15 @@ struct RawParsedTask: Sendable {
     var kind: RawConfidence<String>?
     var subtasks: [RawParsedSubtask]?
     var followUpReview: RawConfidence<Bool>?
+    /// task_cues_v1 (`specs/006-cues-and-waiting/design.md`): only ever populated when the
+    /// request advertised `"task_cues_v1"` in `client_caps` (`CloudParser.cuesCapability`) — a
+    /// server that doesn't recognize the cap simply omits this key, which decodes to `nil` here
+    /// either way (back-compat: no cap support yet == no `cue` key == unchanged pre-006
+    /// behavior — the exact property `CloudParserTests`'s back-compat cue test pins down). Never
+    /// wrapped in `RawConfidence<T>` like the fields above it: `CueOut`/`TaskCue` carry no
+    /// model-reported confidence field at all (`design.md` §2's `TaskCue` — kind/verbatim/
+    /// createdAt/expiresAt only), so there is nothing to wrap.
+    var cue: RawParsedCue?
 
     init(
         title: RawConfidence<String>,
@@ -787,7 +821,8 @@ struct RawParsedTask: Sendable {
         conditions: [RawConfidence<RawParsedCondition>]? = nil,
         kind: RawConfidence<String>? = nil,
         subtasks: [RawParsedSubtask]? = nil,
-        followUpReview: RawConfidence<Bool>? = nil
+        followUpReview: RawConfidence<Bool>? = nil,
+        cue: RawParsedCue? = nil
     ) {
         self.title = title
         self.notes = notes
@@ -801,6 +836,7 @@ struct RawParsedTask: Sendable {
         self.kind = kind
         self.subtasks = subtasks
         self.followUpReview = followUpReview
+        self.cue = cue
     }
 }
 extension RawParsedTask: Decodable {}
@@ -949,11 +985,19 @@ enum ParsedTaskValidation {
         minutes.isFinite && minutes > 0 && minutes <= maxReminderOffsetMinutes
     }
 
-    static func validateAll(_ raws: [RawParsedTask], sourceTranscript: String) -> [ParsedTask] {
-        raws.map { validate($0, sourceTranscript: sourceTranscript) }
+    /// `now` (default `Date()`) is the same clock `CloudParser.performParse`/
+    /// `FoundationModelParser.parse` already thread through their own `now:` parameter — passed
+    /// down here ONLY so a decoded `cue` (task_cues_v1) can stamp `TaskCue.createdAt` at the
+    /// instant this response was captured/validated, matching `TaskCue.expiresAt`'s "createdAt +
+    /// 48h" contract (`Model/TaskCue.swift`). The default exists purely so every pre-006 call
+    /// site (every test in `CloudParserTests.swift` that doesn't touch cue at all) keeps
+    /// compiling unchanged — same "defaulted trailing parameter" convention this file already
+    /// uses elsewhere (e.g. `RawParsedTaskRef.assumeExisting`).
+    static func validateAll(_ raws: [RawParsedTask], sourceTranscript: String, now: Date = Date()) -> [ParsedTask] {
+        raws.map { validate($0, sourceTranscript: sourceTranscript, now: now) }
     }
 
-    static func validate(_ raw: RawParsedTask, sourceTranscript: String) -> ParsedTask {
+    static func validate(_ raw: RawParsedTask, sourceTranscript: String, now: Date = Date()) -> ParsedTask {
         let trimmedTitle = raw.title.value.trimmingCharacters(in: .whitespacesAndNewlines)
         let title = trimmedTitle.isEmpty
             ? sourceTranscript.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1136,6 +1180,11 @@ enum ParsedTaskValidation {
 
         let followUpReview = raw.followUpReview?.value ?? false
 
+        // task_cues_v1: NEVER derived from/converted into `deadline` above — see
+        // `Self.validateCue`'s own doc comment for why that conflation is precisely the bug
+        // 006-cues-and-waiting exists to fix.
+        let cue = Self.validateCue(raw.cue, now: now)
+
         return ParsedTask(
             title: title,
             notes: notes,
@@ -1149,7 +1198,42 @@ enum ParsedTaskValidation {
             conditions: conditions,
             subtasks: subtasks,
             followUpReview: followUpReview,
+            cue: cue,
             sourceTranscript: sourceTranscript
+        )
+    }
+
+    // MARK: - Cue (task_cues_v1, `specs/006-cues-and-waiting/design.md` §1/§2)
+    //
+    // Cue is a SURFACING signal only — never eligibility, and NEVER converted into a
+    // `deadline`/`afterDate` anywhere in this file (that exact conflation is the live bug this
+    // feature exists to fix; nothing below ever touches the `deadline`/`conditions` computed
+    // above). `TaskCue`/`CueKind` are owned by T2 (`Model/TaskCue.swift`) — referenced here BY
+    // NAME ONLY, never redefined (same "PINNED PUBLIC SURFACE" convention `ParsedCapture.swift`
+    // already establishes for a cross-agent shared type).
+
+    /// Defensive length cap on `verbatim`, reusing the same 300-char number the server's own
+    /// `MAX_TASK_TITLE_CHARS` (`supabase/functions/_shared/schema.ts`) already uses for this
+    /// exact field (per `design.md`'s T1.2 instruction to the server-side agent) — same "never
+    /// trust a remote response blindly" client-side re-check every other cap in this file already
+    /// applies to its own field.
+    private static let maxCueVerbatimChars = 300
+
+    /// Fail-open per `design.md` §2 / this feature's own instruction: a `kind` this client
+    /// doesn't recognize (or a server that hasn't rolled out task_cues_v1 to full parity yet)
+    /// maps to `.unknown` — NEVER dropped, `.unknown` is valid and common (see `CueKind.unknown`'s
+    /// own doc comment). A missing/empty `verbatim` drops the WHOLE cue while leaving every other
+    /// field on the task untouched (constitution II: "a parsing error on one attribute MUST NOT
+    /// discard the others").
+    private static func validateCue(_ raw: RawParsedCue?, now: Date) -> TaskCue? {
+        guard let raw else { return nil }
+        guard let rawVerbatim = raw.verbatim else { return nil }
+        let trimmed = rawVerbatim.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let capped = String(trimmed.prefix(Self.maxCueVerbatimChars))
+        let kind = raw.kind.flatMap(CueKind.init(rawValue:)) ?? .unknown
+        return TaskCue(
+            kind: kind, verbatim: capped, createdAt: now, expiresAt: TaskCue.defaultExpiry(from: now)
         )
     }
 
@@ -1364,9 +1448,11 @@ enum ParsedTaskValidation {
     /// BEFORE validation, identical to the pre-existing bare-array path (`performParse`'s fallback
     /// branch) — one shared cap, applied the same way regardless of which wire shape answered, so
     /// `taskCount` below always means the same thing either way.
-    static func validateCapture(_ envelope: RawParseEnvelope, sourceTranscript: String) -> ParsedCapture {
+    static func validateCapture(
+        _ envelope: RawParseEnvelope, sourceTranscript: String, now: Date = Date()
+    ) -> ParsedCapture {
         let cappedRawTasks = Array(envelope.tasks.prefix(IntentRouter.maxTaskCap))
-        let tasks = Self.validateAll(cappedRawTasks, sourceTranscript: sourceTranscript)
+        let tasks = Self.validateAll(cappedRawTasks, sourceTranscript: sourceTranscript, now: now)
         let taskRefs = Self.validateTaskRefs(envelope.taskRefs ?? [])
         let updates = Self.validateTaskUpdates(
             envelope.updates ?? [], refCount: taskRefs.count, taskCount: tasks.count
