@@ -56,6 +56,9 @@ final class SyncEngine {
         /// which this case must NOT do — the poll loop is already running whenever this can fire
         /// at all (see `pathMonitor`'s lifecycle note).
         case networkRestored
+        /// The user pressed "Re-sync from scratch" in Settings (`resyncFromScratch()`). Its own case
+        /// so a diagnostics reader can tell a deliberate full re-pull apart from an ordinary round.
+        case manualResync
     }
 
     // MARK: - Constants
@@ -111,6 +114,14 @@ final class SyncEngine {
     /// round after the current one finishes, rather than dropping the request or queuing without
     /// bound.
     private var pendingRerun = false
+    /// Bumped by `resyncFromScratch()`. A round captures this at its start and refuses to write a
+    /// cursor if the value changed while it was in flight — that round's cursor describes a page
+    /// that began at the OLD position, so storing it would silently undo the reset the user just
+    /// asked for and leave the button looking like it worked. Not a lock: the round still applies
+    /// everything it pulled (that data is real and already on disk), it just declines to move a
+    /// cursor it is no longer entitled to move. Only ever compared for equality, never ordered, so
+    /// wrapping via `&+` on a pathological number of presses is harmless.
+    private var cursorEpoch = 0
 
     private lazy var deviceId: String = {
         if let existing = defaults.string(forKey: Self.deviceIdKey) { return existing }
@@ -157,6 +168,26 @@ final class SyncEngine {
         handleForeground()
     }
 
+    /// Valve 2 (design.md §6): forget where this device has read up to and pull the account again
+    /// from the beginning. For the case where the local copy is SUSPECTED to have drifted, and as the
+    /// manual counterpart to `trustedCursor(forKey:)`'s automatic reset.
+    ///
+    /// 🔴 THIS IS NOT "DELETE AND RE-DOWNLOAD" AND MUST NEVER BECOME THAT. It clears two
+    /// `UserDefaults` strings, nothing else. What follows is an ORDINARY sync round that happens to
+    /// start from a `nil` cursor: every row comes back down, `SyncMerge.decide` arbitrates each one
+    /// under LWW exactly as on any other round, and a local row that is newer than the server's
+    /// simply wins and stays. No local task is deleted, no pending push is dropped, no `syncedAt` is
+    /// cleared. The only cost is bandwidth and time proportional to the account's task count.
+    func resyncFromScratch() {
+        // Bumped BEFORE clearing the keys — any round already in flight captured the OLD epoch at
+        // its start and will refuse to write a cursor once this one no longer matches (see
+        // `cursorEpoch`'s doc comment and the guard in `runOneExchange`).
+        cursorEpoch &+= 1
+        defaults.removeObject(forKey: Self.cursorTasksKey)
+        defaults.removeObject(forKey: Self.cursorCompletionsKey)
+        requestSync(reason: .manualResync)
+    }
+
     /// `AppState` calls this after every local write (client-contract.md §8) — also the engine's
     /// own periodic tick and the foreground observer route through here, so there is exactly ONE
     /// place that decides "run a round now" (see `debounceTask` below).
@@ -167,8 +198,12 @@ final class SyncEngine {
         // periodic tick does NOT reset backoff; that would defeat the entire point of backing
         // off. `.networkRestored` belongs here too: it exists SPECIFICALLY to undo the backoff a
         // string of `.offline` failures already applied (`backOffForOffline()`) the moment the
-        // network is worth trying again — see `handlePathUpdate(satisfied:)`.
-        if reason == .localEdit || reason == .foreground || reason == .networkRestored {
+        // network is worth trying again — see `handlePathUpdate(satisfied:)`. `.manualResync`
+        // belongs here too: the user reaching for "Re-sync from scratch" in Settings is the
+        // strongest possible evidence this window is in use — there is no stronger signal than an
+        // explicit request.
+        if reason == .localEdit || reason == .foreground || reason == .networkRestored
+            || reason == .manualResync {
             resetBackoff()
         }
         debounceTask?.cancel()
@@ -420,18 +455,37 @@ final class SyncEngine {
         }
     }
 
+    /// Valve 1 (design.md §6, `SyncMerge.cursorAfterStalenessCheck`): read a stored cursor, and if it
+    /// is too old to be trusted, FORGET it — clear the key as well as returning `nil`. Clearing
+    /// matters: `nextCursor(previous:candidate:)` at the end of a round re-reads this same key, and a
+    /// stale value left sitting there would win that comparison and be written straight back, undoing
+    /// the reset. This is NOT a wipe — a `nil` cursor is an ordinary full pull; nothing local is
+    /// deleted and LWW arbitrates every row as usual.
+    private func trustedCursor(forKey key: String) -> String? {
+        let stored = defaults.string(forKey: key)
+        let trusted = SyncMerge.cursorAfterStalenessCheck(stored, now: Date())
+        if trusted == nil, stored != nil {
+            defaults.removeObject(forKey: key)
+        }
+        return trusted
+    }
+
     /// One `sync_exchange` HTTP call: gather the outbox, send it, apply what comes back. Returns
     /// `nil` on failure (already recorded into `lastFailure` before returning) — the caller stops
     /// looping for this round; nothing here is ever undone on failure (RULE 1 — see below).
     private func runOneExchange(
         store: SyncTaskStoring
     ) async -> (hasMore: Bool, pulledSomething: Bool)? {
+        // Captured FIRST, before anything below can await and let `resyncFromScratch()` land
+        // concurrently — see `cursorEpoch`'s doc comment. Compared again just before the cursor
+        // writes at the bottom of this function.
+        let epoch = cursorEpoch
         let pendingTasks = store.pendingForSync(limit: Self.batchLimit)
         let pendingCompletions = store.pendingCompletions(limit: Self.batchLimit)
 
         let request = SyncExchangeRequest(
-            cursorTasks: defaults.string(forKey: Self.cursorTasksKey),
-            cursorCompletions: defaults.string(forKey: Self.cursorCompletionsKey),
+            cursorTasks: trustedCursor(forKey: Self.cursorTasksKey),
+            cursorCompletions: trustedCursor(forKey: Self.cursorCompletionsKey),
             device: deviceId,
             deviceLabel: deviceLabel,
             tasks: pendingTasks.map(SyncTaskOutbound.init),
@@ -545,8 +599,16 @@ final class SyncEngine {
         let newCursorCompletions = SyncMerge.nextCursor(
             previous: defaults.string(forKey: Self.cursorCompletionsKey), candidate: response.cursorCompletions
         )
-        defaults.set(newCursorTasks, forKey: Self.cursorTasksKey)
-        defaults.set(newCursorCompletions, forKey: Self.cursorCompletionsKey)
+        // `resyncFromScratch()` guard: if the epoch moved while this round was in flight, this
+        // round's cursor describes a page that began at the position the user just asked to
+        // discard — writing it would silently undo the reset (`cursorEpoch`'s doc comment). Only
+        // the cursor is epoch-scoped: everything pulled above is real and already durably applied,
+        // and `markSynced`/`markCompletionsSynced`/`lastSuccessAt` below still reflect a push/pull
+        // that genuinely succeeded regardless of which epoch it belonged to.
+        if epoch == cursorEpoch {
+            defaults.set(newCursorTasks, forKey: Self.cursorTasksKey)
+            defaults.set(newCursorCompletions, forKey: Self.cursorCompletionsKey)
+        }
 
         let now = Date()
         lastSuccessAt = now

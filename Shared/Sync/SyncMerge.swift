@@ -95,4 +95,46 @@ enum SyncMerge {
         guard let previous else { return candidate }
         return candidate >= previous ? candidate : previous
     }
+
+    // MARK: - Cursor staleness (design.md §6 — the "offline longer than the tombstone" valve)
+
+    /// How long the SERVER keeps a tombstone before it is swept (design.md §6, migration
+    /// `0005_sync_schema.sql`). Declared here — not only in SQL — because the client's own margin
+    /// below is defined RELATIVE to it, and a reader has to be able to see both numbers at once.
+    static let serverTombstoneRetentionDays = 90
+
+    /// A stored cursor older than this is thrown away and its stream re-pulled from scratch.
+    ///
+    /// 🔴 THE `60 < 90` RELATIONSHIP IS THE WHOLE POINT — NEVER CHANGE ONE NUMBER WITHOUT THE OTHER.
+    /// A cursor N days old means "the last thing this device saw from the server was N days ago".
+    /// Past `serverTombstoneRetentionDays` the server has swept the tombstones, so a device resuming
+    /// on such a cursor pulls every still-alive task, never learns which ones were DELETED, and
+    /// re-pushes its stale copies — resurrecting deleted tasks and spreading them to every other
+    /// device (design.md §6 called this out as accepted; this valve is anh Khôi closing it).
+    /// Resetting to `nil` costs one full re-pull, which is harmless: it is an ordinary sync round,
+    /// LWW arbitrates every row exactly as usual, and NOTHING local is deleted. The 30-day gap is
+    /// the margin for clock skew, a device that resumes mid-sweep, and any future change to the
+    /// server's sweep schedule. Raising this at or above `serverTombstoneRetentionDays` re-opens the
+    /// exact hole it exists to close; lowering the server's retention toward this does the same.
+    static let cursorMaxAgeDays = 60
+
+    /// Valve 1: hand back the cursor only while it is still trustworthy, `nil` otherwise.
+    ///
+    /// Contract §6 says a cursor is an OPAQUE string and must never be parsed into a `Date`. This
+    /// function is the one deliberate exception and it does not violate the reason for that rule:
+    /// the rule exists so a cursor never ROUND-TRIPS through `Date` (Postgres emits 6 fractional
+    /// digits, `Date` cannot hold them, and a re-serialized cursor would skip rows). Here the parsed
+    /// value is used only to answer "is this older than `cursorMaxAgeDays`"; the string that goes
+    /// back on the wire is always the original, byte for byte, or nothing at all.
+    ///
+    /// An UNPARSEABLE cursor also returns `nil`: a value this client cannot read is a value it
+    /// cannot vouch for, and the cost of being wrong is one extra full pull versus resurrected
+    /// tasks. `now` is a parameter, never `Date()` — this file stays pure and testable (file header).
+    static func cursorAfterStalenessCheck(_ cursor: String?, now: Date) -> String? {
+        guard let cursor, let stamp = SyncDate.parse(cursor) else { return nil }
+        let maxAge = TimeInterval(cursorMaxAgeDays) * 24 * 60 * 60
+        // A cursor from the FUTURE (server clock ahead of this device) is not stale — only elapsed
+        // time in the positive direction can have outrun the server's sweep.
+        return now.timeIntervalSince(stamp) > maxAge ? nil : cursor
+    }
 }

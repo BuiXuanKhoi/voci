@@ -169,4 +169,59 @@ final class SyncMergeTests: XCTestCase {
         let candidate = "2026-08-09T10:00:00.000000+00:00" // lexically (and chronologically) earlier
         XCTAssertEqual(SyncMerge.nextCursor(previous: previous, candidate: candidate), previous)
     }
+
+    // MARK: - cursorAfterStalenessCheck(_:now:) — design.md §6, the "offline longer than the
+    // tombstone" valve. Cursor strings below are built with `SyncDate.string(from:)` so these tests
+    // use the exact wire format the server produces, never a hand-typed literal.
+
+    private func daysAgo(_ days: Double) -> Date {
+        now.addingTimeInterval(-days * 24 * 60 * 60)
+    }
+
+    func testCursorAfterStalenessCheckNilInNilOut() {
+        XCTAssertNil(SyncMerge.cursorAfterStalenessCheck(nil, now: now))
+    }
+
+    func testCursorAfterStalenessCheckOneDayOldReturnedUnchanged() {
+        let cursor = SyncDate.string(from: daysAgo(1))
+        XCTAssertEqual(SyncMerge.cursorAfterStalenessCheck(cursor, now: now), cursor)
+    }
+
+    func testCursorAfterStalenessCheck59DaysOldReturnedUnchanged() {
+        let cursor = SyncDate.string(from: daysAgo(59))
+        XCTAssertEqual(SyncMerge.cursorAfterStalenessCheck(cursor, now: now), cursor)
+    }
+
+    func testCursorAfterStalenessCheck61DaysOldReturnsNil() {
+        let cursor = SyncDate.string(from: daysAgo(61))
+        XCTAssertNil(SyncMerge.cursorAfterStalenessCheck(cursor, now: now))
+    }
+
+    /// The boundary is EXACTLY `cursorMaxAgeDays` days old — the implementation uses strict `>`, so
+    /// an age exactly equal to the limit must still be trusted. Asserted against the constant
+    /// itself, not a restated `60`, so an edit to `cursorMaxAgeDays` alone still exercises the real
+    /// boundary instead of silently testing the wrong day count.
+    func testCursorAfterStalenessCheckExactlyAtBoundaryReturnedUnchanged() {
+        let cursor = SyncDate.string(from: daysAgo(Double(SyncMerge.cursorMaxAgeDays)))
+        XCTAssertEqual(SyncMerge.cursorAfterStalenessCheck(cursor, now: now), cursor)
+    }
+
+    func testCursorAfterStalenessCheckUnparseableReturnsNil() {
+        XCTAssertNil(SyncMerge.cursorAfterStalenessCheck("not a timestamp", now: now))
+    }
+
+    /// A cursor from the FUTURE (server clock ahead of this device) must never be treated as stale —
+    /// only elapsed time in the positive direction can have outrun the server's sweep.
+    func testCursorAfterStalenessCheckFutureCursorReturnedUnchanged() {
+        let cursor = SyncDate.string(from: now.addingTimeInterval(1_000_000))
+        XCTAssertEqual(SyncMerge.cursorAfterStalenessCheck(cursor, now: now), cursor)
+    }
+
+    /// Pins the invariant the whole valve depends on: the client's own margin must stay strictly
+    /// below how long the server keeps a tombstone. This test exists so a future edit that changes
+    /// one of these two constants alone fails HERE, in a two-second unit test, instead of silently
+    /// resurrecting deleted tasks in production months later.
+    func testCursorMaxAgeStaysBelowServerTombstoneRetention() {
+        XCTAssertLessThan(SyncMerge.cursorMaxAgeDays, SyncMerge.serverTombstoneRetentionDays)
+    }
 }

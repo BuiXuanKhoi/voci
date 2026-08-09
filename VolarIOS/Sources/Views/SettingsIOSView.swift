@@ -371,6 +371,19 @@ struct SettingsIOSView: View {
                 Button("View lost edits") { showSyncRejects = true }
                     .foregroundStyle(accentColors.solid)
                     .frame(minHeight: IOSMetrics.minTouch)
+                if appState.syncState.syncEnabled {
+                    Button("Re-sync from scratch") { appState.resyncFromScratch() }
+                        .foregroundStyle(accentColors.solid)
+                        .frame(minHeight: IOSMetrics.minTouch)
+                        .disabled(appState.syncBusy)
+                    // Valve 2 (design.md §6) — explains what the button above actually does, so no
+                    // confirmation dialog is needed: the action is harmless by construction and this
+                    // line says so. Mirrors macOS `SettingsView.syncCard` token-for-token except the
+                    // device noun.
+                    Text("Forgets where this iPhone left off and reads the whole account back from the server. Nothing on this iPhone is deleted — with a lot of tasks it can take a while.")
+                        .font(IOSMetrics.caption)
+                        .foregroundStyle(VolarColor.textSec)
+                }
                 Button("Delete data on server") { showSyncPurgeConfirm = true }
                     .foregroundStyle(VolarColor.destruct)
                     .frame(minHeight: IOSMetrics.minTouch)

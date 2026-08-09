@@ -1392,6 +1392,20 @@ struct SettingsView: View {
 
             HStack(spacing: 8) {
                 settingsPillButton("View lost edits") { showSyncRejects = true }
+                if appState.syncState.syncEnabled {
+                    settingsPillButton("Re-sync from scratch") { appState.resyncFromScratch() }
+                        .disabled(appState.syncBusy)
+                }
+            }
+
+            // Valve 2 (design.md §6) — explains what the button above actually does, so no
+            // confirmation dialog is needed: the action is harmless by construction and this line
+            // says so.
+            if appState.syncState.syncEnabled {
+                Text("Forgets where this Mac left off and reads the whole account back from the server. Nothing on this Mac is deleted — with a lot of tasks it can take a while.")
+                    .font(.system(size: 11.5))
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineSpacing(2)
             }
 
             // Styled like `signedInAccountBody`'s "Delete account" button (its own `role:

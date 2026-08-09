@@ -1861,6 +1861,16 @@ final class AppState {
         }
     }
 
+    /// Valve 2 (design.md §6) — Settings' "Re-sync from scratch". A thin passthrough on purpose:
+    /// `SyncEngine` owns the cursor keys (client-contract.md §7, "this file is the ONLY writer"), so
+    /// this must not clear them itself. Does NOT set `syncBusy`: unlike `setSyncEnabled`/
+    /// `purgeSyncData` there is no request to await here — the engine's own debounce runs the round,
+    /// and `isSyncing`/`lastSyncSuccessAt` already report its progress.
+    func resyncFromScratch() {
+        syncError = nil
+        SyncEngine.shared.resyncFromScratch()
+    }
+
     /// Populates `syncRejects` for `SyncRejectsView`. Read-only, no busy flag of its own (the view
     /// shows its own empty state while `syncRejects` is still `[]`) — matches how this list is
     /// explicitly NOT part of the account-action busy/error story above (client-contract.md §9: read
