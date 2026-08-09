@@ -1,5 +1,9 @@
 // supabase/scripts/probe-task-refs.ts
 //
+// 🔴 AGENT: KHÔNG TỰ CHẠY FILE NÀY (anh Khôi chốt 2026-08-09 — xem CLAUDE.md ở gốc repo).
+// Đắt nhất trong 4 probe: mỗi case gửi kèm danh sách task hiện có nên input token còn lớn hơn
+// mức 5.967 chuẩn. Sửa prompt xong thì DỪNG và hỏi anh Khôi. `--dry-run` thì thoải mái.
+//
 // Live probe for the `task_refs_v1` envelope capability — modeled directly on
 // `probe-time-parsing.ts` (same env handling, same "known-answer" philosophy, same output style)
 // but exercising the ENVELOPE half of the parse route instead of the bare-array half: calls Gemini
@@ -527,11 +531,23 @@ const CASES: Case[] = [
     transcript:
       "gọi cho khách hàng sau khi xong cái vụ report, và dời cái vụ họp nhóm dự án sang chiều mai",
     openTaskTitles: ["Viết báo cáo Q3", "Họp nhóm dự án"],
+    // DIAGNOSIS CORRECTED (2026-08-09, T1 combo hardening -- re-measured raw model output 3x
+    // against SYSTEM_PREAMBLE_TASK_REFS directly): the ORIGINAL `why` below blamed refIndex
+    // defaulting to 1 / references collapsing -- that part of this case in fact passed 3/3 in raw
+    // sampling (taskRefs always has 2 distinct entries, the report dependency always resolves to
+    // refIndex 1, the meeting update always resolves to refIndex 2). The actual intermittent
+    // failure is entirely in `set.startTime` vs `set.deadline` for "dời X sang <time>" -- the SAME
+    // ambiguity standalone case (10) above also flakes on (both pull from the identical UPDATES
+    // rule text in TASK_REFS_SECTION: "dời X sang 3h chiều" -> set.startTime). This case just
+    // inherits that flakiness rather than adding a distinct "two references" failure mode of its
+    // own. Left as a combined case on purpose (real utterances DO combine a dependency and an
+    // update on two different referenced tasks at once), but the `why` below now describes what
+    // was actually observed rather than what was assumed when this case was first written.
     why:
-      "harder coverage case: TWO distinct references in one utterance must produce TWO taskRefs " +
-      "entries (not collapsed into one, not only the first one extracted), one feeding a NEW " +
-      "task's dependency and the other feeding an update -- exercises refIndex actually " +
-      "disambiguating between two candidates instead of defaulting to 1",
+      "combined coverage case: TWO distinct references in one utterance must produce TWO taskRefs " +
+      "entries, one feeding a NEW task's dependency (refIndex resolution here is RELIABLE, not the " +
+      "flaky part) and the other feeding an update whose set.startTime (not set.deadline) is the " +
+      "SAME intermittently-flaky field-choice as standalone case (10) above, not a distinct bug",
     check(env) {
       const problems: string[] = [];
       const reportIdx = findRefIndexByExactTitle(env.taskRefs, "Viết báo cáo Q3");

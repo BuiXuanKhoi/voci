@@ -139,8 +139,8 @@ Có sẵn tự động trong Edge runtime: `SUPABASE_URL`, `SUPABASE_ANON_KEY`,
 Anh Khôi set thủ công: `GEMINI_API_KEY`, `GROQ_API_KEY`, các `APPSTORE_*` (đã dùng sẵn cho
 verify JWS).
 
-Tunable (có default trong code, không cần set): `PARSE_LIMIT_FREE=20`,
-`PARSE_LIMIT_PRO=500`, `SPEECH_LIMIT_PRO=500`.
+Tunable (có default trong code, không cần set): `PARSE_LIMIT_FREE=12` (hạ từ 20 ngày
+2026-08-09), `PARSE_LIMIT_PRO=500`, `SPEECH_LIMIT_PRO=500`.
 
 **Xoá:** `PARSE_DEV_TOKEN` (`supabase secrets unset PARSE_DEV_TOKEN`).
 

@@ -83,7 +83,7 @@ are logged server-side instead (see `_shared/log.ts`), so an operator can `supab
 | `GEMINI_API_KEY` | `parse` | Gemini API key. Never returned to clients; used server-side only. |
 | `PARSE_MODEL` | optional | Overrides the default Flash-Lite class model (`gemini-3.1-flash-lite` at time of writing — **verify this id is still current in Google AI Studio before deploy**, Gemini retires model ids on a rolling basis). |
 | `PARSE_UPSTREAM_TIMEOUT_MS` | optional | Gemini request timeout. Default `20000`. |
-| `PARSE_LIMIT_FREE` | optional | Free-tier daily `/parse` cap per account. Default `20`. |
+| `PARSE_LIMIT_FREE` | optional | Free-tier daily `/parse` cap per account. Default `12` (hạ từ `20` ngày 2026-08-09 sau khi đo chi phí thật ~$0.0016/call — xem doc comment của `DEFAULT_PARSE_LIMIT_FREE` trong `_shared/quota.ts`). |
 | `PARSE_LIMIT_PRO` | optional | Pro-tier daily `/parse` cap per account (fair-use, not a hard sales limit). Default `500`. |
 | `SPEECH_LIMIT_FREE` | optional | Free-tier daily `/groq` cap per account. Default `20`. |
 | `SPEECH_LIMIT_PRO` | optional | Pro-tier daily `/groq` cap per account. Default `500`. |

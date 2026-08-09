@@ -1,5 +1,9 @@
 // supabase/scripts/probe-time-parsing.ts
 //
+// 🔴 AGENT: KHÔNG TỰ CHẠY FILE NÀY (anh Khôi chốt 2026-08-09 — xem CLAUDE.md ở gốc repo).
+// Mỗi case ≈ 47đ vì prompt cố định chiếm 98,8% input token; chạy hết bảng ≈ 21 call ≈ 1.000đ.
+// Sửa prompt xong thì DỪNG và hỏi anh Khôi, đừng "chạy thử cho chắc". `--dry-run` thì thoải mái.
+//
 // Live probe for the /parse route's DATE/TIME resolution only — calls Gemini directly with the
 // EXACT prompt `parse/index.ts` would build (same `SYSTEM_PREAMBLE`, same `buildParseContents`,
 // same `responseSchema`, same `callGemini`), for a table of Vietnamese/English utterances whose
