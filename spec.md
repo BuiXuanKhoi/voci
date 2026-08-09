@@ -54,9 +54,31 @@ Nền khoa học: `docs/adhd-research-v1.md`. Định vị sản phẩm: `docs/p
 
 ---
 
-## 2. Mô hình dữ liệu chung (L1)
+## 2. Data contract
 
-Mọi bản phải có các khái niệm này với **đúng ngữ nghĩa** dưới đây. Tên field/kiểu tuỳ ngôn ngữ.
+### 2.0 "Giống nhau" nghĩa là giống ở đâu — đọc kỹ mục này trước
+
+Câu hỏi hay bị hỏi sai: *"các bản có phải dùng chung một model object không?"* Câu trả lời:
+**không, và đừng cố.** Giống nhau ở **hợp đồng**, tự do ở **cách hiện thực**. Năm tầng, mỗi tầng
+một câu trả lời khác nhau:
+
+| Tầng | Phải giống? | Ghi chú |
+|---|---|---|
+| **Ngữ nghĩa** — khái niệm và luật (§2.1, §2.2) | ✅ **BẮT BUỘC** | "Task cha bị loại khi còn con đang mở" mà một bản hiểu khác đi là hai sản phẩm khác nhau đội chung một tên |
+| **Hình dạng trong bộ nhớ** — tên field, kiểu dữ liệu | ❌ **Không** | Swift `struct`, C# `record`, Kotlin `data class` — ép ba thứ này giống nhau là tốn công đổi lấy số không. Đặt tên theo quy ước ngôn ngữ của mình |
+| **Wire format** — JSON đi/về server | ✅ **BẮT BUỘC** | Mọi bản gọi cùng một Edge Function. Contract nằm ở `supabase/functions/_shared/schema.ts`, đó là nguồn sự thật, không phải client nào |
+| **Lưu trên máy** — SwiftData / SQLite / Room / Core Data | ❌ **Không** | …cho tới khi có sync |
+| **Canonical form để sync** | ✅ **BẮT BUỘC nếu làm sync** | Xem §2.3. Hiện **chưa bản nào có** |
+
+Hệ quả thực tế: engine dùng chung được giữa macOS và iOS (cùng Swift package), nhưng Windows
+(.NET) **không có cách nào** — nó phải viết lại bằng C#. Đó là bình thường và chấp nhận được.
+Cái **không** chấp nhận được là viết lại rồi lệch luật.
+
+> ⚠️ **Chỗ nguy hiểm nhất của toàn bộ dự án này không nằm ở model object, nằm ở hai hàm:** engine
+> chọn việc (§4.1) và sinh mốc nhắc (§6.1). Mỗi bản viết lại chúng bằng ngôn ngữ của mình; lệch một
+> tầng so sánh hoặc một con số thì **không compiler nào kêu, không test riêng của bản nào fail** —
+> chỉ có user thấy hai máy chỉ hai việc khác nhau. Ai implement hai hàm này: đọc §4.1/§6.1 từng
+> dòng, đừng đọc lướt rồi viết theo trí nhớ.
 
 ### 2.1 Task
 
@@ -68,6 +90,8 @@ Mọi bản phải có các khái niệm này với **đúng ngữ nghĩa** dư�
 | `deadline` | Mốc thời gian, có thể rỗng | L1 |
 | `priority` | 1…4, 1 cao nhất; rỗng = chưa đặt | L1 |
 | `createdAt` | Lúc tạo | L1 |
+| `updatedAt` | Lần sửa gần nhất — **xem §2.3** | L1 |
+| `deletedAt` | Bia mộ khi xoá — **xem §2.3** | L1 |
 | `parentId` | Task cha (dùng cho việc đã chia nhỏ) | L1 |
 | `conditions` | Danh sách điều kiện chặn (§2.2) | L1 |
 | `estimateMinutes` | Ước lượng thời lượng | L1 — waiting mode cần |
@@ -89,6 +113,49 @@ Mọi bản phải có các khái niệm này với **đúng ngữ nghĩa** dư�
 | `external` | Chờ người/hệ thống bên ngoài ("chờ sếp duyệt") | **chỉ user tự gỡ** — máy không bao giờ tự đoán là xong |
 
 Ngữ nghĩa **AND**: còn một điều kiện chưa thoả thì task chưa đủ tư cách.
+
+### 2.3 Ba thứ phải có sẵn cho sync — L1, **bắt buộc trong spec, chưa bản nào implement**
+
+Volar chưa có sync. Nhưng sync **nằm trong lộ trình** (bản mobile để dành tier trả phí, focus sync
+§5.3), và ba thứ dưới đây thuộc loại **rẻ khi thêm lúc chưa có dữ liệu thật, đắt khi thêm sau** —
+thêm sau nghĩa là viết migration cho từng platform, mỗi bản một kiểu.
+
+**Luật (anh Khôi chốt 2026-08-09): mọi bản MỚI dựng theo spec này phải có sẵn từ đầu.** Bản macOS
+và Windows đang thiếu; bổ sung khi thực sự làm sync, không phải bây giờ.
+
+**1. `id` sinh ở client, dạng UUID** — ✅ *đã đúng sẵn, ghi ra đây để không ai đổi*
+
+Không dùng số tự tăng của server. Task phải tạo được khi **offline, chưa đăng nhập**, và id đó phải
+sống sót nguyên vẹn khi sau này đồng bộ lên. Đây là quyết định khó đảo nhất trong cả mục này.
+Engine cũng dựa vào `id` để chốt hoà ở tầng 5 (§4.1) — id đổi nghĩa là thứ tự đổi.
+
+**2. `updatedAt`** — mốc sửa gần nhất, cập nhật ở **mọi** đường ghi
+
+Thiếu nó thì hai máy cùng sửa một task xong không có cách nào biết bản nào mới hơn. Không có nó,
+"last write wins" cũng không thực hiện được — không biết ai là "last".
+
+**3. `deletedAt` — bia mộ, KHÔNG xoá thẳng hàng**
+
+Xoá thật khỏi bộ nhớ thì máy kia sync xong sẽ **hồi sinh** task đã xoá: máy A xoá, máy B chưa biết
+nên vẫn còn bản của nó, tới lượt B đẩy lên thì task sống lại. User xoá một việc ba lần mà nó cứ
+quay về là kiểu lỗi làm người ta gỡ app. Xoá = đánh dấu `deletedAt` + ẩn khỏi mọi truy vấn; dọn
+thật sau một khoảng an toàn.
+
+Ba thứ **chưa** cần chốt bây giờ (chốt khi thực sự dựng sync, đừng đoán trước): luật giải xung đột
+ở mức field hay mức bản ghi, transport (polling / realtime), và mã hoá đầu-cuối.
+
+### 2.4 Thời gian — L1
+
+- **Lưu mọi mốc thời gian dạng tuyệt đối** (instant/UTC). Không lưu chuỗi giờ địa phương, không lưu
+  kèm tên múi giờ như một phần của giá trị.
+- **Múi giờ/`Calendar` là tham số truyền vào hàm**, không đọc từ biến toàn cục — cùng luật với
+  `now` (§4.1).
+- ⚠️ **Cái bẫy cụ thể:** tầng 2 xếp hạng của engine hỏi *"deadline này có cùng ngày với `now`
+  không"*. Đây là câu hỏi **theo lịch**, nên hai máy khác múi giờ **trả lời khác nhau trên cùng một
+  dữ liệu** — 23h ở Hà Nội và 9h sáng hôm sau ở đâu đó là cùng một khoảnh khắc nhưng khác "hôm
+  nay". Mỗi bản phải chốt rõ và ghi lại: "hôm nay" tính theo lịch của **thiết bị**, hay theo một
+  múi giờ chuẩn của **tài khoản**. Hai bản chọn khác nhau = hai bản chỉ hai việc khác nhau, và
+  không test nào của riêng bản nào bắt được.
 
 ---
 
@@ -465,6 +532,9 @@ Nguyên tắc gốc: bấm **"Stuck?"** phải cảm thấy bình thường **y 
 
 ## 13. Checklist cho agent bắt đầu một bản mới
 
+0. Đọc **§2.0** trước khi gõ dòng model đầu tiên — biết rõ chỗ nào bắt buộc giống, chỗ nào tự do.
+   Dựng model với **`id` UUID sinh ở client, `updatedAt`, `deletedAt`** ngay từ đầu (§2.3): thêm
+   bây giờ là một dòng, thêm sau là một migration.
 1. Dựng **engine chọn việc** (§4.1) làm module thuần trước tiên. Test với đồng hồ cố định. **Chưa
    xanh thì chưa động vào UI.**
 2. Dựng **sinh mốc nhắc** (§6.1) cũng thuần, cũng test trước. Hai module này là nơi hai bản Volar
