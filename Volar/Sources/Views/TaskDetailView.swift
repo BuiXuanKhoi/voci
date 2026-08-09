@@ -431,6 +431,9 @@ private struct TaskDetailEditor: View {
             .foregroundStyle(accentColors.solid)
             .padding(.horizontal, 12)
             .frame(height: 30)
+            // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09) — xem
+            // `Sidebar.swift`'s `SidebarItem` cho giải thích đầy đủ về họ bug này.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(accentColors.surface)
@@ -576,6 +579,10 @@ private struct TaskDetailEditor: View {
                     .padding(.horizontal, 16)
                     .frame(maxWidth: .infinity)
                     .frame(height: 34)
+                    // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09). Đây là nút chính của cả
+                    // panel — full-width đúng để nó DỄ bấm, mà thiếu dòng này thì cả dải rộng ấy
+                    // chỉ ăn click ở đúng chỗ chữ, tức phản tác dụng hoàn toàn với ý đồ thiết kế.
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .background(accentColors.solid)
@@ -597,6 +604,8 @@ private struct TaskDetailEditor: View {
                         .foregroundStyle(VolarColor.textPri)
                         .padding(.horizontal, 14)
                         .frame(height: 34)
+                        // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09).
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(VolarColor.veil(0.06))
@@ -617,6 +626,13 @@ private struct TaskDetailEditor: View {
                         .foregroundStyle(VolarColor.destruct)
                         .padding(.horizontal, 14)
                         .frame(height: 34)
+                        // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09). Nút XOÁ, nên đáng nói
+                        // thêm: mở rộng vùng bấm ở đây làm nút dễ bấm NHẦM hơn đúng bằng mức nó dễ
+                        // bấm TRÚNG hơn. Chấp nhận được vì `Spacer(minLength: 0)` ngay trên đã đẩy
+                        // nút này về sát mép phải, cách "Close" một khoảng rộng — không có chuyện
+                        // hai vùng bấm chạm nhau. Nếu sau này bố cục đổi và hai nút sát lại thì phải
+                        // xem lại chỗ này, đừng chỉ giữ nguyên vì nó đang chạy.
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(VolarColor.destruct.opacity(0.12))

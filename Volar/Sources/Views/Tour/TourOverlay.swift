@@ -333,6 +333,11 @@ struct TourOverlay: View {
                 .foregroundStyle(VolarColor.bg)
                 .padding(.horizontal, 12)
                 .padding(.vertical, 7)
+                // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09) — xem
+                // `Sidebar.swift`'s `SidebarItem`. Đây là nút đi tiếp của guided tour, tức thứ
+                // người dùng MỚI bấm trong vài phút đầu tiên: một nút không ăn click ở đây là ấn
+                // tượng đầu tiên về app.
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(accent.solid)

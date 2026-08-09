@@ -191,6 +191,12 @@ private struct TakeoverContentView: View {
                             .foregroundStyle(.white)
                             .padding(.horizontal, 28)
                             .padding(.vertical, 14)
+                            // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09, xem
+                            // `Sidebar.swift`'s `SidebarItem`). Ở màn nhắc chiếm TOÀN BỘ màn hình
+                            // thì lỗi này nặng nhất trong cả app: 28pt padding ngang + 14pt dọc là
+                            // vùng chết, nên nút to đùng mà bấm trượt — người đang bị nhắc mà không
+                            // tắt được sẽ đọc thành "app treo", không phải "mình bấm chưa trúng".
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.done)
@@ -202,6 +208,8 @@ private struct TakeoverContentView: View {
                             .foregroundStyle(VolarColor.textPri)
                             .padding(.horizontal, 28)
                             .padding(.vertical, 14)
+                            // Cùng lý do với nút "Xong" ngay trên.
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.veil(0.10))

@@ -238,6 +238,9 @@ struct TaskBreakdownView: View {
                         .foregroundStyle(VolarColor.textPri)
                         .padding(.horizontal, 14)
                         .frame(height: 34)
+                        // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09) — xem
+                        // `Sidebar.swift`'s `SidebarItem` cho giải thích đầy đủ về họ bug này.
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(VolarColor.veil(0.06))
@@ -252,6 +255,8 @@ struct TaskBreakdownView: View {
                         .foregroundStyle(VolarColor.textPri)
                         .padding(.horizontal, 14)
                         .frame(height: 34)
+                        // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09).
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(VolarColor.veil(0.06))
@@ -273,6 +278,9 @@ struct TaskBreakdownView: View {
                     .foregroundStyle(.white)
                     .frame(maxWidth: .infinity)
                     .frame(height: 34)
+                    // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09). Nút chính của cả sheet,
+                    // full-width — thiếu dòng này thì cả dải rộng chỉ ăn click ở chỗ chữ.
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .background(accentColors.solid)

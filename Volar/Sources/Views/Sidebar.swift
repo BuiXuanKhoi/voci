@@ -263,6 +263,17 @@ private struct SidebarItem: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
+            // BUG FIX 2026-08-09 (anh Khôi báo khi chạy thật: "Upcoming/Inbox bấm hoài mà nó không
+            // vào"): với `.buttonStyle(.plain)`, SwiftUI chỉ hit-test phần label THỰC SỰ VẼ RA.
+            // `Spacer(minLength: 0)` ở trên và hai `.padding` này không vẽ gì cả, nên vùng bấm thật
+            // của hàng không phải cả hàng mà là mấy mảnh rời rạc — icon, chữ, và con số — với lỗ
+            // thủng ở giữa. Chuyện này khó phát hiện đúng vì cái nền highlight (`.background` ngay
+            // dưới đây) được vẽ ở lớp NGOÀI `Button`, nên hàng TRÔNG như bấm được cả dải trong khi
+            // thực tế không. `.contentShape` đặt SAU padding để hình chữ nhật hit-test trùm luôn cả
+            // padding, tức đúng bằng vùng nền mà mắt nhìn thấy. Cùng idiom `TodayView.swift:1152`
+            // (`.contentShape(Rectangle())` + `.onTapGesture`) và `:616` đã dùng — chỗ này chỉ là
+            // sót, không phải một quy ước khác.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(active ? accentColors.surface : (isHovering ? VolarColor.veil(0.04) : .clear))
@@ -317,6 +328,12 @@ private struct ProSidebarRow: View {
                 .padding(.horizontal, 10)
                 .frame(height: 32)
                 .frame(maxWidth: .infinity)
+                // Cùng lỗi, cùng cách sửa như `SidebarItem` ở trên (xem comment dài ở đó): hàng này
+                // cũng là `Button` + `.buttonStyle(.plain)` với `Spacer` + padding không vẽ gì, và
+                // gradient fill của nó cũng nằm NGOÀI `Button` — nên nó cũng trông như bấm được cả
+                // dải trong khi chỉ có icon và chữ "Pro" là ăn click. Sửa luôn ở đây thay vì đợi ai
+                // đó báo tiếp: đây là nút BÁN HÀNG, một nút upsell khó bấm là mất tiền thật.
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             // Gradient fill (accentColors.solid -> .hover) rather than the flat `.surface` tint

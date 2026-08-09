@@ -321,6 +321,17 @@ struct PaywallView: View {
             .foregroundStyle(.white)
             .frame(maxWidth: .infinity)
             .frame(height: 40)
+            // BUG FIX 2026-08-09 (tìm ra khi truy lỗi "sidebar bấm không vào" của anh Khôi, cùng
+            // họ): `.background(accentColors.solid)` ngay dưới đây nằm NGOÀI `Button`, nên cái nền
+            // accent 40pt mà mắt thấy KHÔNG thuộc label — với `.buttonStyle(.plain)` SwiftUI chỉ
+            // hit-test phần label thực sự vẽ ra, tức chỉ mỗi chữ "Subscribe". Toàn bộ dải màu hai
+            // bên chữ là vùng chết. Đây là nút MUA HÀNG: một cú bấm trượt ở đây là mất tiền thật,
+            // và người dùng sẽ đọc nó thành "app hỏng" chứ không phải "bấm chưa trúng".
+            //
+            // Đối chiếu: plan picker ở `:253` đặt `.background` BÊN TRONG label nên label vẽ đầy và
+            // hit test đúng — đó là lý do nó vẫn bấm tốt. Dấu hiệu nhận biết cả họ bug này là
+            // `.background(` xuất hiện SAU `.buttonStyle(.plain)`.
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(accentColors.solid)
