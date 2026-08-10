@@ -22,14 +22,50 @@
 //
 // Vietnamese + English, on-device, pure (constitution I/III): no network, no disk, no clock reads
 // — output depends solely on `transcript` and `openTasks`, and is deterministic (stable ordering:
-// score descending, then `taskId` ascending). Reuses the diacritic+case-fold / "đ/Đ" special-case /
-// token-set (Jaccard) fuzzy-scoring convention established by `Volar.Core.ConflictCheck`
-// (`NormalizedTitleTokens` / `TitleSimilarity`, itself a port of `Model/NLParser.swift` and
-// `VolarCore/ConflictCheck.swift`) rather than inventing a new scheme. The algorithm is
+// score descending, then phrase-match, then match-ratio, then `taskId` ascending). Reuses the
+// diacritic+case-fold / "đ/Đ" special-case tokenization convention established by
+// `Volar.Core.ConflictCheck` (`NormalizedTitleTokens`, itself a port of `Model/NLParser.swift` and
+// `VolarCore/ConflictCheck.swift`) rather than inventing a new scheme. Tokenization is
 // re-implemented here (not called into `Volar.Core`) because the Swift original does the same —
 // `VoiceDone.swift`'s `normalizedTokens` is its own private copy, not a call into
 // `ConflictCheck.normalizedTitleTokens` — and because this project must stay free of any
 // dependency the App-wiring layer doesn't already need for this seam.
+//
+// SCORING (containment, weighted by IDF over the current open-task corpus — replaces an earlier
+// Jaccard/token-set formula): a short, vắn tắt utterance ("xong vụ hợp đồng rồi") should still find
+// a task whose title says a lot more ("gọi cho anh Hùng về hợp đồng thuê văn phòng") — Jaccard
+// penalizes the title's extra words, containment does not. See `ScoreCandidate` / `QueryContext`
+// below for the coverage formula and its one-tap safety gate (`DistinctiveIdf`), and
+// `ScoreAgainstText` for the exact-phrase-containment shortcut that runs before it.
+//
+// Deliberately wide at the candidate tier, narrow only at one-tap: the candidate list exists so
+// the USER picks, not so the machine decides — recall matters more than precision below
+// `HighConfidenceThreshold`, and precision matters a lot right at/above it (see `DistinctiveIdf`'s
+// one-tap guard, the only score-suppressing gate left after an earlier absolute-evidence-floor gate
+// was found to be deleting legitimate candidates and was removed).
+//
+// TWO CORPORA, not one: `ScoredTitleCandidates` scores against a corpus built from every open
+// task's TITLE tokens; `ScoredExternalCandidates` scores against a separate corpus built from every
+// open task's EXTERNAL-DESCRIPTION tokens (see `BuildDocumentFrequency` /
+// `BuildExternalDocumentFrequency`). An earlier single-corpus design (title-only, reused for both
+// branches) silently zeroed out almost every clear-external query, because
+// external-description-only vocabulary by definition never appears in any title.
+//
+// TWO POLICIES for a `df == 0` token (present in NO open task), one per use, DELIBERATELY
+// different — see `BuildQueryContext`:
+//   - SCORING: kept. `df == 0` is itself the strongest possible evidence that the utterance is
+//     about something else ("viết BÁO CÁO xong rồi" against the only open task "Viết email" — "báo"
+//     and "cáo" appear nowhere in the corpus at all), so throwing it away throws away exactly the
+//     signal needed to correctly NOT match. It gets the max possible idf (`ln(1 + N)`, same formula
+//     as any other token, `df` just happens to be 0) and sits in the coverage denominator only — it
+//     can never appear in a numerator because, by construction, nothing in the corpus contains it.
+//     An earlier design dropped these tokens from scoring entirely, which is what let "viết báo cáo
+//     xong rồi" wrongly one-tap-match "Viết email" on the shared generic verb alone.
+//   - PHRASE-MATCH NEEDLE: still filtered out. This shortcut is a precision-favoring heuristic (see
+//     `ScoreAgainstText`), and a filler word like "cái"/"vụ" breaking an otherwise-verbatim phrase
+//     hit is a false negative worth avoiding — do NOT "clean up" the two policies to match each
+//     other; they are intentionally asymmetric for opposite reasons (recall for scoring, precision
+//     for the phrase needle).
 //
 // // UNVERIFIED (carried over from the Swift): the Swift original notes it was authored without a
 // macOS toolchain and needed a real `swift test` pass before merge; the .NET port carries an
@@ -90,10 +126,12 @@ public sealed record ClearExternalIntent(IReadOnlyList<VoiceMatch> Candidates) :
 public sealed record NotACompletionIntent : VoiceDoneIntent;
 
 /// <summary>
-/// One scored match against an open task. <see cref="Score"/> is the raw token-set (Jaccard)
-/// similarity in <c>[0, 1]</c> between the utterance (cue words stripped) and either the task's
-/// title (<see cref="CompleteIntent"/>) or one of its external descriptions
-/// (<see cref="ClearExternalIntent"/>).
+/// One scored match against an open task. <see cref="Score"/> is in <c>[0, 1]</c>: an IDF-weighted
+/// containment coverage of the utterance (cue words stripped) by either the task's title
+/// (<see cref="CompleteIntent"/>) or one of its external descriptions
+/// (<see cref="ClearExternalIntent"/>) — see <c>VoiceDone.ScoreCandidate</c> — floored up to at
+/// least <c>HighConfidenceThreshold</c> when the utterance appears verbatim as a contiguous phrase
+/// inside the title/description (see <c>VoiceDone.ScoreAgainstText</c>).
 /// </summary>
 public sealed record VoiceMatch(Guid TaskId, string Title, double Score);
 
@@ -124,6 +162,16 @@ public static class VoiceDone
     /// "~0.5" disambiguation floor.
     /// </summary>
     private const double CandidateFloor = 0.5;
+
+    /// <summary>
+    /// Margin subtracted from <see cref="HighConfidenceThreshold"/> when a candidate's raw coverage
+    /// clears the one-tap bar on the strength of a single non-distinctive token (see
+    /// <see cref="ScoreCandidate"/>'s one-tap guard). The clamp intentionally keeps the candidate
+    /// well above <see cref="CandidateFloor"/> — it was a real match, just not a safely-unique
+    /// one — while unambiguously placing it below <see cref="HighConfidenceThreshold"/> so it never
+    /// collapses to a false one-tap confirm.
+    /// </summary>
+    private const double HighConfidenceGuardMargin = 0.01;
 
     /// <summary>
     /// Defensive bound on how much of the transcript is tokenized/matched — protects against
@@ -188,8 +236,8 @@ public static class VoiceDone
 
     /// <summary>
     /// Flattened set of every token appearing in any cue phrase above. Stripped out of the
-    /// transcript's token set before fuzzy-matching against titles/external-descriptions so cue
-    /// words ("xong", "rồi", "đã"...) never dilute or pollute the Jaccard overlap.
+    /// transcript's token set before matching against titles/external-descriptions so cue
+    /// words ("xong", "rồi", "đã"...) never dilute or pollute the coverage score.
     /// </summary>
     private static readonly IReadOnlySet<string> CueStripTokens = BuildCueStripTokens();
 
@@ -239,18 +287,29 @@ public static class VoiceDone
         // more specific signal (a bare "xong" is ambiguous between "my task is done" and "the
         // external thing is done", per the contract's own "X đã xong/gửi/trả lời" example
         // grouping "xong" alongside "gửi"/"trả lời" under clear-external).
-        var referenceTokens = new HashSet<string>(
-            transcriptTokens.Where(token => !CueStripTokens.Contains(token)),
-            StringComparer.Ordinal);
+        //
+        // Order-preserving (a List, not a HashSet): scoring needs both an unordered token view
+        // (for containment/IDF membership tests) and an ordered, space-joined phrase (for the
+        // exact-phrase-containment shortcut) — see BuildQueryContext.
+        var referenceTokens = transcriptTokens.Where(token => !CueStripTokens.Contains(token)).ToList();
+
+        // IDF corpus: title-matching and external-description-matching use SEPARATE corpora (built
+        // only for the branch actually being scored) — see the file header's "TWO CORPORA" note for
+        // why a single shared corpus silently broke clear-external matching.
+        var corpusSize = openTasks.Count;
 
         if (hasExternalCue)
         {
-            var candidates = ScoredExternalCandidates(referenceTokens, openTasks);
+            var documentFrequency = BuildExternalDocumentFrequency(openTasks);
+            var query = BuildQueryContext(referenceTokens, documentFrequency, corpusSize);
+            var candidates = ScoredExternalCandidates(query, openTasks, documentFrequency, corpusSize);
             return new ClearExternalIntent(SelectCandidates(candidates));
         }
         else
         {
-            var candidates = ScoredTitleCandidates(referenceTokens, openTasks);
+            var documentFrequency = BuildDocumentFrequency(openTasks);
+            var query = BuildQueryContext(referenceTokens, documentFrequency, corpusSize);
+            var candidates = ScoredTitleCandidates(query, openTasks, documentFrequency, corpusSize);
             return new CompleteIntent(SelectCandidates(candidates));
         }
     }
@@ -294,65 +353,88 @@ public static class VoiceDone
     // MARK: - Candidate scoring
 
     /// <summary>
-    /// Scores every open task's title against <paramref name="referenceTokens"/> (the utterance
-    /// with cue words stripped), keeping only tasks at/above <see cref="CandidateFloor"/>. An empty
-    /// <paramref name="referenceTokens"/> (e.g. the whole utterance WAS the cue phrase, like a bare
-    /// "xong") always yields no candidates — this is the "done-phrase present but nothing matched"
-    /// case the contract requires to surface as empty candidates rather than a guess.
+    /// Internal, richer sibling of the public <see cref="VoiceMatch"/>: carries the extra ranking
+    /// signals (<see cref="IsPhraseMatch"/>, <see cref="MatchRatio"/>) <see cref="SelectCandidates"/>
+    /// needs for its tie-break rule, which the frozen public seam does not expose. Projected down to
+    /// <see cref="VoiceMatch"/> only at the very end of <see cref="SelectCandidates"/>.
     /// </summary>
-    private static List<VoiceMatch> ScoredTitleCandidates(
-        IReadOnlySet<string> referenceTokens, IReadOnlyList<VoiceDoneTask> openTasks)
+    private readonly record struct ScoredCandidate(
+        Guid TaskId, string Title, double Score, double MatchRatio, bool IsPhraseMatch);
+
+    /// <summary>
+    /// Scores every open task's title against <paramref name="query"/> (the utterance with cue
+    /// words stripped), keeping only tasks at/above <see cref="CandidateFloor"/>. An empty
+    /// <see cref="QueryContext.Tokens"/> (e.g. the whole utterance WAS the cue phrase, like
+    /// a bare "xong", or every remaining word is a filler token absent from every open task's
+    /// title — <c>df == 0</c>, see <see cref="BuildQueryContext"/>) always yields no candidates —
+    /// this is the "done-phrase present but nothing matched" case the contract requires to surface
+    /// as empty candidates rather than a guess.
+    /// </summary>
+    private static List<ScoredCandidate> ScoredTitleCandidates(
+        QueryContext query,
+        IReadOnlyList<VoiceDoneTask> openTasks,
+        IReadOnlyDictionary<string, int> documentFrequency,
+        int corpusSize)
     {
-        var results = new List<VoiceMatch>();
-        if (referenceTokens.Count == 0)
+        var results = new List<ScoredCandidate>();
+        if (query.Tokens.Count == 0)
         {
             return results;
         }
         foreach (var task in openTasks)
         {
-            var score = Jaccard(referenceTokens, NormalizedTokenSet(task.Title));
+            var (score, ratio, isPhraseMatch) =
+                ScoreAgainstText(task.Title, query, documentFrequency, corpusSize);
             if (score < CandidateFloor)
             {
                 continue;
             }
-            results.Add(new VoiceMatch(task.Id, task.Title, score));
+            results.Add(new ScoredCandidate(task.Id, task.Title, score, ratio, isPhraseMatch));
         }
         return results;
     }
 
     /// <summary>
-    /// Scores every open task's <c>ExternalDescriptions</c> against <paramref
-    /// name="referenceTokens"/>, taking each task's BEST-matching description as that task's
-    /// candidate score (a task is a single candidate for disambiguation purposes even if it has
-    /// several unsatisfied external conditions).
+    /// Scores every open task's <c>ExternalDescriptions</c> against <paramref name="query"/>,
+    /// taking each task's BEST-matching description (by final, post-phrase-match-boost score) as
+    /// that task's candidate (a task is a single candidate for disambiguation purposes even if it
+    /// has several unsatisfied external conditions).
     /// </summary>
-    private static List<VoiceMatch> ScoredExternalCandidates(
-        IReadOnlySet<string> referenceTokens, IReadOnlyList<VoiceDoneTask> openTasks)
+    private static List<ScoredCandidate> ScoredExternalCandidates(
+        QueryContext query,
+        IReadOnlyList<VoiceDoneTask> openTasks,
+        IReadOnlyDictionary<string, int> documentFrequency,
+        int corpusSize)
     {
-        var results = new List<VoiceMatch>();
-        if (referenceTokens.Count == 0)
+        var results = new List<ScoredCandidate>();
+        if (query.Tokens.Count == 0)
         {
             return results;
         }
         foreach (var task in openTasks)
         {
-            var best = 0.0;
+            var bestScore = 0.0;
+            var bestRatio = 0.0;
+            var bestIsPhraseMatch = false;
             foreach (var description in task.ExternalDescriptions.Take(MaxExternalDescriptionsPerTask))
             {
                 var bounded = description.Length > MaxExternalDescriptionChars
                     ? description[..MaxExternalDescriptionChars]
                     : description;
-                var score = Jaccard(referenceTokens, NormalizedTokenSet(bounded));
-                if (score > best)
+                var (score, ratio, isPhraseMatch) =
+                    ScoreAgainstText(bounded, query, documentFrequency, corpusSize);
+                if (score > bestScore)
                 {
-                    best = score;
+                    bestScore = score;
+                    bestRatio = ratio;
+                    bestIsPhraseMatch = isPhraseMatch;
                 }
             }
-            if (best < CandidateFloor)
+            if (bestScore < CandidateFloor)
             {
                 continue;
             }
-            results.Add(new VoiceMatch(task.Id, task.Title, best));
+            results.Add(new ScoredCandidate(task.Id, task.Title, bestScore, bestRatio, bestIsPhraseMatch));
         }
         return results;
     }
@@ -363,11 +445,15 @@ public static class VoiceDone
     /// unambiguous enough to collapse to a one-item list (the caller offers a one-tap/one-word
     /// confirm). Anything else — zero high-confidence candidates, OR two-or-more tied at high
     /// confidence — returns every candidate at/above the floor so the caller disambiguates instead
-    /// of guessing. Stable ordering: score descending, then <c>taskId</c> string ascending (mirrors
-    /// <c>ConflictChecker</c>'s id-ordinal tiebreak), so output is deterministic for identical input
-    /// regardless of <c>openTasks</c>' original order.
+    /// of guessing. Stable ordering: score descending; then exact-phrase-match candidates before
+    /// non-phrase-match candidates (a literal contiguous phrase hit is stronger evidence than a
+    /// same-scoring fuzzy/token hit — added per the exact-phrase-containment shortcut); then by
+    /// <see cref="ScoredCandidate.MatchRatio"/> descending (a title with less unmatched filler is a
+    /// tighter match); then <c>taskId</c> string ascending (mirrors <c>ConflictChecker</c>'s
+    /// id-ordinal tiebreak), so output is deterministic for identical input regardless of
+    /// <c>openTasks</c>' original order.
     /// </summary>
-    private static IReadOnlyList<VoiceMatch> SelectCandidates(List<VoiceMatch> candidates)
+    private static IReadOnlyList<VoiceMatch> SelectCandidates(List<ScoredCandidate> candidates)
     {
         if (candidates.Count == 0)
         {
@@ -375,10 +461,13 @@ public static class VoiceDone
         }
         var sorted = candidates
             .OrderByDescending(match => match.Score)
+            .ThenByDescending(match => match.IsPhraseMatch)
+            .ThenByDescending(match => match.MatchRatio)
             .ThenBy(match => match.TaskId.ToString(), StringComparer.Ordinal)
             .ToList();
         var highConfidence = sorted.Where(match => match.Score >= HighConfidenceThreshold).ToList();
-        return highConfidence.Count == 1 ? highConfidence : sorted;
+        var winners = highConfidence.Count == 1 ? highConfidence : sorted;
+        return winners.Select(match => new VoiceMatch(match.TaskId, match.Title, match.Score)).ToList();
     }
 
     // MARK: - Normalization (same convention as ConflictCheck.NormalizedTitleTokens)
@@ -445,31 +534,260 @@ public static class VoiceDone
     private static HashSet<string> NormalizedTokenSet(string text) =>
         new(NormalizedTokens(text), StringComparer.Ordinal);
 
+    // MARK: - IDF containment scoring
+    //
+    // Replaces the earlier Jaccard (|intersection| / |union|) formula. Jaccard penalizes a
+    // candidate title for words the SPEAKER never said ("Viết báo cáo quý" scores worse than "Viết
+    // báo cáo" against the same utterance, purely because of the extra "quý"). Containment doesn't:
+    // it asks "how much of what the user SAID is explained by this task", which is the question
+    // that actually matters for a vắn tắt ("gọi cho anh Hùng..." spoken back as "xong vụ hợp đồng
+    // rồi") voice command. IDF-weighting on top means a coincidental match on one very common word
+    // ("gọi", "làm") can't alone manufacture a high score the way an unweighted containment
+    // fraction could.
+
     /// <summary>
-    /// Jaccard similarity (<c>|intersection| / |union|</c>) — identical formula to
-    /// <c>ConflictChecker.TitleSimilarity</c>. Either side being empty (a title/description that
-    /// tokenizes to nothing, or an utterance that was entirely cue words) never matches — no
-    /// divide-by-zero, no degenerate empty-vs-empty "match".
+    /// The query side of a single <see cref="Classify"/> call's scoring, computed once by
+    /// <see cref="BuildQueryContext"/> and reused for every candidate (every open task's title, and
+    /// every external description) so the (cheap but still O(query) per call) work isn't repeated.
+    /// Deliberately carries TWO different views of the same underlying tokens — see
+    /// <see cref="BuildQueryContext"/>'s remarks and the file header's "TWO POLICIES" note for why.
     /// </summary>
-    private static double Jaccard(IReadOnlySet<string> a, IReadOnlySet<string> b)
+    /// <param name="Tokens">
+    /// EVERY cue-stripped reference token, UNFILTERED — including tokens with
+    /// <c>documentFrequency == 0</c>. The denominator (via <see cref="SumIdf"/>) of
+    /// <see cref="ScoreCandidate"/>'s coverage fraction; a <c>df == 0</c> token can never contribute
+    /// to the numerator (nothing in the corpus contains it) but still dilutes the denominator, which
+    /// is the intended, evidence-preserving behavior.
+    /// </param>
+    /// <param name="SumIdf">Σ idf(t) over <see cref="Tokens"/> — the coverage denominator.</param>
+    /// <param name="Phrase">
+    /// The cue-stripped reference tokens, FILTERED to drop any token with
+    /// <c>documentFrequency == 0</c>, rejoined with single spaces IN THE ORDER THE USER SPOKE THEM —
+    /// the needle for the exact-phrase-containment shortcut in <see cref="ScoreAgainstText"/>. Built
+    /// from a DIFFERENTLY-filtered token set than <see cref="Tokens"/> on purpose (see
+    /// <see cref="BuildQueryContext"/>'s remarks).
+    /// </param>
+    /// <param name="PhraseMatchEligible">
+    /// True only when the (filtered) token set backing <see cref="Phrase"/> has at least 2 distinct
+    /// tokens — see <see cref="BuildQueryContext"/>'s remarks for why a single token is never
+    /// allowed to trigger the phrase-match shortcut.
+    /// </param>
+    private readonly record struct QueryContext(
+        IReadOnlySet<string> Tokens, double SumIdf, string Phrase, bool PhraseMatchEligible);
+
+    /// <summary>
+    /// Builds the TITLE-side corpus document-frequency table: for each token, how many open tasks'
+    /// TITLES contain it. Used only by the completion (<see cref="CompleteIntent"/>) branch — see
+    /// <see cref="BuildExternalDocumentFrequency"/> for the sibling used by the clear-external
+    /// branch, and the file header's "TWO CORPORA" note for why they are kept separate rather than
+    /// shared.
+    /// </summary>
+    private static Dictionary<string, int> BuildDocumentFrequency(IReadOnlyList<VoiceDoneTask> openTasks)
     {
-        if (a.Count == 0 || b.Count == 0)
+        var documentFrequency = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var task in openTasks)
         {
-            return 0;
-        }
-        var intersection = 0;
-        foreach (var token in a)
-        {
-            if (b.Contains(token))
+            foreach (var token in NormalizedTokenSet(task.Title))
             {
-                intersection++;
+                documentFrequency[token] = documentFrequency.GetValueOrDefault(token) + 1;
             }
         }
-        var union = a.Count + b.Count - intersection;
-        if (union == 0)
+        return documentFrequency;
+    }
+
+    /// <summary>
+    /// Builds the EXTERNAL-DESCRIPTION-side corpus document-frequency table: for each token, how
+    /// many open tasks have AT LEAST ONE <c>ExternalDescriptions</c> entry containing it (tokens are
+    /// deduplicated within a task first — a word repeated across several of one task's descriptions
+    /// still only counts once towards that token's <c>df</c> — mirroring how
+    /// <see cref="BuildDocumentFrequency"/> counts a title token once per task). Used only by the
+    /// clear-external (<see cref="ClearExternalIntent"/>) branch. Bounded the same way
+    /// <see cref="ScoredExternalCandidates"/> bounds its own per-description scan
+    /// (<see cref="MaxExternalDescriptionsPerTask"/>, <see cref="MaxExternalDescriptionChars"/>) so
+    /// corpus-building cost can't exceed scoring cost.
+    /// </summary>
+    private static Dictionary<string, int> BuildExternalDocumentFrequency(IReadOnlyList<VoiceDoneTask> openTasks)
+    {
+        var documentFrequency = new Dictionary<string, int>(StringComparer.Ordinal);
+        foreach (var task in openTasks)
         {
-            return 0;
+            var taskTokens = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var description in task.ExternalDescriptions.Take(MaxExternalDescriptionsPerTask))
+            {
+                var bounded = description.Length > MaxExternalDescriptionChars
+                    ? description[..MaxExternalDescriptionChars]
+                    : description;
+                taskTokens.UnionWith(NormalizedTokens(bounded));
+            }
+            foreach (var token in taskTokens)
+            {
+                documentFrequency[token] = documentFrequency.GetValueOrDefault(token) + 1;
+            }
         }
-        return (double)intersection / union;
+        return documentFrequency;
+    }
+
+    /// <summary>
+    /// <c>idf(t) = ln(1 + N / (1 + df(t)))</c>. A token absent from every title (<c>df == 0</c>,
+    /// e.g. a word that only ever appears in an external description) is not an error — it is
+    /// scored as maximally rare, which is the correct treatment for
+    /// <see cref="ScoreCandidate"/>'s <c>MatchRatio</c> denominator (an external-only word in a
+    /// candidate is genuinely distinctive relative to the title corpus).
+    /// </summary>
+    private static double Idf(string token, IReadOnlyDictionary<string, int> documentFrequency, int corpusSize)
+    {
+        var df = documentFrequency.GetValueOrDefault(token);
+        return Math.Log(1.0 + (double)corpusSize / (1 + df));
+    }
+
+    /// <summary>
+    /// The idf a token with <c>df = 1</c> (present in exactly one open task — a near-unique token,
+    /// e.g. a proper name) would have in THIS call's corpus. Feeds <see cref="ScoreCandidate"/>'s
+    /// one-tap guard: a single matched token only counts as strong enough evidence on its own to
+    /// reach <see cref="HighConfidenceThreshold"/> when its own idf clears this bar. Grows without
+    /// bound as <c>corpusSize</c> grows, so it is computed per <see cref="Classify"/> call rather
+    /// than hard-coded to a fixed constant.
+    /// </summary>
+    /// <remarks>
+    /// This is the ONLY score-suppressing gate left in <see cref="ScoreCandidate"/> — an earlier
+    /// absolute-evidence-floor gate (<c>MinMatchedWeight</c>, a floor on <c>Σ idf(matched)</c>) was
+    /// deleted: it was meant to stop a single common token from manufacturing a full-coverage
+    /// "match" collapsing straight to one-tap, but that risk is already fully covered by THIS
+    /// gate — the floor's actual, unintended effect was deleting legitimate below-one-tap
+    /// CANDIDATES outright (e.g. two open tasks sharing one common word, at floor coverage 1.0,
+    /// both zeroed instead of shown for the user to pick from). Per the product's own confirm-first
+    /// design (constitution II — the user always picks/confirms, the candidate list is not an
+    /// auto-decision), that tradeoff was backwards: be wide at the candidate tier (recall), narrow
+    /// only at the one-tap tier (precision) — which is exactly what this gate alone already does.
+    /// </remarks>
+    private static double DistinctiveIdf(int corpusSize) => Math.Log(1.0 + corpusSize / 2.0);
+
+    /// <summary>
+    /// Builds this <see cref="Classify"/> call's <see cref="QueryContext"/> from the utterance's
+    /// ordered, cue-stripped tokens.
+    /// </summary>
+    /// <remarks>
+    /// Drops any token with <c>documentFrequency == 0</c> — a word that appears in NO open task's
+    /// title carries no discriminating signal (nothing to distinguish it FROM), and dropping it is
+    /// what lets filler words ("vụ", "cái", "chuyện") get silently absorbed without maintaining a
+    /// stopword list: "xong vụ hợp đồng rồi" against an open task titled "...hợp đồng..." drops
+    /// "vụ" (df 0) and scores on {hợp, đồng} alone. If every token gets dropped this way (or the
+    /// utterance was entirely cue words to begin with), <see cref="QueryContext.Tokens"/>
+    /// comes back empty and every candidate scores 0 — the "done-phrase present but nothing
+    /// matched" case.
+    ///
+    /// <see cref="QueryContext.PhraseMatchEligible"/> requires at least 2 surviving tokens: a
+    /// single word trivially "contains" itself as a phrase, and letting a lone word (however
+    /// common — "gọi", "làm") trigger the same shortcut that a real multi-word phrase hit does
+    /// would drag in unrelated tasks and could even collapse them to a false one-tap.
+    /// </remarks>
+    private static QueryContext BuildQueryContext(
+        IReadOnlyList<string> orderedReferenceTokens,
+        IReadOnlyDictionary<string, int> documentFrequency,
+        int corpusSize)
+    {
+        var scorableOrdered = orderedReferenceTokens.Where(documentFrequency.ContainsKey).ToList();
+        var scorableTokens = new HashSet<string>(scorableOrdered, StringComparer.Ordinal);
+        var sumIdf = scorableTokens.Sum(token => Idf(token, documentFrequency, corpusSize));
+        var phrase = string.Join(' ', scorableOrdered);
+        return new QueryContext(scorableTokens, sumIdf, phrase, scorableTokens.Count >= 2);
+    }
+
+    /// <summary>
+    /// Scores one candidate text (a task title, or a single external description) against
+    /// <paramref name="query"/>: the exact-phrase-containment shortcut first, then the IDF
+    /// containment fallback.
+    /// </summary>
+    /// <remarks>
+    /// Exact-phrase shortcut: when the user names a phrase verbatim ("xong cái hợp đồng thuê văn
+    /// phòng rồi" against a title ending "...hợp đồng thuê văn phòng") that is high-precision,
+    /// cheap-to-check evidence — there is no reason to route it through the fuzzy IDF gates and
+    /// hope it clears them. If <paramref name="query"/>'s scorable phrase appears verbatim,
+    /// contiguously, inside this candidate's own normalized phrase (both sides built the same way
+    /// <see cref="ScoredTitleCandidates"/>/<see cref="ScoredExternalCandidates"/> already fold
+    /// diacritics and case, so "hop dong thue van phong" — no diacritics, as ASR often produces —
+    /// still matches a "Hợp đồng thuê văn phòng" title), the resulting score is floored up to
+    /// <see cref="HighConfidenceThreshold"/> (never lowered if the IDF score was already higher,
+    /// never pushed past 1.0). Gated by <see cref="QueryContext.PhraseMatchEligible"/> (query has
+    /// at least 2 scorable tokens) so a single common word can't ride this shortcut to a one-tap.
+    ///
+    /// IDF containment (see <see cref="ScoreCandidate"/>): coverage = the fraction of the
+    /// (IDF-weighted) query explained by this candidate, gated by a one-tap distinctiveness guard
+    /// (<see cref="DistinctiveIdf"/>).
+    /// </remarks>
+    private static (double Score, double MatchRatio, bool IsPhraseMatch) ScoreAgainstText(
+        string text,
+        QueryContext query,
+        IReadOnlyDictionary<string, int> documentFrequency,
+        int corpusSize)
+    {
+        var tokens = NormalizedTokens(text);
+        var candidateTokens = new HashSet<string>(tokens, StringComparer.Ordinal);
+
+        var (score, ratio) = ScoreCandidate(query.Tokens, query.SumIdf, candidateTokens, documentFrequency, corpusSize);
+
+        var isPhraseMatch = query.PhraseMatchEligible &&
+            string.Join(' ', tokens).Contains(query.Phrase, StringComparison.Ordinal);
+        if (isPhraseMatch)
+        {
+            score = Math.Min(1.0, Math.Max(score, HighConfidenceThreshold));
+        }
+
+        return (score, ratio, isPhraseMatch);
+    }
+
+    /// <summary>
+    /// The IDF containment fallback: <c>coverage = Σ idf(matched) / Σ idf(query)</c> — the fraction
+    /// of the (already <c>df == 0</c>-filtered) query's IDF-weighted mass that this candidate's
+    /// token set covers. Also returns <c>MatchRatio = Σ idf(matched) / Σ idf(candidateTokens)</c>,
+    /// <see cref="SelectCandidates"/>'s tie-break signal (how little of the CANDIDATE, not the
+    /// query, is unmatched filler — a tighter, more specific title ranks above a looser one at the
+    /// same coverage).
+    /// </summary>
+    /// <remarks>
+    /// One safety gate, required because containment (by construction) never penalizes a candidate
+    /// for extra unmatched words: the one-tap guard — a match resting on exactly one token only
+    /// clears <see cref="HighConfidenceThreshold"/> when that token is itself near-unique
+    /// (<see cref="DistinctiveIdf"/>); two-or-more matched tokens corroborate each other and always
+    /// qualify. A single-token match that clears coverage 0.8 without clearing this guard is clamped
+    /// to just under the bar (<see cref="HighConfidenceGuardMargin"/>) rather than zeroed — it's a
+    /// real candidate, just not a safe one-tap. (An earlier second gate, an absolute floor on
+    /// <c>Σ idf(matched)</c>, was deleted — see <see cref="DistinctiveIdf"/>'s remarks for why.)
+    /// </remarks>
+    private static (double Score, double MatchRatio) ScoreCandidate(
+        IReadOnlySet<string> scorableQuery,
+        double sumIdfQuery,
+        IReadOnlySet<string> candidateTokens,
+        IReadOnlyDictionary<string, int> documentFrequency,
+        int corpusSize)
+    {
+        var matchedCount = 0;
+        var sumIdfMatched = 0.0;
+        foreach (var token in scorableQuery)
+        {
+            if (!candidateTokens.Contains(token))
+            {
+                continue;
+            }
+            matchedCount++;
+            sumIdfMatched += Idf(token, documentFrequency, corpusSize);
+        }
+
+        if (matchedCount == 0)
+        {
+            return (0.0, 0.0);
+        }
+
+        var coverage = sumIdfMatched / sumIdfQuery;
+
+        var distinctiveEnough = matchedCount >= 2 || sumIdfMatched >= DistinctiveIdf(corpusSize);
+        if (coverage >= HighConfidenceThreshold && !distinctiveEnough)
+        {
+            coverage = HighConfidenceThreshold - HighConfidenceGuardMargin;
+        }
+
+        var sumIdfCandidate = candidateTokens.Sum(token => Idf(token, documentFrequency, corpusSize));
+        var matchRatio = sumIdfMatched / sumIdfCandidate;
+        return (coverage, matchRatio);
     }
 }
