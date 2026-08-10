@@ -50,6 +50,10 @@ Package.resolved
 
 # Supabase CLI link state (project ref + local temp), never committed
 supabase/.temp/
+# Local-stack scratch state written by `supabase start`/`db reset` — machine-local, not the
+# project's. Appeared the first time anyone dry-ran a migration locally (2026-08-10); ignoring it
+# rather than committing it keeps `git status` honest after every local run.
+supabase/.branches/
 
 # Secrets — API keys and private keys, never committed.
 #
