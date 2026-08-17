@@ -68,7 +68,12 @@ final class ShareViewController: NSViewController {
     /// Both are worth accepting: sharing a selection from Mail gives text, sharing the current page
     /// from Safari gives a URL, and "read this later" is a perfectly good task either way. The URL
     /// lands in the task text as-is — the parser keeps it, and the user can see what they saved.
-    private static func extractText(from context: NSExtensionContext) async -> String? {
+    /// `nonisolated` deliberately: `NSViewController` is `@MainActor`, so without this these two
+    /// statics inherit main-actor isolation — and the `NSItemProvider` completion handler below is
+    /// invoked on an arbitrary background queue, which under Swift 6 strict concurrency is the
+    /// "converting non-Sendable function value" error. Neither function touches any UI or any
+    /// isolated state; they only shuttle strings.
+    nonisolated private static func extractText(from context: NSExtensionContext) async -> String? {
         let items = context.inputItems.compactMap { $0 as? NSExtensionItem }
 
         for item in items {
@@ -97,7 +102,7 @@ final class ShareViewController: NSViewController {
 
     /// Bridges `NSItemProvider`'s completion-handler API into `async`, normalizing the three shapes
     /// a text/URL item can arrive as (`String`, `URL`, `Data`).
-    private static func loadString(_ provider: NSItemProvider, type: String) async -> String? {
+    nonisolated private static func loadString(_ provider: NSItemProvider, type: String) async -> String? {
         await withCheckedContinuation { continuation in
             provider.loadItem(forTypeIdentifier: type, options: nil) { item, _ in
                 switch item {
@@ -118,7 +123,7 @@ final class ShareViewController: NSViewController {
     /// `VolarServicesProvider.captureText` — every capture entry point caps at the same number, so
     /// none of them can hand the parse pipeline a bigger payload than the others. A shared web page
     /// can trivially exceed it.
-    static func captureURL(text raw: String) -> URL? {
+    nonisolated static func captureURL(text raw: String) -> URL? {
         let text = String(raw.trimmingCharacters(in: .whitespacesAndNewlines).prefix(2000))
         guard !text.isEmpty else { return nil }
         var components = URLComponents()

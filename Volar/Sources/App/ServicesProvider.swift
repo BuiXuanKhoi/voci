@@ -40,7 +40,11 @@ final class VolarServicesProvider: NSObject {
     ///
     /// The returned instance must be retained by the caller — `NSApplication.servicesProvider` is
     /// an `unowned(unsafe)`-style reference and does NOT keep the provider alive.
+    /// `@MainActor` because `NSApplication.shared` is — under Swift 6 strict concurrency a
+    /// nonisolated static function may not touch it. The only caller
+    /// (`applicationDidFinishLaunching`) is already on the main actor, so this costs nothing.
     @discardableResult
+    @MainActor
     static func install() -> VolarServicesProvider {
         let provider = VolarServicesProvider()
         NSApplication.shared.servicesProvider = provider

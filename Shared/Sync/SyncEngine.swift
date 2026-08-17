@@ -40,7 +40,20 @@ import UIKit
 
 @MainActor
 final class SyncEngine {
-    nonisolated static let shared = SyncEngine()
+    /// FIX (Swift 6 strict concurrency, first Mac build 2026-08-18): this was `nonisolated static
+    /// let`, which asks the compiler to evaluate `SyncEngine()` — a `@MainActor`-isolated
+    /// initializer, since the whole class is `@MainActor` — from a nonisolated context. Error:
+    /// "main actor-isolated default value in a nonisolated context".
+    ///
+    /// Dropping `nonisolated` lets the property inherit the type's `@MainActor` isolation, which is
+    /// where it belonged: every one of the five call sites (all in `AppState.swift` —
+    /// `attach`/`deviceLabel`/`resyncFromScratch`/`requestSync`) is already `@MainActor`, so nothing
+    /// needed the nonisolated access this was granting. Grepped before changing, not assumed.
+    ///
+    /// Do NOT "fix" this by marking it `nonisolated(unsafe)`: that would silence the diagnostic
+    /// while leaving a `@MainActor` object reachable from any thread, which is the actual hazard the
+    /// compiler is pointing at here.
+    static let shared = SyncEngine()
 
     /// Why a sync round was requested — diagnostics/backoff-reset only; every reason funnels
     /// through the SAME debounced path (`requestSync`) and the same exchange loop.

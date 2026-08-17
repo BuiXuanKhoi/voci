@@ -1106,6 +1106,38 @@ bản Mac build xanh**.
 
 ---
 
+## Build Mac lần đầu 2026-08-18 — lỗi Swift 6 strict concurrency
+
+Anh Khôi build trên Mac, hai lỗi ĐẦU TIÊN nằm ở `Shared/Sync/` (plan 008), **không phải** từ
+pass "Đường vào Volar" — lỗi có sẵn, chưa từng lộ vì chưa ai build.
+
+- [x] **`SyncEngine.swift:43` — "main actor-isolated default value in a nonisolated context".**
+  `nonisolated static let shared = SyncEngine()` trên class `@MainActor` ⇒ bắt compiler chạy init
+  MainActor từ ngữ cảnh nonisolated. **Sửa: bỏ `nonisolated`.** Đã grep cả 5 call site
+  (`AppState.swift` 1539/1837/1871/1910 + doc 1823) — TẤT CẢ đã `@MainActor`, không chỗ nào cần
+  quyền truy cập nonisolated mà nó đang cấp. Test không tham chiếu.
+  🔴 **ĐỪNG sửa bằng `nonisolated(unsafe)`** — sẽ tắt cảnh báo mà vẫn để một object `@MainActor`
+  với tới được từ thread bất kỳ, đúng cái nguy hiểm compiler đang chỉ.
+- [x] **`SyncPayload.swift:530/538` — "static property is not concurrency-safe".**
+  `ISO8601DateFormatter` là class, không `Sendable`. **Sửa: `nonisolated(unsafe) private static let`.**
+  Hợp lệ vì cả hai formatter được cấu hình xong trong closure khởi tạo và KHÔNG BAO GIỜ bị sửa lại;
+  chỉ `date(from:)`/`string(from:)` được gọi. Giữ chúng `private` để tính đúng đắn này còn kiểm được
+  bằng cách đọc đúng một file.
+- [ ] **Nợ kỹ thuật: chuyển sang `Date.ISO8601FormatStyle`** (value type, `Sendable` thật). CỐ Ý chưa
+  làm: nó parse khác về độ chặt với `Z` vs `+00:00` và dấu phân cách phần thập phân, mà đây là bộ
+  giải mã ngày của đường sync. Đổi thì phải có `SyncPayloadTests` xanh trên Mac — máy Windows không
+  chạy được.
+
+**Đã sửa phòng trước trong code mới của pass này** (cùng họ lỗi, chưa build tới):
+- `ServicesProvider.install()` → thêm `@MainActor` (chạm `NSApplication.shared`).
+- `ShareViewController.extractText/loadString/captureURL` → `nonisolated` (`NSViewController` là
+  `@MainActor`, mà completion của `NSItemProvider` về trên queue nền).
+
+**Đã rà, KHÔNG có vấn đề:** `PaywallView.swift:387` tạo formatter cục bộ trong computed property,
+không phải static. Không còn `static let` nào của kiểu formatter không-Sendable trong repo.
+
+---
+
 ## Glance HUD (⌃⌥N) — code xong 2026-08-18, CHƯA BUILD
 
 Thuộc pass "Volar Paper" nhưng làm sớm vì I3 phụ thuộc nó.

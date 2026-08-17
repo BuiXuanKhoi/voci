@@ -527,7 +527,24 @@ enum SyncDate {
     /// `withInternetDateTime` requires (and accepts) a numeric offset OR literal `Z` — both forms
     /// Postgres can emit — `withFractionalSeconds` additionally requires EXACTLY 3 digits after the
     /// decimal point, which is why `parse` truncates before handing off here.
-    private static let withFraction: ISO8601DateFormatter = {
+    /// FIX (Swift 6 strict concurrency, first Mac build 2026-08-18): `ISO8601DateFormatter` is a
+    /// class and is not `Sendable`, so a plain `static let` of one is global shared mutable state.
+    /// Error: "static property 'withFraction' is not concurrency-safe".
+    ///
+    /// `nonisolated(unsafe)` is the right tool here rather than a cover-up, for one specific reason:
+    /// both formatters are fully configured inside their own initializer closure and are NEVER
+    /// mutated again — `parse`/`string(from:)` only ever call `date(from:)`/`string(from:)`, which
+    /// Foundation documents as safe to call concurrently on a configured date formatter. The
+    /// unsafety the compiler is warning about (one thread reconfiguring `formatOptions` while
+    /// another parses) cannot occur because nothing in this file can reach `formatOptions` after
+    /// construction. If that ever stops being true, this annotation becomes a lie — keep the
+    /// formatters `private` so it stays checkable by reading this one file.
+    ///
+    /// The cleaner long-term fix is `Date.ISO8601FormatStyle`, a `Sendable` value type. Deliberately
+    /// NOT done here: it parses with different strictness around `Z` vs `+00:00` and the fractional
+    /// separator, and this is the sync path's date decoder — swapping it needs `SyncPayloadTests`
+    /// green on a Mac, which this machine cannot run. Tracked in backlog.md.
+    nonisolated(unsafe) private static let withFraction: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
         return formatter
@@ -535,7 +552,7 @@ enum SyncDate {
 
     /// Fallback for a timestamp with NO fractional part at all (e.g. a value that happened to land
     /// on an exact second) — `withFraction` rejects those outright since it requires the `.###`.
-    private static let withoutFraction: ISO8601DateFormatter = {
+    nonisolated(unsafe) private static let withoutFraction: ISO8601DateFormatter = {
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
         return formatter
