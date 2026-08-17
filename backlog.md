@@ -1106,9 +1106,11 @@ bản Mac build xanh**.
 
 ## ★ ĐANG LÀM — "Đường vào Volar" (integration surfaces), bắt đầu 2026-08-17
 
-> ### 📍 TRẠNG THÁI 2026-08-18: I0·I1·I2(nửa)·I5·I7 code xong, **CHƯA BUILD MAC LẦN NÀO**.
-> Còn lại: **I2b Share Extension** (target mới) · **I3 Lịch→Glance** (BỊ CHẶN: Glance chưa code) ·
-> **I4 Raycast**. Việc kế tiếp nên làm: build trên Mac để verify I1+I2+I6 trước khi viết thêm.
+> ### 📍 TRẠNG THÁI 2026-08-18: I0·I1·I2·I4·I5·I6·I7 code xong. **CHƯA BUILD/CHẠY LẦN NÀO.**
+> Chỉ còn **I3 (Lịch→Glance)** — BỊ CHẶN vì Glance HUD mới có design, chưa có code.
+> **Việc kế tiếp bắt buộc: build trên Mac.** Đang có 5 mảng chưa compile chồng lên nhau
+> (App Intents, Services menu, Share Extension target, MenuBarLabel, Raycast) — viết thêm nữa
+> thì lúc lỗi không tách được nguyên nhân.
 > Đọc nguyên khối này trước khi làm bất cứ gì. Mỗi lần xong một mục: đổi `[ ]` → `[x]`
 > **và sửa dòng 📍 TRẠNG THÁI ở trên** sang mục kế. Đây là chỗ duy nhất giữ tiến độ —
 > đừng tin trí nhớ session.
@@ -1169,7 +1171,7 @@ sửa `project.yml`, không cần Xcode. Nhưng vẫn phải build/verify trên 
     (d) kiểm `static weak var shared` trong extension có compile không (static stored property
     trong extension là hợp lệ, nhưng chưa verify với `weak` + `@MainActor`).
 
-- [~] **[I2] Services menu XONG 2026-08-18 · Share Extension CHƯA.** Bôi đen chữ ở bất kỳ đâu →
+- [x] **[I2] XONG CẢ HAI 2026-08-18** (Services menu + Share Extension). Bôi đen chữ ở bất kỳ đâu →
   chuột phải → "Task mới trong Volar". Không UI mới, không màn hình mới.
   - Services menu: `NSServices` trong `Info.plist` + `NSApplication.shared.servicesProvider`.
     Nhẹ, không cần target mới. **Làm phần này trước.**
@@ -1183,6 +1185,17 @@ sửa `project.yml`, không cần Xcode. Nhưng vẫn phải build/verify trên 
     `app-links.md` đã dành sẵn cho FR-040, nên vẫn qua confirm card (người dùng đang nhìn màn hình).
   - **Verify trên Mac:** service chỉ hiện sau khi app đã build+chạy một lần cho `pbs` thấy. Không
     thấy thì `/System/Library/CoreServices/pbs -flush` rồi khởi động lại app chủ.
+  - **ĐÃ LÀM (Share Extension) 2026-08-18** — và nhỏ hơn hẳn dự đoán ở trên: **KHÔNG cần app group.**
+    Extension gọi thẳng `extensionContext.open(volar://capture?...)`, tức đi qua đúng lược đồ URL đã
+    đăng ký sẵn. Ghi chú "cần app group" phía trên giờ SAI, giữ lại để biết vì sao đổi hướng.
+    File: `Volar/ShareExtension/{ShareViewController.swift, Info.plist, VolarShare.entitlements}`
+    + target `VolarShareExtension` trong `project.yml` + dependency `embed: true` từ target `Volar`.
+  - **RỦI RO SỐ MỘT khi build:** extension là bundle ký riêng ⇒ cần App ID `tech.kioh.Volar.Share`
+    trên developer portal trước khi Automatic signing tạo được profile. Đây là thứ nhiều khả năng
+    hỏng đầu tiên.
+  - **RỦI RO SỐ HAI:** chưa xác nhận `NSExtensionContext.open(_:)` có được sandbox cho phép với
+    share extension trên macOS không (`NSWorkspace` thì extension không dùng được). Nếu bị chặn thì
+    mới phải quay về đường app group. **Đừng làm app group trước khi thấy đường đơn giản hỏng thật.**
 
 - [ ] **[I3] Calendar đọc → đổ vào Glance. 🚫 BỊ CHẶN — Glance HUD chưa được code (mới chỉ có design).** Quyền EventKit ĐÃ xin rồi mà chưa dùng cho Glance.
   Cho Glance nói "còn 12 phút nữa họp", và đừng gợi ý task 45 phút ngay trước cuộc họp.
@@ -1201,7 +1214,7 @@ sửa `project.yml`, không cần Xcode. Nhưng vẫn phải build/verify trên 
 - [x] **[I7] XONG 2026-08-18 — không cần code.** Rơi ra miễn phí từ I1: `StartVolarFocusIntent` đã đủ để Shortcuts Automation "When Focus Work turns on" gọi. Đã viết công thức vào `docs/url-scheme.md` §3. Gần như miễn phí sau khi có I1
   (làm qua App Intents automation, không phải API riêng). Làm sau cùng.
 
-- [ ] **[I4] Extension Raycast — TÁCH RIÊNG, không chặn mục nào.** Đây không phải tích hợp, đây là
+- [x] **[I4] XONG 2026-08-18 — `integrations/raycast-volar/`, 2 lệnh.** Thiếu đúng `icon.png` (phải export từ `design/logo/mark.svg`), đã ghi checklist trong README của nó. TÁCH RIÊNG, không chặn mục nào. Đây không phải tích hợp, đây là
   **kênh phân phối**: Raycast là nơi indie dev / ADHD-pro (wedge mạnh nhất theo research thị trường)
   sống cả ngày. Viết TypeScript, gọi `volar://`, không đụng code Swift ⇒ không chặn việc Mac.
   Phụ thuộc: I5 (phải có docs URL scheme trước).

@@ -94,6 +94,43 @@ targets:
         product: VolarCore
       - package: WhisperKit
         product: WhisperKit
+      # Share Extension (backlog "Đường vào Volar" [I2]). Declaring it as a target dependency is
+      # what makes xcodegen embed the built .appex into Volar.app/Contents/PlugIns — an extension
+      # that isn't embedded never appears in any share sheet, and nothing warns you about it.
+      # `embed: true` + `codeSign: true` are xcodegen's defaults for an app-extension dependency;
+      # spelled out here because getting either wrong fails at install time, not build time.
+      - target: VolarShareExtension
+        embed: true
+        codeSign: true
+  # UNVERIFIED — added on Windows with no xcodegen/Xcode to verify against. Confirm on Mac that
+  # `xcodegen generate` produces an embedded .appex and that "Volar" shows up in Safari's share
+  # menu. Needs its own App ID (`tech.kioh.Volar.Share`) on the developer portal before Automatic
+  # signing can create a profile for it — an extension is a separate signed bundle, and this is the
+  # single most likely thing to fail first on the Mac.
+  #
+  # No app group, on purpose: the extension hands text to the app through the already-registered
+  # `volar://capture` URL rather than a shared container. See ShareExtension/ShareViewController.swift.
+  VolarShareExtension:
+    type: app-extension
+    platform: macOS
+    deploymentTarget: "14.0"
+    sources:
+      - path: ShareExtension
+        excludes:
+          - Info.plist
+          - VolarShare.entitlements
+    settings:
+      base:
+        CODE_SIGN_ENTITLEMENTS: ShareExtension/VolarShare.entitlements
+        INFOPLIST_FILE: ShareExtension/Info.plist
+        PRODUCT_BUNDLE_IDENTIFIER: tech.kioh.Volar.Share
+        PRODUCT_NAME: VolarShare
+        MACOSX_DEPLOYMENT_TARGET: "14.0"
+        SWIFT_VERSION: "6.0"
+        SWIFT_STRICT_CONCURRENCY: complete
+        ENABLE_HARDENED_RUNTIME: YES
+        GENERATE_INFOPLIST_FILE: NO
+        SKIP_INSTALL: YES
   # UNVERIFIED (feature 002, T027): added on Windows without an Xcode/xcodegen toolchain to
   # verify against — confirm on Mac that `xcodegen generate` produces a working `VolarTests`
   # bundle target/scheme and that it actually builds & runs (`xcodebuild test`). No test target

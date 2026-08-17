@@ -1,0 +1,51 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "volar",
+  "title": "Volar",
+  "description": "Capture a task in Volar without leaving what you're doing. Speaks the same volar:// URL scheme the Mac app registers.",
+  "icon": "icon.png",
+  "author": "kioh",
+  "categories": ["Productivity"],
+  "license": "MIT",
+  "commands": [
+    {
+      "name": "add-task",
+      "title": "Add Task",
+      "subtitle": "Volar",
+      "description": "Type a task. Volar reads the date, time and priority out of the sentence.",
+      "mode": "no-view",
+      "arguments": [
+        {
+          "name": "text",
+          "placeholder": "Call Acme Friday at 2pm",
+          "type": "text",
+          "required": true
+        }
+      ]
+    },
+    {
+      "name": "capture-selection",
+      "title": "Capture Selection",
+      "subtitle": "Volar",
+      "description": "Turn the selected text in the frontmost app into a task.",
+      "mode": "no-view"
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^1.77.0"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^1.0.11",
+    "@types/node": "^20.11.0",
+    "eslint": "^8.57.0",
+    "prettier": "^3.2.5",
+    "typescript": "^5.4.5"
+  },
+  "scripts": {
+    "build": "ray build -e dist",
+    "dev": "ray develop",
+    "lint": "ray lint",
+    "fix-lint": "ray lint --fix",
+    "publish": "npx @raycast/api@latest publish"
+  }
+}

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Share Extension entitlements — deliberately the bare minimum.
+
+  App Sandbox only. No network, no file access, no app group, no keychain sharing. The extension
+  reads a string the system already handed it and opens a `volar://` URL; it touches nothing else,
+  so it asks for nothing else. Every entitlement added here is one more thing App Review asks about
+  and one more thing that can go wrong in provisioning.
+
+  Same hand-written-file discipline as the app's own Resources/Volar.entitlements: project.yml
+  points CODE_SIGN_ENTITLEMENTS straight at this path and never uses XcodeGen's `entitlements:`
+  generator key, which would overwrite this file on every `xcodegen generate`. If a new entitlement
+  is ever genuinely needed, edit this file by hand.
+
+  NOTE: `com.apple.security.app-sandbox` is mandatory for an app extension — unlike the app itself,
+  an extension cannot opt out.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+</dict>
+</plist>

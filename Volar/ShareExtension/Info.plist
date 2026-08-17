@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Share Extension — puts "Volar" in the share sheet of any app that offers one.
+
+  GENERATE_INFOPLIST_FILE is NO for this target (see project.yml), same as the app's, so this file
+  is used verbatim rather than merged. Edit it by hand.
+
+  NSExtensionActivationRule accepts text and a single web URL: sharing a selection from Mail gives
+  text, sharing the current page from Safari gives a URL, and both are legitimate task material.
+  Deliberately NOT accepting images/files — Volar captures sentences, not attachments, and offering
+  the extension where it can't help is worse than not appearing at all.
+
+  NSExtensionPrincipalClass must stay in sync with ShareViewController's name. `$(PRODUCT_MODULE_NAME)`
+  resolves to the extension target's own module, not the app's.
+
+  UNVERIFIED: not built. On the Mac, confirm the item actually appears in Safari's share menu — a
+  share extension only shows up after the containing app has been launched once from a location the
+  system trusts (i.e. not straight out of DerivedData in some configurations).
+-->
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleDisplayName</key>
+	<string>Volar</string>
+	<key>CFBundleExecutable</key>
+	<string>$(EXECUTABLE_NAME)</string>
+	<key>CFBundleIdentifier</key>
+	<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>NSExtension</key>
+	<dict>
+		<key>NSExtensionAttributes</key>
+		<dict>
+			<key>NSExtensionActivationRule</key>
+			<dict>
+				<key>NSExtensionActivationSupportsText</key>
+				<true/>
+				<key>NSExtensionActivationSupportsWebURLWithMaxCount</key>
+				<integer>1</integer>
+			</dict>
+		</dict>
+		<key>NSExtensionPointIdentifier</key>
+		<string>com.apple.share-services</string>
+		<key>NSExtensionPrincipalClass</key>
+		<string>$(PRODUCT_MODULE_NAME).ShareViewController</string>
+	</dict>
+</dict>
+</plist>
