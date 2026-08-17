@@ -175,4 +175,64 @@ final class CalendarAccess {
             return .unavailable
         }
     }
+
+    // MARK: - Reading forward (backlog "Đường vào Volar" [I3])
+
+    /// One upcoming calendar event, for Glance to lean on.
+    struct UpcomingEvent: Equatable, Sendable {
+        let title: String
+        let start: Date
+        /// Whole minutes from `now` until it starts, floored, never negative.
+        let minutesAway: Int
+    }
+
+    /// The next event starting within `window`, or `nil`.
+    ///
+    /// WHY THIS EXISTS: time blindness is the ADHD symptom Volar is worst at helping with, and
+    /// Glance is the only surface that can address it without asking anyone to open an app. Knowing
+    /// "a meeting starts in 12 minutes" is what stops Glance from cheerfully suggesting a 45-minute
+    /// task into a wall. The permission for this was already granted and already requested for the
+    /// task mirror — this reads it back for the first time.
+    ///
+    /// Three exclusions, each load-bearing:
+    ///  - **Volar's own mirror calendar.** Without this, Glance would announce your own tasks back
+    ///    to you as if they were meetings — the mirror writes every deadline into a calendar.
+    ///    `CalendarSync.volarCalendarID` is the identifier to pass here.
+    ///  - **All-day events.** "Alice's birthday" is not a thing that starts in 12 minutes.
+    ///  - **Already-started events.** Glance answers "what's coming", not "what you're late for";
+    ///    an event in progress has nothing actionable left to say on a one-second surface.
+    ///
+    /// Returns `nil` on anything other than full access rather than throwing: a missing calendar
+    /// permission must degrade Glance to its normal self, never to an error.
+    func nextEvent(
+        within window: TimeInterval = 2 * 60 * 60,
+        now: Date = Date(),
+        excludingCalendarID: String? = nil
+    ) -> UpcomingEvent? {
+        guard status == .granted else { return nil }
+
+        let predicate = eventStore.predicateForEvents(
+            withStart: now,
+            end: now.addingTimeInterval(window),
+            calendars: nil
+        )
+        let next = eventStore.events(matching: predicate)
+            .filter { event in
+                guard !event.isAllDay else { return false }
+                guard let start = event.startDate, start > now else { return false }
+                if let excludingCalendarID, event.calendar?.calendarIdentifier == excludingCalendarID {
+                    return false
+                }
+                return true
+            }
+            .min { ($0.startDate ?? .distantFuture) < ($1.startDate ?? .distantFuture) }
+
+        guard let next, let start = next.startDate else { return nil }
+        let title = (next.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return UpcomingEvent(
+            title: title.isEmpty ? "Untitled event" : title,
+            start: start,
+            minutesAway: max(0, Int(start.timeIntervalSince(now) / 60))
+        )
+    }
 }

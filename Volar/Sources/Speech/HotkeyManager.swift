@@ -43,6 +43,8 @@ final class HotkeyManager {
     private static let hotkeyKeyCodeCapture = UInt32(kVK_ANSI_M)
     /// `kVK_ANSI_T` — ⌃⌥T, new: "add a task by typing" (see `AppState.openTextCapture()`).
     private static let hotkeyKeyCodeTextCapture = UInt32(kVK_ANSI_T)
+    /// `kVK_ANSI_N` — ⌃⌥N, "N for NOW": show Glance.
+    private static let hotkeyKeyCodeGlance = UInt32(kVK_ANSI_N)
     /// Carbon's legacy Menu-Manager-style modifier bitmask (`controlKey`/`optionKey` from
     /// <HIToolbox/Events.h>), NOT `NSEvent.ModifierFlags`. Same physical combo (Control+Option) for
     /// both hotkeys — only the letter differs.
@@ -52,6 +54,10 @@ final class HotkeyManager {
     /// single-hotkey version, so nothing about the FIRST hotkey's identity changes), `2` = ⌃⌥T.
     private static let hotkeyIDCapture = EventHotKeyID(signature: fourCharCode("Volar"), id: 1)
     private static let hotkeyIDTextCapture = EventHotKeyID(signature: fourCharCode("Volar"), id: 2)
+    /// `3` = ⌃⌥N, Glance (`Sources/Views/GlanceHUD.swift`). The FIRST hotkey here that uses key-up
+    /// for anything: hold = peek (ends on release), tap = pin. `GlanceController` owns that
+    /// distinction — this file only reports press and release faithfully.
+    private static let hotkeyIDGlance = EventHotKeyID(signature: fourCharCode("Volar"), id: 3)
 
     /// Packs up to 4 ASCII characters into the `OSType`/`FourCharCode` Carbon expects for a
     /// hotkey signature — a plain arithmetic helper, no Carbon API involved.
@@ -71,6 +77,8 @@ final class HotkeyManager {
     private var hotKeyRefCapture: EventHotKeyRef?
     /// ⌃⌥T's registration — see `hotKeyRefCapture` above for why this is a separate property.
     private var hotKeyRefTextCapture: EventHotKeyRef?
+    /// ⌃⌥N's registration — see `hotKeyRefCapture` above for why each gets its own property.
+    private var hotKeyRefGlance: EventHotKeyRef?
     /// One shared event handler covers press/release for BOTH hotkeys (Carbon dispatches by
     /// matching `EventHotKeyID`, not by handler) — unchanged shape from the single-hotkey version.
     private var eventHandlerRef: EventHandlerRef?
@@ -87,8 +95,16 @@ final class HotkeyManager {
     /// key-down/key-up events are entirely independent and must never share bookkeeping (holding
     /// one down while tapping the other must not desync either guard).
     private var isTextDown = false
+    /// ⌃⌥N's own auto-repeat guard. Load-bearing in a way the other two aren't: if OS key-repeat
+    /// ever did redeliver a press, a repeated "down" would restart the hold timer and turn every
+    /// long hold into a tap — i.e. peek would silently become pin.
+    private var isGlanceDown = false
     private var onKeyDown: (() -> Void)?
     private var onKeyUp: (() -> Void)?
+    /// ⌃⌥N press/release. Separate from `onKeyDown`/`onKeyUp` (which are ⌃⌥M-only by long-standing
+    /// contract) so neither hotkey can ever be routed into the other's handler.
+    private var onGlanceDown: (() -> Void)?
+    private var onGlanceUp: (() -> Void)?
     /// Stored (weak) because the Carbon callback only receives `self` via `userData` — it has no
     /// way to also capture `appState` directly, so `start()` stashes it here instead. Weak to avoid
     /// `HotkeyManager` keeping `AppState` alive (matches the old code's `[weak appState]` capture).
@@ -100,11 +116,19 @@ final class HotkeyManager {
     /// shared handler but intentionally ignored, see `handle(hotKeyID:isKeyDown:)` below).
     /// `onKeyDown`/`onKeyUp` remain ⌃⌥M-only, same as before Carbon. Safe to call again without a
     /// prior `stop()` — any existing registration is torn down first.
-    func start(appState: AppState, onKeyDown: (() -> Void)? = nil, onKeyUp: (() -> Void)? = nil) {
+    func start(
+        appState: AppState,
+        onKeyDown: (() -> Void)? = nil,
+        onKeyUp: (() -> Void)? = nil,
+        onGlanceDown: (() -> Void)? = nil,
+        onGlanceUp: (() -> Void)? = nil
+    ) {
         stop()
         self.appState = appState
         self.onKeyDown = onKeyDown
         self.onKeyUp = onKeyUp
+        self.onGlanceDown = onGlanceDown
+        self.onGlanceUp = onGlanceUp
 
         let selfPointer = Unmanaged.passRetained(self).toOpaque()
         retainedSelfPointer = selfPointer
@@ -170,18 +194,52 @@ final class HotkeyManager {
             print("[Volar.HotkeyManager] RegisterEventHotKey(⌃⌥T) failed: status \(registerTextStatus)")
         }
 
-        // Only tear the whole thing down (handler + retained pointer) if BOTH registrations failed
-        // — at that point this instance has genuinely nothing to do and holding the retained
-        // pointer/handler would just be a leak. A PARTIAL failure (exactly one of the two
-        // registered) is left running: half the hotkeys working is strictly better than silently
-        // disabling both over one conflict, and the failure was already logged above.
-        guard hotKeyRefCapture != nil || hotKeyRefTextCapture != nil else {
+        // ⌃⌥N (Glance) — registered independently for the same reason as the two above: another app
+        // owning this combo must cost us Glance and nothing else.
+        var registeredGlanceRef: EventHotKeyRef?
+        let registerGlanceStatus = RegisterEventHotKey(
+            Self.hotkeyKeyCodeGlance,
+            Self.hotkeyModifiers,
+            Self.hotkeyIDGlance,
+            GetApplicationEventTarget(),
+            0,
+            &registeredGlanceRef
+        )
+        if registerGlanceStatus == noErr {
+            hotKeyRefGlance = registeredGlanceRef
+        } else {
+            print("[Volar.HotkeyManager] RegisterEventHotKey(⌃⌥N) failed: status \(registerGlanceStatus)")
+        }
+
+        // Only tear the whole thing down (handler + retained pointer) if ALL THREE registrations
+        // failed — at that point this instance has genuinely nothing to do and holding the retained
+        // pointer/handler would just be a leak. A PARTIAL failure (any subset registered) is left
+        // running: some hotkeys working is strictly better than silently disabling all of them over
+        // one conflict, and each failure was already logged above.
+        //
+        // ⌃⌥N ADDED TO THIS CONDITION DELIBERATELY: it used to read `capture || text`, which — once
+        // a third hotkey existed — would have removed the shared event handler in the case where
+        // only Glance registered, leaving a live `EventHotKeyRef` whose events nothing listens to.
+        guard hotKeyRefCapture != nil || hotKeyRefTextCapture != nil || hotKeyRefGlance != nil else {
             RemoveEventHandler(handlerRef)
             eventHandlerRef = nil
             Unmanaged<HotkeyManager>.fromOpaque(selfPointer).release()
             retainedSelfPointer = nil
             return
         }
+    }
+
+    /// Attaches ⌃⌥N's press/release handlers after the fact.
+    ///
+    /// Exists because `start()` is called from `AppState.activateServices()` (in `Shared/`, which
+    /// knows nothing about Glance — a macOS-only surface), while the `GlanceController` that must
+    /// receive these events is owned by `AppDelegate`. Assigning the two closures here avoids both
+    /// widening the shared `activateServices()` signature and paying a full unregister/re-register
+    /// cycle just to attach a callback. Safe before or after `start()`: the closures are only ever
+    /// read at event time.
+    func setGlanceHandlers(down: (() -> Void)?, up: (() -> Void)?) {
+        onGlanceDown = down
+        onGlanceUp = up
     }
 
     /// Unregisters BOTH hotkeys, removes the event handler, and releases the retained `self`
@@ -196,6 +254,10 @@ final class HotkeyManager {
             UnregisterEventHotKey(hotKeyRefTextCapture)
         }
         hotKeyRefTextCapture = nil
+        if let hotKeyRefGlance {
+            UnregisterEventHotKey(hotKeyRefGlance)
+        }
+        hotKeyRefGlance = nil
         if let eventHandlerRef {
             RemoveEventHandler(eventHandlerRef)
         }
@@ -206,8 +268,11 @@ final class HotkeyManager {
         retainedSelfPointer = nil
         isDown = false
         isTextDown = false
+        isGlanceDown = false
         onKeyDown = nil
         onKeyUp = nil
+        onGlanceDown = nil
+        onGlanceUp = nil
         appState = nil
     }
 
@@ -247,6 +312,18 @@ final class HotkeyManager {
                 // onKeyUp intentionally not invoked — matches the pre-existing behavior: toggle
                 // mode has no use for key-up, and AppState.activateServices() never passes a
                 // closure for it.
+            }
+        case Self.hotkeyIDGlance.id:
+            // The only hotkey whose key-UP carries meaning. `GlanceController` decides tap-vs-hold
+            // from the interval between these two calls; this file deliberately holds no opinion,
+            // so the threshold can be tuned in one place without touching Carbon code.
+            if isKeyDown {
+                guard !isGlanceDown else { return }
+                isGlanceDown = true
+                onGlanceDown?()
+            } else {
+                isGlanceDown = false
+                onGlanceUp?()
             }
         case Self.hotkeyIDTextCapture.id:
             guard isKeyDown else {

@@ -28,7 +28,12 @@ import AppKit
 /// actually receive those events — this override is required, not cosmetic.
 @MainActor
 private final class KeyablePanel: NSPanel {
-    override var canBecomeKey: Bool { true }
+    /// Glance's peek mode (`Sources/Views/GlanceHUD.swift`) must NOT take the keyboard — the whole
+    /// point is that a half-typed line in the app you're actually working in stays half-typed. So
+    /// this is a stored flag rather than a hardcoded `true`. Capture (both instances) leaves it on
+    /// and behaves exactly as before.
+    var keyable = true
+    override var canBecomeKey: Bool { keyable }
 }
 
 /// Owns the floating capture panel end-to-end: construction, sizing, positioning, and show/hide.
@@ -61,7 +66,11 @@ final class CapturePanelController {
     /// a given instance hosts — and `.environment(_:)`'s concrete return type is itself an
     /// unspeakable opaque type, so callers already have to erase to `AnyView` before this
     /// initializer would even see a nameable type to be generic over.
-    init(content: AnyView) {
+    /// `activates` = "may this panel take focus when shown". Defaults to `true` so both existing
+    /// capture call sites are untouched. Glance passes `false` for peek and flips it to `true` only
+    /// when the user pins the card, since a pinned card needs Esc/Return.
+    init(content: AnyView, activates: Bool = true) {
+        self.activates = activates
         let hosting = NSHostingView(rootView: content)
         self.hostingView = hosting
 
@@ -88,8 +97,25 @@ final class CapturePanelController {
         // out of the Cmd+Tab / Mission Control window lists, matching a Spotlight-style utility
         // panel rather than a real document window.
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .transient]
+        panel.keyable = activates
         panel.contentView = hosting
         self.panel = panel
+    }
+
+    /// Whether `show()` pulls focus. Mutable so one controller can serve both Glance modes without
+    /// a second panel: the panel is already on screen in peek when the user taps to pin, and
+    /// rebuilding it at that moment would flash.
+    private var activates: Bool
+
+    /// Promotes a currently-visible, non-activating panel to a key window (Glance peek -> pinned).
+    /// No-op when the panel already activates, so calling it on a capture controller is harmless.
+    func setActivates(_ value: Bool) {
+        guard activates != value else { return }
+        activates = value
+        panel.keyable = value
+        guard value, panel.isVisible else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        panel.makeKeyAndOrderFront(nil)
     }
 
     /// Called by `AppDelegate` whenever `appState.captureState` changes to anything non-`.idle`.
@@ -114,6 +140,13 @@ final class CapturePanelController {
     private func show() {
         fitToContent(anchorTopCenter: false)
         reposition()
+        // A non-activating panel is ordered in WITHOUT touching focus — `orderFrontRegardless` is
+        // what puts it above the frontmost app's windows while leaving that app key. This is the
+        // whole reason Glance can appear over your editor mid-keystroke.
+        guard activates else {
+            panel.orderFrontRegardless()
+            return
+        }
         // Deliberate trade-off: Volar is an accessory app (`LSUIElement`), so a borderless/
         // non-activating panel cannot reliably become key without the app itself being made
         // active first — without this call, Esc/Return would not consistently reach the panel.

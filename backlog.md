@@ -1104,13 +1104,45 @@ bản Mac build xanh**.
 > ⇒ Pass "Volar Paper" **bắt buộc phải gỡ dòng này**, và việc gỡ chỉ an toàn SAU KHI token đã thành
 > động (`dyn(light:dark:)`). Gỡ trước là quay lại đúng bug cũ. Ghi rõ vào instruction cho Sonnet.
 
+---
+
+## Glance HUD (⌃⌥N) — code xong 2026-08-18, CHƯA BUILD
+
+Thuộc pass "Volar Paper" nhưng làm sớm vì I3 phụ thuộc nó.
+
+**File:** `Volar/Sources/Views/GlanceHUD.swift` (`GlanceController` + view) ·
+sửa `Views/CapturePanel.swift` (thêm cờ `activates:`) · sửa `Speech/HotkeyManager.swift`
+(hotkey thứ ba id 3) · sửa `App/VolarApp.swift` (panel thứ ba + observe).
+
+- **Tái dùng `CapturePanelController`**, không viết controller thứ ba. Chỉ thêm `activates: Bool`
+  (mặc định `true` nên 2 call site cũ không đổi) + `setActivates(_:)` để nâng peek → pinned.
+  Peek dùng `orderFrontRegardless()` (không cướp focus); pinned mới `makeKeyAndOrderFront`.
+- **Đã sửa một bug có sẵn khi thêm hotkey thứ ba:** guard "cả hai đăng ký đều fail thì mới tear
+  down" trong `HotkeyManager.start()` chỉ kiểm 2 ref → nếu chỉ ⌃⌥N đăng ký được thì nó gỡ mất
+  event handler dùng chung. Đã sửa thành kiểm cả ba.
+- **Khác mockup có chủ đích:** bỏ dòng "14:32 trôi qua". App KHÔNG lưu mốc bắt đầu của task
+  (chỉ có deadline) ⇒ hiện số đó là bịa dữ liệu, trên đúng cái surface mà việc duy nhất của nó là
+  nói thật trong một giây. Eyebrow chỉ hiện đếm ngược khi phiên Focus đang chạy (số thật).
+- **Dùng token `VolarColor` hiện hành (Graphite, dark-only).** Pass Volar Paper chưa land. Khi
+  token thành động thì view này theo luôn vì nó gọi tên token, không hardcode literal.
+  **ĐỪNG hardcode màu light mode vào đây trước.**
+
+**Phải verify trên Mac:**
+- [ ] Peek có THẬT SỰ không cướp focus không — gõ dở một dòng trong app khác, giữ ⌃⌥N, thả ra,
+      gõ tiếp phải liền mạch. Đây là ràng buộc số một của cả tính năng.
+- [ ] Ngưỡng 250ms tap-vs-hold có hợp tay không.
+- [ ] `NSHostingView.fittingSize` đo đúng chiều cao card không (rủi ro cũ đã ghi trong CapturePanel).
+- [ ] ⌃⌥N có va hotkey nào của anh Khôi không (dự phòng: ⌃⌥Space).
+- [ ] Panel có nổi trên app đang fullscreen không.
+
 ## ★ ĐANG LÀM — "Đường vào Volar" (integration surfaces), bắt đầu 2026-08-17
 
-> ### 📍 TRẠNG THÁI 2026-08-18: I0·I1·I2·I4·I5·I6·I7 code xong. **CHƯA BUILD/CHẠY LẦN NÀO.**
-> Chỉ còn **I3 (Lịch→Glance)** — BỊ CHẶN vì Glance HUD mới có design, chưa có code.
-> **Việc kế tiếp bắt buộc: build trên Mac.** Đang có 5 mảng chưa compile chồng lên nhau
-> (App Intents, Services menu, Share Extension target, MenuBarLabel, Raycast) — viết thêm nữa
-> thì lúc lỗi không tách được nguyên nhân.
+> ### 📍 TRẠNG THÁI 2026-08-18: **I0→I7 XONG HẾT (code). CHƯA BUILD/CHẠY LẦN NÀO.**
+> Glance HUD cũng đã code xong (mở khoá I3).
+> **VIỆC KẾ TIẾP BẮT BUỘC LÀ BUILD TRÊN MAC — đừng viết thêm feature nào nữa.**
+> Đang có 7 mảng chưa compile chồng lên nhau: App Intents · Services menu · Share Extension
+> (target mới) · MenuBarLabel · Glance HUD · hotkey thứ ba · Raycast. Thêm nữa thì lúc lỗi nổ
+> ra không tách được nguyên nhân từ mảng nào.
 > Đọc nguyên khối này trước khi làm bất cứ gì. Mỗi lần xong một mục: đổi `[ ]` → `[x]`
 > **và sửa dòng 📍 TRẠNG THÁI ở trên** sang mục kế. Đây là chỗ duy nhất giữ tiến độ —
 > đừng tin trí nhớ session.
@@ -1197,7 +1229,7 @@ sửa `project.yml`, không cần Xcode. Nhưng vẫn phải build/verify trên 
     share extension trên macOS không (`NSWorkspace` thì extension không dùng được). Nếu bị chặn thì
     mới phải quay về đường app group. **Đừng làm app group trước khi thấy đường đơn giản hỏng thật.**
 
-- [ ] **[I3] Calendar đọc → đổ vào Glance. 🚫 BỊ CHẶN — Glance HUD chưa được code (mới chỉ có design).** Quyền EventKit ĐÃ xin rồi mà chưa dùng cho Glance.
+- [x] **[I3] XONG 2026-08-18.** Thêm `CalendarAccess.nextEvent(within:now:excludingCalendarID:)` (Shared) + hàng sự kiện trong Glance. Ba loại trừ đều load-bearing: **lịch mirror của chính Volar** (không thì Glance đọc lại task của mình như thể là cuộc họp), sự kiện cả ngày, và sự kiện đã bắt đầu. Cửa sổ 45 phút. Dùng token `instrument` (xanh băng = thông tin), KHÔNG dùng mint. Quyền EventKit ĐÃ xin rồi mà chưa dùng cho Glance.
   Cho Glance nói "còn 12 phút nữa họp", và đừng gợi ý task 45 phút ngay trước cuộc họp.
   Time-blindness là triệu chứng ADHD số một; đây là món rẻ nhất vì hạ tầng đã có.
   Phụ thuộc: Glance HUD phải tồn tại trước (xem mục Volar Paper bên dưới).

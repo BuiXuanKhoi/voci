@@ -333,6 +333,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// this reference and the system menu item silently stops working the moment ARC collects it.
     var servicesProvider: VolarServicesProvider?
 
+    /// Glance (⌃⌥N) — owns whether the card is on screen and in which mode. Window state, not app
+    /// state, which is why it lives here and not on `AppState` (see `GlanceHUD.swift`).
+    let glance = GlanceController()
+
+    /// Glance's own floating panel. A THIRD `CapturePanelController`, constructed with
+    /// `activates: false` — the two capture panels deliberately steal focus like Spotlight does;
+    /// this one must not, or it defeats the entire purpose of a peek that appears mid-keystroke.
+    var glancePanelController: CapturePanelController?
+
     /// Feature 002 gap fix: owns the floating capture panel (`Sources/Views/CapturePanel.swift`)
     /// for the app's lifetime. Created lazily, on the first `syncCapturePanel()` call, rather than
     /// here in `init`/`applicationDidFinishLaunching` — `CapturePanelController.init` needs a real
@@ -385,6 +394,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // app with no window open, which is the normal case. Retained in a stored property because
         // `NSApplication.servicesProvider` does not keep its provider alive.
         servicesProvider = VolarServicesProvider.install()
+
+        // ⌃⌥N — attached after `activateServices()` above has started the hotkey manager. Weak on
+        // self so the retained Carbon callback can't keep the delegate alive.
+        appState?.hotkey.setGlanceHandlers(
+            down: { [weak self] in self?.glance.hotkeyDown() },
+            up: { [weak self] in self?.glance.hotkeyUp() }
+        )
+        observeGlanceMode()
 
         // Best-effort; ignore the result/error — notifications are a nice-to-have, not required
         // for the app to function (see backlog: real notification scheduling not yet wired).
@@ -544,6 +561,49 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// fires `observeCaptureState()`'s own tracking) — without this second call, the voice
     /// panel's suppression would only ever get (re-)confirmed by whatever `captureState` happens
     /// to do next, which is not guaranteed to happen promptly (or at all) for that transition.
+    /// Re-arms on every change, same one-shot-`withObservationTracking` pattern as
+    /// `observeTextCaptureState()` below — `withObservationTracking` fires `onChange` exactly once,
+    /// so the re-registration inside the callback is what makes it continuous.
+    private func observeGlanceMode() {
+        withObservationTracking {
+            _ = glance.mode
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                self?.syncGlancePanel()
+                self?.observeGlanceMode()
+            }
+        }
+    }
+
+    /// Shows/hides Glance's panel to match `glance.mode`, and promotes it to a key window on the
+    /// peek -> pinned transition.
+    private func syncGlancePanel() {
+        guard let appState else { return }
+        if glancePanelController == nil {
+            glancePanelController = CapturePanelController(
+                content: AnyView(GlanceHUD(controller: glance).environment(appState)),
+                activates: false
+            )
+        }
+        guard let controller = glancePanelController else { return }
+
+        switch glance.mode {
+        case .hidden:
+            controller.hide()
+            // Reset for the next summon: the following show must start as a non-activating peek
+            // even if the last one ended pinned.
+            controller.setActivates(false)
+        case .peek:
+            controller.setActivates(false)
+            controller.presentOrRefit()
+        case .pinned:
+            controller.presentOrRefit()
+            // Order matters: present first, THEN promote. `setActivates(true)` only takes key on an
+            // already-visible panel, so promoting first would leave a tapped card without Esc.
+            controller.setActivates(true)
+        }
+    }
+
     private func observeTextCaptureState() {
         withObservationTracking {
             _ = appState?.textCapture
