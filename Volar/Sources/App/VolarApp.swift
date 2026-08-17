@@ -30,6 +30,14 @@ struct VolarApp: App {
         // body executes, so `appDelegate` already exists here and this assignment lands before
         // `applicationDidFinishLaunching` fires later on the run loop.
         appDelegate.appState = state
+
+        // App Intents seam (Shared/Intents/IntentBridge.swift): Siri/Shortcuts/Spotlight dispatch
+        // into `perform()` with no SwiftUI environment to read `AppState` from, so the one instance
+        // constructed two lines above is published here. Deliberately assigned at the SAME place as
+        // `appDelegate.appState` — the comment above is explicit that this init is one of only two
+        // places an `AppState` is ever held, and `AppState.shared` is `weak` precisely so it stays a
+        // reference to that instance rather than becoming a third owner of one.
+        AppState.shared = state
     }
 
     /// ⌘K — in-app-only shortcut for `CommandBar` (`Sources/Views/CommandBar.swift`). Deliberately
@@ -320,6 +328,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// gracefully (no crash) rather than force-unwrapping.
     var appState: AppState?
 
+    /// Owns the Services-menu provider for the app's lifetime (backlog "Đường vào Volar" [I2]).
+    /// Required because `NSApplication.servicesProvider` does not retain what it is handed — drop
+    /// this reference and the system menu item silently stops working the moment ARC collects it.
+    var servicesProvider: VolarServicesProvider?
+
     /// Feature 002 gap fix: owns the floating capture panel (`Sources/Views/CapturePanel.swift`)
     /// for the app's lifetime. Created lazily, on the first `syncCapturePanel()` call, rather than
     /// here in `init`/`applicationDidFinishLaunching` — `CapturePanelController.init` needs a real
@@ -365,6 +378,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `.task`) is intentional and safe; see that call site's own comment for why each half of
         // `activateServices()` tolerates being invoked twice.
         appState?.activateServices()
+
+        // Services menu ("New Task in Volar" on any text selection, system-wide) — backlog
+        // "Đường vào Volar" [I2]. Registered here rather than in the `Window` scene for exactly the
+        // liveness reason spelled out just above: the service must work while Volar is a menu-bar
+        // app with no window open, which is the normal case. Retained in a stored property because
+        // `NSApplication.servicesProvider` does not keep its provider alive.
+        servicesProvider = VolarServicesProvider.install()
 
         // Best-effort; ignore the result/error — notifications are a nice-to-have, not required
         // for the app to function (see backlog: real notification scheduling not yet wired).

@@ -104,6 +104,39 @@
 	  proprietary encryption. Declaring that here means every TestFlight/App Store Connect upload
 	  skips the manual export-compliance questionnaire instead of asking every single time.
 	-->
+	<!--
+	  Services menu — "New Task in Volar" on any text selection, system-wide (backlog "Đường vào
+	  Volar" [I2]; docs/app-links.md already reserved this path as FR-040). `NSMessage` must match
+	  `VolarServicesProvider.captureText(_:userData:error:)`'s selector name exactly, minus argument
+	  labels — a mismatch produces a menu item that appears and does nothing.
+
+	  `NSSendTypes` uses the legacy `NSStringPboardType` name deliberately: it is still what the
+	  pasteboard server matches on for plain-text services, and is what Apple's own service samples
+	  declare. `NSRequiredContext` left absent so the item offers itself on any text selection
+	  rather than only inside text-editing contexts.
+
+	  NOT VERIFIED and not verifiable off-Mac: a service only appears after the built app has been
+	  seen by `pbs`. If it doesn't show up after a build+run, flush with
+	  `/System/Library/CoreServices/pbs -flush` and relaunch the host app.
+	-->
+	<key>NSServices</key>
+	<array>
+		<dict>
+			<key>NSMenuItem</key>
+			<dict>
+				<key>default</key>
+				<string>New Task in Volar</string>
+			</dict>
+			<key>NSMessage</key>
+			<string>captureText</string>
+			<key>NSPortName</key>
+			<string>Volar</string>
+			<key>NSSendTypes</key>
+			<array>
+				<string>NSStringPboardType</string>
+			</array>
+		</dict>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 </dict>

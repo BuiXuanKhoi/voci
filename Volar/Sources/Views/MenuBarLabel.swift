@@ -65,8 +65,30 @@ struct MenuBarLabel: View {
 
     // Studio Dark: calm/quiet at rest — muted secondary-text tone rather than a raw white, so the
     // idle glyph recedes in the menu bar instead of reading as "on". UNVERIFIED (not rendered).
+    /// Idle — mic, plus the NOW task's title when there is one (backlog "Đường vào Volar" [I6]).
+    ///
+    /// The menu bar is the one surface that is always on screen, so it is the cheapest possible
+    /// answer to "what am I doing" — no hotkey, no window, no app switch. Reads
+    /// `dashboardActiveTask`, the SAME property `focusLockContent` below and `TodayView`'s hero card
+    /// read, so the bar can never name a different task than the app does.
+    ///
+    /// Deliberately NOT `nowAccent`: the mint spotlight is reserved for the one NOW task *inside*
+    /// the app (Theme.swift's file header — "if two things on a screen are mint, one of them is
+    /// wrong"), and the menu bar already spends it on the focus-lock state. Idle stays secondary
+    /// text. Truncated at the same 120pt `focusLockContent` uses — the menu bar is contested space
+    /// and a long title must never push other apps' items off the bar.
     private var idleContent: some View {
-        VolarIcon(.mic, size: 14, color: VolarColor.textSec, weight: .regular)
+        HStack(spacing: 5) {
+            VolarIcon(.mic, size: 14, color: VolarColor.textSec, weight: .regular)
+            if let title = appState.dashboardActiveTask?.title {
+                Text(title)
+                    .font(.system(size: 11, weight: .regular))
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                    .frame(maxWidth: 120, alignment: .leading)
+            }
+        }
     }
 
     // MARK: - Listening

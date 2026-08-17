@@ -1093,3 +1093,149 @@ bản Mac build xanh**.
   - [ ] **Cài Supabase CLI + login để deploy bằng CLI** (rule mới trong CLAUDE.md global 2026-07-26: deploy function thì DÙNG CLI, không dùng MCP `deploy_edge_function` vì MCP bắt nhồi toàn bộ script vào tham số → tốn token + chậm). Hiện máy **chưa có** CLI (`supabase: command not found`) và không có `SUPABASE_ACCESS_TOKEN`; `supabase login` là interactive nên anh Khôi phải tự chạy (`! npx supabase login` hoặc cài qua scoop/npm). Đợt deploy 2026-07-26 vẫn phải đi qua MCP vì thiếu CLI. (2026-07-26)
 
 - [ ] **CHỐT MÔ HÌNH FREEMIUM + BACKEND (2026-07-15, Option 1 "gọn"):** free = **WhisperKit on-device KHÔNG giới hạn** (0 chi phí server → không cần đếm limit); Groq (paid cloud) mở **sau khi mua qua StoreKit**. **KHÔNG bắt tạo account.** Gate paid = **StoreKit `Transaction` JWS** verify server-side (restore across máy tự động qua Apple ID — không cần hệ account riêng). **CẬP NHẬT 2026-07-15 (feature 002): DeviceCheck GIỜ CẦN LÀM** — cloud LLM parse-to-task mở FREE cho mọi tier (anh Khôi: paid-only theo phần cứng là phân biệt) với quota 50 parse/ngày/thiết bị đếm bằng DeviceCheck + trần 10 task/lần nói; proxy nhận 2 kiểu auth (JWS paid unmetered / DeviceCheck free metered); vượt quota rơi về heuristic parser, không chặn. Groq speech vẫn paid-only như cũ. **Ma trận freemium v2 chốt cấu trúc (2026-07-15, xem `docs/product-vision-v2.md` mục Freemium v2):** nguyên tắc "tính năng free hết, chỉ cloud compute trả tiền" — Free: mọi feature + WhisperKit unlimited + FM on-device unlimited + cloud parse 50/ngày/thiết bị + heuristic; Pro: Groq speech + cloud parse/breakdown unlimited + meeting ingestion Groq + narrative cloud. **TÁI CẤU TRÚC CONVERSION đã duyệt (2026-07-15)**: trial 7-14 ngày full Pro (StoreKit intro offer) → rơi về free; quota AI free hạ ~20-25/ngày + HIỆN đếm; chuyển sang Pro: meeting ingestion (Pro-only), AI weekly narrative, history >30 ngày + view tháng (export vẫn free), theme pack; juice/micro-reward free cho cả 2 tier (chỉ bán content pack). **GIÁ ĐỀ XUẤT (phân tích chi phí trong `docs/product-vision-v2.md`, đơn giá verify 2026-07: Groq $0.111/h large-v3 · $0.04/h turbo min-10s, Gemini 3.1 Flash-Lite $0.25/$1.50 per 1M)**: Pro $4.99/mo · $39.99/yr · VN storefront 99k/799k · trial 14 ngày · không lifetime lúc launch — **ANH KHÔI ĐÃ DUYỆT SỐ CUỐI (2026-07-15)**, kèm thang nâng giá theo mốc cho user mới (Release B → $5.99/$49.99, v3 sync → $7.99/$59.99+, user cũ grandfather) ghi trong `docs/product-vision-v2.md`; chi phí biến đổi Pro điển hình ~$0.8-1/mo (nặng nhất ~$1.8 với fair-use cap: ingestion 20h/tháng, parse 100/ngày) → margin ~78% monthly / ~67% yearly sau Apple 15%; break-even ~8-12 subscribers; free user ~$0.05-0.4/mo kiểm soát bằng quota server-side + 2.5 Flash-Lite + turbo cho file dài. CHỜ anh Khôi duyệt SỐ GIÁ CUỐI. **Proxy = Supabase Edge Function** (Deno): giữ **Groq key trong Supabase Secrets** (`Deno.env.get`), verify StoreKit JWS + entitlement (Postgres/RLS) + rate-limit, forward sang Groq `/audio/transcriptions`, trả transcript. Client production: `GroqCredentialProvider` trả `baseURL=https://<proj>.supabase.co/functions/v1/groq` + `Authorization: Bearer <StoreKit JWS/token từ Keychain>` (client append `audio/transcriptions` → function route nội bộ, KHÔNG sửa `GroqTranscriptionClient`). **LÝ DO proxy bắt buộc:** key ở client bị moi 100% (strings binary / MITM Proxyman đọc header Bearer / dump memory) → dùng key/quota của anh, có thể bị Groq khoá tài khoản. CHƯA làm: (a) dựng Supabase project + Edge Function `groq`; (b) StoreKit config + verify với App Store Server API (cần App Store Connect API key); (c) client production provider đọc token Keychain; (d) App Attest chống script giả danh app (tuỳ chọn); (e) App Store privacy label "Audio Data" cho nhánh Groq.
+
+---
+
+> ### 🔴 PHÁT HIỆN 2026-08-18 — chặn cứng light mode của "Volar Paper"
+> `Volar/Sources/App/VolarApp.swift` (~L364) đang ép `NSApp.appearance = NSAppearance(named: .darkAqua)`
+> ngay lúc launch, có chủ đích: palette hardcode dark, mà `Picker`/`Menu`/`TextField` là control
+> AppKit thật nên tự vẽ theo appearance HỆ THỐNG → trên máy Light Mode thì popup chữ đen trên nền
+> gần đen, không đọc được (đã gặp thật 2026-07-27).
+> ⇒ Pass "Volar Paper" **bắt buộc phải gỡ dòng này**, và việc gỡ chỉ an toàn SAU KHI token đã thành
+> động (`dyn(light:dark:)`). Gỡ trước là quay lại đúng bug cũ. Ghi rõ vào instruction cho Sonnet.
+
+## ★ ĐANG LÀM — "Đường vào Volar" (integration surfaces), bắt đầu 2026-08-17
+
+> ### 📍 TRẠNG THÁI 2026-08-18: I0·I1·I2(nửa)·I5·I7 code xong, **CHƯA BUILD MAC LẦN NÀO**.
+> Còn lại: **I2b Share Extension** (target mới) · **I3 Lịch→Glance** (BỊ CHẶN: Glance chưa code) ·
+> **I4 Raycast**. Việc kế tiếp nên làm: build trên Mac để verify I1+I2+I6 trước khi viết thêm.
+> Đọc nguyên khối này trước khi làm bất cứ gì. Mỗi lần xong một mục: đổi `[ ]` → `[x]`
+> **và sửa dòng 📍 TRẠNG THÁI ở trên** sang mục kế. Đây là chỗ duy nhất giữ tiến độ —
+> đừng tin trí nhớ session.
+>
+> **Thứ tự đã chốt:** I0 → I1 → I2 → I3 → I5 → I6 → I7 → (I4 tách riêng, không chặn)
+>
+> **🖥 PHẠM VI: CHỈ macOS** (anh Khôi chốt 2026-08-17). Windows/WinUI tính sau, iOS tính sau.
+> Ngoại lệ duy nhất: file đặt trong `Shared/` thì iOS tự hưởng khi tới lượt — nhưng KHÔNG
+> viết thêm gì cho iOS ở pass này, và KHÔNG đụng `VolarIOS/` hay nhánh `window`.
+
+**Luận điểm (anh Khôi + Opus chốt 2026-08-17):** nghiên cứu ADHD của chính project nói
+app-hopping là ràng buộc cấu trúc — mỗi app phải mở thêm là một điểm hỏng. Nên hướng đúng
+KHÔNG phải "Volar tích hợp ra ngoài" mà là **"bên ngoài gọi vào Volar được, rồi Volar biến mất"**.
+Mọi đề xuất tích hợp mới phải qua được câu hỏi này trước.
+
+**Đã có sẵn, đừng làm lại** (grep xác nhận 2026-08-17):
+- `volar://` đã đăng ký ở `Volar/Resources/Info.plist` L89, hai lệnh `capture` + `ai-done`.
+  Handler ở `VolarApp.swift` L641 (`AppLinkHandler`), KHÔNG phải `.onOpenURL` của Window scene.
+- `Orchestrator/ClaudeCodeConnector.swift` — đã cắm Stop-hook của Claude Code, bắn
+  `volar://ai-done?cwd=<base64>` khi Claude chạy xong.
+- EventKit: đã xin quyền + có calendar mirror (`SettingsView.swift` L412, `TourOverlay.swift` L274).
+
+**CHƯA có** (grep xác nhận, 0 hit): App Intents · NSServices · Share Extension · WidgetKit.
+
+**Môi trường — điểm mở khoá quan trọng:** macOS build bằng **XcodeGen** (`Volar/project.yml`),
+`.xcodeproj` là artifact sinh ra. ⇒ **thêm target app-extension LÀM ĐƯỢC trên Windows** bằng cách
+sửa `project.yml`, không cần Xcode. Nhưng vẫn phải build/verify trên Mac (luật cũ, không đổi).
+
+---
+
+- [x] **[I0] Spec mục "Đường vào Volar" vào artifact thiết kế** — XONG 2026-08-17. — không code, chỉ design.
+  Gồm I1, I2, I3, I5. I4 (Raycast) tách vì là chuyện phân phối, không phải design.
+  Artifact: https://claude.ai/code/artifact/ff5c0276-267b-4f1e-8e14-41fb283a1d92
+
+- [x] **[I1] App Intents — CODE XONG 2026-08-18, chưa build trên Mac.** Viết MỘT API, mở ra: Shortcuts ·
+  Siri · Spotlight (macOS 14+) · Action Button (iPhone 15+) · Widget · automation theo Focus mode ·
+  Watch. Đây là cách duy nhất "đưa vào workflow" mà không phải build N tích hợp — user tự lắp
+  theo cách mình không đoán trước được.
+  - Ba intent là đủ: `AddTaskIntent`, `WhatAmIDoingIntent`, `StartFocusIntent`.
+  - File mới `Shared/Intents/` (đặt ở `Shared/` để iOS dùng chung — xem `project.yml`: `../Shared`
+    được compile bởi cả macOS lẫn iOS target).
+  - KHÔNG cần target mới. Chỉ thêm file + `AppShortcutsProvider`.
+  - **Phải tái dùng** đúng entry point parse mà `TextCapturePanel` đang gọi, đừng nhân bản logic.
+  - **ĐÃ LÀM:** `Shared/Intents/IntentBridge.swift` (seam) + `Shared/Intents/VolarAppIntents.swift`
+    (3 intent + `VolarShortcuts`) + 1 dòng `AppState.shared = state` trong `VolarApp.swift` init.
+    `project.yml` KHÔNG phải sửa — `- path: ../Shared` là tham chiếu cả cây, xcodegen tự nhặt.
+  - **QUYẾT ĐỊNH nền tảng (anh Khôi duyệt 2026-08-17):** confirm tách theo bề mặt, không theo entry
+    point. Luật phát biểu lại: *"mọi capture phải cho người dùng thấy nó parse ra gì, qua kênh mà
+    người dùng đang có mặt"* — màn hình = confirm card, Siri = câu đọc lại. `app-links.md` KHÔNG
+    bị phá, chỉ cần thêm một câu định nghĩa "confirm" trên bề mặt không màn hình.
+  - **PHÁT HIỆN quan trọng, đừng quên:** cách tách này ĐÃ CÓ SẴN trong code từ 2026-07-28
+    (`applyTextCaptureParseResult`, Việc 4 "chỉ đi qua confirm khi phức tạp"): 1 draft + không trùng
+    + không điều kiện → tự lưu; còn lại → mở confirm card. Nên I1 KHÔNG sửa một dòng logic save nào,
+    chỉ đọc lại kết quả. Ba outcome: `.saved(titles)` / `.needsConfirmation` / `.failed`.
+  - **CÒN LẠI, phải làm trên Mac:** (a) build; (b) kiểm Shortcuts có nhận phrase không — app
+    Shortcuts cache rất dai, thường phải rebuild + khởi động lại Shortcuts mới thấy; (c) kiểm ca
+    Volar CHƯA chạy mà gọi intent → macOS có tự launch nền không, `awaitShared` 3s có đủ không;
+    (d) kiểm `static weak var shared` trong extension có compile không (static stored property
+    trong extension là hợp lệ, nhưng chưa verify với `weak` + `@MainActor`).
+
+- [~] **[I2] Services menu XONG 2026-08-18 · Share Extension CHƯA.** Bôi đen chữ ở bất kỳ đâu →
+  chuột phải → "Task mới trong Volar". Không UI mới, không màn hình mới.
+  - Services menu: `NSServices` trong `Info.plist` + `NSApplication.shared.servicesProvider`.
+    Nhẹ, không cần target mới. **Làm phần này trước.**
+  - Share Extension: CẦN target mới trong `project.yml` + Info.plist riêng + app group để chia
+    dữ liệu với app chính. Nặng hơn nhiều. Tách thành bước riêng, đừng gộp.
+  - Rủi ro đã biết: app group cần khai ở `Volar.entitlements` VÀ ở App ID trên developer portal;
+    sai chỗ này thì extension chạy nhưng không thấy dữ liệu.
+  - **ĐÃ LÀM (Services menu):** `Volar/Sources/App/ServicesProvider.swift` (mới) + `NSServices` trong
+    `Info.plist` + `servicesProvider` stored property & `VolarServicesProvider.install()` trong
+    `AppDelegate.applicationDidFinishLaunching`. Đi qua `appLinkHandler?.onCapture` — ĐÚNG đường
+    `app-links.md` đã dành sẵn cho FR-040, nên vẫn qua confirm card (người dùng đang nhìn màn hình).
+  - **Verify trên Mac:** service chỉ hiện sau khi app đã build+chạy một lần cho `pbs` thấy. Không
+    thấy thì `/System/Library/CoreServices/pbs -flush` rồi khởi động lại app chủ.
+
+- [ ] **[I3] Calendar đọc → đổ vào Glance. 🚫 BỊ CHẶN — Glance HUD chưa được code (mới chỉ có design).** Quyền EventKit ĐÃ xin rồi mà chưa dùng cho Glance.
+  Cho Glance nói "còn 12 phút nữa họp", và đừng gợi ý task 45 phút ngay trước cuộc họp.
+  Time-blindness là triệu chứng ADHD số một; đây là món rẻ nhất vì hạ tầng đã có.
+  Phụ thuộc: Glance HUD phải tồn tại trước (xem mục Volar Paper bên dưới).
+
+- [x] **[I5] XONG 2026-08-18 — `docs/url-scheme.md`.** Gần như $0 vì đã chạy sẵn. Một trang docs
+  mở khoá luôn Alfred, Keyboard Maestro, Stream Deck, BetterTouchTool, Hammerspoon — không phải
+  build cái nào. File: `docs/url-scheme.md`. Phải liệt kê đủ tham số của cả `capture` lẫn `ai-done`,
+  đọc từ `AppLinkHandler` chứ đừng bịa.
+
+- [x] **[I6] XONG 2026-08-18 — `MenuBarLabel.idleContent` đọc `dashboardActiveTask`, cắt 120pt, dùng `textSec` KHÔNG dùng mint (luật một nguồn sáng).** Menu bar hiện tên task NOW thay vì chỉ icon. `Views/MenuBarLabel.swift` đã có,
+  chỉ đổi nội dung + cắt chuỗi. Cẩn thận: label menu bar bám appearance của thanh menu, không
+  bám app — trùng rủi ro đã ghi ở pass Volar Paper.
+
+- [x] **[I7] XONG 2026-08-18 — không cần code.** Rơi ra miễn phí từ I1: `StartVolarFocusIntent` đã đủ để Shortcuts Automation "When Focus Work turns on" gọi. Đã viết công thức vào `docs/url-scheme.md` §3. Gần như miễn phí sau khi có I1
+  (làm qua App Intents automation, không phải API riêng). Làm sau cùng.
+
+- [ ] **[I4] Extension Raycast — TÁCH RIÊNG, không chặn mục nào.** Đây không phải tích hợp, đây là
+  **kênh phân phối**: Raycast là nơi indie dev / ADHD-pro (wedge mạnh nhất theo research thị trường)
+  sống cả ngày. Viết TypeScript, gọi `volar://`, không đụng code Swift ⇒ không chặn việc Mac.
+  Phụ thuộc: I5 (phải có docs URL scheme trước).
+
+**❌ ĐÃ QUYẾT KHÔNG LÀM** (ghi lại để lần sau khỏi đề xuất lại):
+- **Sync hai chiều với Todoist / Things / Reminders.** Biến Volar thành ô nhập liệu đẹp cho sản phẩm
+  của người khác, và nhân đôi mặt sync trong khi engine sync còn giữa chừng (plan 008). Nếu buộc
+  phải có: chỉ MỘT chiều xuất ra, không nhận vào.
+- **Browser extension.** Share Extension phủ rồi, chi phí bằng một phần mười.
+- **Screen-time / idle detection để nhắc "anh đang lạc đề".** Creepy, và là nudge — vi phạm luật
+  "Glance không tự hiện".
+
+---
+
+## Redesign pass "Volar Paper" — 2026-08-17
+
+Artifact (HIỆN HÀNH): https://claude.ai/code/artifact/ff5c0276-267b-4f1e-8e14-41fb283a1d92
+Artifact cũ, đã bỏ (hướng Cursor/graphite, dark-only): https://claude.ai/code/artifact/6314f275-e211-492e-85c2-95f5c3385346
+
+Anh Khôi chốt 2026-08-17: đổi hướng sang **kiểu Notion, hai mode sáng + tối**. Điều này
+**supersede `specs/005-cursor-retheme/design-spec.md`** về giá trị màu, mặt chữ mono, và blur —
+KHÔNG supersede luật một nguồn sáng, luật cấm đỏ, ramp ấm = ưu tiên.
+
+- [ ] **Cần anh Khôi quyết trước khi implement** (2026-08-17) — 3 câu hỏi mở trong artifact:
+  1. Inspector cột phải 300pt thay `.sheet` của `TaskDetailView` — có làm không? Đây là đổi kiến trúc điều hướng, đã bị hoãn từ design-spec §3.3.
+  2. `⌃⌥N` có va với hotkey nào anh đang dùng trên máy không? (đang có `⌃⌥M` voice, `⌃⌥T` typed).
+  3. Glance: giữ cả hai hành vi (giữ = peek, gõ = ghim) hay chỉ một?
+- [ ] **Glance HUD — chưa implement** (2026-08-17). File mới `Volar/Sources/Views/GlanceHUD.swift` + đăng ký hotkey thứ ba trong `Speech/HotkeyManager.swift`. Ràng buộc bắt buộc: `NSPanel` `.nonactivatingPanel` + `becomesKeyOnlyIfNeeded` (peek KHÔNG được thành key window), `level = .floating`, `collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]`, canh theo màn hình đang chứa con trỏ. Tái dùng `CapturePanelController` (đã có 2 instance cho ⌃⌥M/⌃⌥T) — đừng viết controller thứ ba từ đầu.
+- [ ] **5 state của Glance** (2026-08-17): peek · ghim · quá hạn (chip `reschedule`, KHÔNG đỏ) · trống (tắt thanh mint) · hết việc. Chi tiết giải phẫu + typography ở artifact.
+- [ ] **Chưa build-verify** (2026-08-17) — máy Windows, không Xcode. Mọi số trong artifact là tính toán thiết kế, chưa render.
+- [ ] **Theme.swift phải thành token động** (2026-08-17) — bọc mỗi token vào `NSColor(name:dynamicProvider:)` qua helper `dyn(light:dark:)`; tên token giữ nguyên nên ~40 call site + 19 view không phải sửa. Kèm: `veil()` phải đảo base (sáng = đen alpha, tối = trắng alpha), `GlassLevel.bgOpacity` → 1.0 cả ba mức (bỏ blur, thay bằng bóng ba lớp).
+- [ ] **Grep màu hard-code ngoài Theme.swift trước khi làm** (2026-08-17) — `Color.white`, `Color.black`, `Color(volar:` nằm ngoài Theme.swift sẽ lộ ngay ở light mode.
+- [ ] **Sweep bỏ mặt chữ SF Mono** (2026-08-17) — giữ `.monospacedDigit()`, bỏ `design: .monospaced`. Giữ mono đúng một chỗ: khối transcript thô sau khi nói.
+- [ ] **Hover-reveal cho TaskRow** (2026-08-17) — checkbox + nút ⋯ chỉ hiện khi hover; dùng `.opacity()` chứ không `if`, để layout không nhảy.
+- [ ] **Settings: Sáng / Tối / Theo hệ thống** (2026-08-17) — mặc định theo hệ thống. Cần anh Khôi xác nhận mặc định.
+- [ ] **`VolarAccent` 4 family** (2026-08-17) — nhân đôi thành 8 giá trị cho 2 mode là việc thừa; đề xuất rút gọn. Chờ anh Khôi quyết.
+- [ ] **Kiểm riêng trên Mac** (2026-08-17) — icon menubar (template image) + `MenuBarLabel` bám appearance thanh menu, không bám app; ảnh App Store phải chụp lại cả 2 mode.
