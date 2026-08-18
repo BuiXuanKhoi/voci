@@ -364,6 +364,20 @@ struct ConfirmDraft: Identifiable, Equatable {
     /// itself already hides this row too (see `PopoverView.overdueAdvisoryRow`'s render guard), so
     /// this field only needs to cover "I saw the nudge, I don't want it" without touching the chip.
     var overdueDismissed: Bool = false
+    /// specs/010-calendar-and-hard-deadlines/design.md §2.4(a): the single busiest-value calendar
+    /// conflict warning — "14:00–15:00 · Họp nội bộ" — computed ONCE in `buildConfirmDrafts`, same
+    /// "never recomputed per chip edit / per render" rule `overdueSuggestion`/`conflicts` right
+    /// above already document (see those fields' own comments for why). `nil` when the "Read my
+    /// calendar" toggle is off (§2.5, default off), when this draft has neither `deadline` nor
+    /// `startTime`, or when neither instant falls inside a `CalendarAccess.BusyBlock`.
+    ///
+    /// PRIVACY (§2.5, §2.4a, not optional): this is a formatted DISPLAY STRING — "start–end · the
+    /// conflicting event's own title" — never a `CalendarAccess.BusyBlock`/`EKEvent` itself. It is
+    /// rendered as-is by `PopoverView` and never read by anything in `Sources/Parsing/CloudParser.
+    /// swift` (grepped `CloudParser.appendContext` and every one of its request-building call
+    /// sites while adding this field — none take a `ConfirmDraft` or this string; see this task's
+    /// final report). Keep it that way: an event's title must never reach a cloud parse payload.
+    var calendarConflict: String?
     /// User-edited deadline, written only by `AppState.applyOverdueSuggestion` today. `nil` until
     /// the user actually taps "Move to tomorrow" — mirrors `editedTitle`/`effectiveTitle` below
     /// EXACTLY: `ParsedTask` stays exactly what the parser/router produced, never mutated in place;
@@ -803,6 +817,16 @@ final class AppState {
     /// (Settings → General). Persisted; `VolarApp.swift`'s `AppDelegate` applies it to
     /// `NSApp.appearance` at launch AND live on every change (see `setAppearance` below).
     private(set) var appearance: AppearancePreference
+    /// specs/010-calendar-and-hard-deadlines/design.md §2.5: a SEPARATE opt-in from calendar
+    /// mirroring/EventKit permission — granting EventKit access (`calendarAccess.status ==
+    /// .granted`, needed for the mirror feature) does NOT imply consent to read event content back
+    /// (busy blocks, titles). Two different sensitivity levels: writing Volar's own tasks into a
+    /// calendar it created vs. reading the user's other events. Persisted; defaults `false`
+    /// (`UserDefaults.bool(forKey:)`'s own default for an unset key — same convention
+    /// `allowServerRecognition` already uses). `AppState.hardAnchors(now:)`/
+    /// `calendarConflictDescription(for:)` are the only two call sites that ever check this before
+    /// touching `calendarAccess.busyBlocks` — see `setCalendarReadEnabled` below for the writer.
+    private(set) var calendarReadEnabled: Bool
     /// True when capture failed because on-device recognition is unavailable (Dictation off) and
     /// the user hasn't consented to server recognition yet — drives the popover's hint + consent UI.
     private(set) var pendingServerConsent = false
@@ -1332,6 +1356,10 @@ final class AppState {
     /// file before picking this string (self-review (5) of this task's brief) — `"volar.appearance"`
     /// was unclaimed.
     private static let appearanceKey = "volar.appearance"
+    /// specs/010-calendar-and-hard-deadlines/design.md §2.5. Grepped every `UserDefaults` key
+    /// literal in this file before picking this string (same self-review step 009's
+    /// `appearanceKey` comment records) — `"volar.calendarRead"` was unclaimed.
+    private static let calendarReadKey = "volar.calendarRead"
     /// Guided-tour "seen" flag (`Sources/Views/Tour/*`). `V1` suffix mirrors `VolarApp.swift`'s own
     /// `hasOnboardedV1` `@AppStorage` key versioning convention, so a future tour redesign can force
     /// everyone through it again just by bumping the suffix, without touching this file's read/write
@@ -1412,6 +1440,9 @@ final class AppState {
         // appearance, so straight-from-`UserDefaults`-with-a-default is enough, same shape as
         // `speechEngineChoice` right above.
         self.appearance = AppearancePreference(rawValue: UserDefaults.standard.string(forKey: Self.appearanceKey) ?? "") ?? .system
+        // §2.5: defaults `false` for an unset key, same as `allowServerRecognition` above — an
+        // upgrading user who never saw this toggle gets the private default, not an opt-in one.
+        self.calendarReadEnabled = UserDefaults.standard.bool(forKey: Self.calendarReadKey)
         self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
         self.voiceDeliveryMode = VoiceDeliveryMode(
             rawValue: UserDefaults.standard.string(forKey: Self.voiceDeliveryModeKey) ?? ""
@@ -2083,7 +2114,44 @@ final class AppState {
     /// itself already documents) is both safe and simpler than latching it.
     var waitingModeDecision: WaitingMode.Decision? {
         let now = clock()
-        return WaitingMode.decide(now: now, tasks: tasks, eligibleOrder: Self.eligibleOrder(from: tasks, now: now))
+        return WaitingMode.decide(
+            now: now,
+            anchors: hardAnchors(now: now),
+            tasks: tasks,
+            eligibleOrder: Self.eligibleOrder(from: tasks, now: now)
+        )
+    }
+
+    /// Merges both `WaitingMode.HardAnchor` sources (design.md §2.3, §0's "AppState is the one
+    /// place allowed to know about both task storage and EventKit"):
+    ///  1. Every open task's own `deadline` (`.deadline(taskID:)`) — filtered EXACTLY like
+    ///     `SharedTests/WaitingModeTests.swift`'s `anchor(for:)` helper (the caller-side filter
+    ///     `WaitingMode.decide` used to do internally, now pushed out to here per §2.3): drop
+    ///     `.done`/`.archived` tasks and tasks with no `deadline`. Deliberately reads `tasks` (the
+    ///     FULL store), not `openTasks` — `openTasks` only filters `.done`, not `.archived`, and
+    ///     matching the test helper's exact two-status filter here (rather than trusting
+    ///     `openTasks` to already cover it) is what keeps this in lockstep with that helper instead
+    ///     of silently drifting from it.
+    ///  2. `calendarAccess.busyBlocks` (`.calendar`) — ONLY when `calendarReadEnabled` (§2.5) is
+    ///     on. Toggle off ⇒ `busyBlocks` is never called at all, not called-then-discarded (§2.5's
+    ///     own rule) — no EventKit touch, nothing cached, nothing stored.
+    private func hardAnchors(now: Date) -> [WaitingMode.HardAnchor] {
+        let deadlineAnchors: [WaitingMode.HardAnchor] = tasks.compactMap { task in
+            guard task.status != .done, task.status != .archived, let deadline = task.deadline else {
+                return nil
+            }
+            return WaitingMode.HardAnchor(title: task.title, at: deadline, source: .deadline(taskID: task.id))
+        }
+        guard calendarReadEnabled else { return deadlineAnchors }
+        let horizonEnd = now.addingTimeInterval(TimeInterval(WaitingMode.horizonMinutes * 60))
+        let calendarAnchors = calendarAccess.busyBlocks(
+            from: now,
+            to: horizonEnd,
+            excludingCalendarID: calendarSync.volarCalendarID
+        ).map { block in
+            WaitingMode.HardAnchor(title: block.title, at: block.start, source: .calendar)
+        }
+        return deadlineAnchors + calendarAnchors
     }
 
     /// The FULL eligible-task ordering — `WaitingMode.decide`'s `eligibleOrder:` parameter contract
@@ -2306,6 +2374,17 @@ final class AppState {
         priority: Priority,
         startTime: Date?,
         deadline: Date?,
+        // specs/010-calendar-and-hard-deadlines/design.md §3.1/§3.2: threaded exactly like
+        // `priority` right above — non-optional, no "unchanged" sentinel, direct overwrite below.
+        // DELIBERATELY NO DEFAULT (Opus review, 2026-08-19): non-optional + direct-overwrite +
+        // default would let any call site that simply forgets this argument silently downgrade a
+        // `.hard` deadline to `.soft` — no compile error, no warning, no way to notice besides the
+        // user losing protection with no idea it happened. That's exactly the class of silent lie
+        // this whole feature exists to stop (design.md §3.0), so shipping it with its own silent
+        // downgrade path would be self-defeating. Omitting the default forces the compiler to make
+        // every caller state its intent instead — `SharedTests/ManualEditDraftTests.swift`'s 5 call
+        // sites were updated to pass it explicitly for exactly this reason.
+        deadlineKind: DeadlineKind,
         durationMinutes: Int?,
         remindPeriod: TimeInterval?
     ) {
@@ -2327,6 +2406,7 @@ final class AppState {
         edited.priority = priority
         edited.startTime = startTime
         edited.deadline = deadline
+        edited.deadlineKind = deadlineKind
         edited.durationMinutes = durationMinutes
         // `remindPeriod == nil` does NOT mean "wipe the whole override" — a task can carry a real
         // `reminderOverride` (parser-derived offsets/fractionsRemaining, or a previous edit) that
@@ -3662,8 +3742,37 @@ final class AppState {
             drafts[i].overdueSuggestion = OverdueSuggestion.makeIfOverdue(
                 deadline: drafts[i].task.deadline?.value, now: conflictNow
             )
+            // §2.4(a): same "computed once, at draft-creation time" rule as the two fields right
+            // above — see `ConfirmDraft.calendarConflict`'s own doc comment.
+            drafts[i].calendarConflict = calendarConflictDescription(for: drafts[i].task)
         }
         return drafts
+    }
+
+    /// The one `CalendarAccess.BusyBlock` (§2.1) whose window contains `task`'s own `deadline` —
+    /// or, absent a deadline, its `startTime` — formatted as "\(start)–\(end) · \(title)". `nil`
+    /// whenever the "Read my calendar" toggle is off (§2.5: toggle off means `busyBlocks` is never
+    /// even called, not called-then-discarded), `task` has neither instant, or nothing overlaps.
+    ///
+    /// The `busyBlocks` query window is deliberately just `[instant, instant + 1s)` — a 1-second
+    /// probe, not the task's own duration or `WaitingMode.horizonMinutes` — because EventKit's
+    /// predicate matches any event whose own interval OVERLAPS the queried range, so a block that
+    /// actually contains `instant` (`block.start <= instant < block.end`) always overlaps this tiny
+    /// probe regardless of how long the block itself runs. The `first(where:)` guard below then
+    /// re-checks that exact containment precisely, so the probe's only job is fetching a candidate
+    /// set from EventKit, never deciding correctness itself.
+    private func calendarConflictDescription(for task: ParsedTask) -> String? {
+        guard calendarReadEnabled else { return nil }
+        guard let instant = task.deadline?.value ?? task.startTime?.value else { return nil }
+        let blocks = calendarAccess.busyBlocks(
+            from: instant,
+            to: instant.addingTimeInterval(1),
+            excludingCalendarID: calendarSync.volarCalendarID
+        )
+        guard let hit = blocks.first(where: { instant >= $0.start && instant < $0.end }) else { return nil }
+        let start = hit.start.formatted(.dateTime.hour().minute())
+        let end = hit.end.formatted(.dateTime.hour().minute())
+        return "\(start)–\(end) · \(hit.title)"
     }
 
     /// Auto-resolves `.taskDone` conditions the router was itself confident about (>=0.7) — first
@@ -5712,6 +5821,19 @@ final class AppState {
     func setAppearance(_ pref: AppearancePreference) {
         appearance = pref
         UserDefaults.standard.set(pref.rawValue, forKey: Self.appearanceKey)
+    }
+
+    /// specs/010-calendar-and-hard-deadlines/design.md §2.5 — "Read my calendar" toggle in
+    /// Settings ▸ Calendar. Same "mutate + persist" shape as `setAppearance` above. Deliberately
+    /// does nothing else: turning this off does not clear `calendarConflict` on any
+    /// already-built `ConfirmDraft` (that field was computed once at draft-creation time and the
+    /// batch is transient — same non-goal `overdueSuggestion`'s own fields already accept), and
+    /// there is nothing cached anywhere else to invalidate — `hardAnchors(now:)`/
+    /// `calendarConflictDescription(for:)` both re-check this flag fresh on every call, so the
+    /// very next read after this returns already reflects the new value.
+    func setCalendarReadEnabled(_ enabled: Bool) {
+        calendarReadEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: Self.calendarReadKey)
     }
 
     /// Sets the ambient visual mode and persists it, so it survives relaunch.

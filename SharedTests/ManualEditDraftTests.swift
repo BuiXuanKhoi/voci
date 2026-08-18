@@ -219,6 +219,12 @@ final class ManualEditDraftTests: XCTestCase {
 
         let newStart = Date().addingTimeInterval(600)
         let newDeadline = Date().addingTimeInterval(7200)
+        // `original` defaults to `.soft` (`TaskItem.deadlineKind`'s own default) — pass `.hard`
+        // here so this test also proves `deadlineKind` itself actually lands via `updateTask`,
+        // not just the other 7 fields the test's name promises (specs/010-calendar-and-hard-
+        // deadlines/design.md §3.1/§3.2, Opus review 2026-08-19: `deadlineKind` has no default on
+        // `updateTask` anymore specifically so no caller can lose track of it — this is the one
+        // test asserting the value that guard exists to protect actually survives the round trip).
         state.updateTask(
             original.id,
             title: "New title",
@@ -226,6 +232,7 @@ final class ManualEditDraftTests: XCTestCase {
             priority: .high,
             startTime: newStart,
             deadline: newDeadline,
+            deadlineKind: .hard,
             durationMinutes: 90,
             remindPeriod: 1800
         )
@@ -237,6 +244,7 @@ final class ManualEditDraftTests: XCTestCase {
         XCTAssertEqual(updated?.priority, .high)
         XCTAssertEqual(updated?.startTime, newStart)
         XCTAssertEqual(updated?.deadline, newDeadline)
+        XCTAssertEqual(updated?.deadlineKind, .hard, "deadlineKind must round-trip through updateTask like every other editable field")
         XCTAssertEqual(updated?.durationMinutes, 90)
         XCTAssertEqual(updated?.reminderOverride?.remindPeriod, 1800)
     }
@@ -259,6 +267,7 @@ final class ManualEditDraftTests: XCTestCase {
             priority: .medium,
             startTime: nil,
             deadline: nil,
+            deadlineKind: .soft,
             durationMinutes: nil,
             remindPeriod: nil
         )
@@ -288,6 +297,7 @@ final class ManualEditDraftTests: XCTestCase {
             priority: .medium,
             startTime: nil,
             deadline: nil,
+            deadlineKind: .soft,
             durationMinutes: nil,
             remindPeriod: nil
         )
@@ -310,6 +320,7 @@ final class ManualEditDraftTests: XCTestCase {
             priority: .high,
             startTime: nil,
             deadline: nil,
+            deadlineKind: .soft,
             durationMinutes: nil,
             remindPeriod: nil
         )
@@ -366,6 +377,7 @@ final class ManualEditDraftTests: XCTestCase {
             priority: .medium,
             startTime: nil,
             deadline: nil,
+            deadlineKind: .soft,
             durationMinutes: nil,
             remindPeriod: nil
         )

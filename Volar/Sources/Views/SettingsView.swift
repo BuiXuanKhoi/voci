@@ -361,6 +361,7 @@ struct SettingsView: View {
             calendarAccessRow
             if appState.calendarAccess.status == .granted {
                 calendarMirrorRow
+                calendarReadRow
             }
         }
     }
@@ -430,7 +431,10 @@ struct SettingsView: View {
     private var calendarAccessRow: some View {
         SettingsRow(
             label: "Calendar access",
-            hint: "Volar reads your calendar to see which blocks are actually free, and — once you turn on mirroring below — writes tasks into a calendar it creates called \"Volar\". It never touches your other calendars, and nothing leaves your Mac."
+            // §2.5 (2026-08-19): this permission grant alone does NOT turn on reading — that's the
+            // separate "Read my calendar" toggle below, off by default. This row only unlocks the
+            // two features that ask for it explicitly: mirroring (below) and that read toggle.
+            hint: "Lets Volar mirror tasks into a calendar it creates called \"Volar\" (once you turn that on below), and — only if you also turn on \"Read my calendar\" — warn you about clashes with your other events. It never touches your other calendars, and nothing leaves your Mac."
         ) {
             VStack(alignment: .trailing, spacing: 4) {
                 calendarAccessControl
@@ -472,6 +476,26 @@ struct SettingsView: View {
                         .lineLimit(2)
                 }
             }
+        }
+    }
+
+    /// specs/010-calendar-and-hard-deadlines/design.md §2.5 — a SEPARATE opt-in from
+    /// `calendarMirrorRow` right above, deliberately shown alongside it (not merged into one
+    /// toggle): granting EventKit access lets Volar WRITE its own tasks into a calendar it creates,
+    /// but does not by itself mean "read my other events back" — two different sensitivity levels,
+    /// so this gets its own switch, default OFF (`AppState.calendarReadEnabled`'s own doc comment).
+    /// Bound the same `Binding(get:set:)` shape as `calendarMirrorRow`'s toggle above, routing
+    /// through `AppState.setCalendarReadEnabled(_:)` rather than a raw property set.
+    @ViewBuilder
+    private var calendarReadRow: some View {
+        SettingsRow(
+            label: "Read my calendar",
+            hint: "Lets Volar warn you when a new task's time clashes with something already on your calendar. Nothing it reads ever leaves your Mac."
+        ) {
+            VolarToggle(isOn: Binding(
+                get: { appState.calendarReadEnabled },
+                set: { appState.setCalendarReadEnabled($0) }
+            ))
         }
     }
 
@@ -861,7 +885,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsRow(label: "Calendar", hint: "Lets Volar see which time blocks are free, and — once you turn on mirroring in the General tab — write scheduled tasks into a calendar it creates.") {
+            SettingsRow(label: "Calendar", hint: "Just the permission grant. Whether Volar actually mirrors tasks or reads your other events is decided by two separate toggles in the General tab, both off by default.") {
                 HStack(spacing: 10) {
                     Text(calendarPermissionState.text)
                         .font(.system(size: 12, weight: .medium))
