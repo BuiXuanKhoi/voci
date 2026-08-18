@@ -6,6 +6,49 @@ import SwiftUI
 /// re-derives the progress fraction against the same constant `startFocus()`/`endFocus()` use).
 private let focusTotalSeconds = 25 * 60
 
+/// Fixed "always-dark" ink for content painted directly on the scrim `overlayContent` draws
+/// (`Rectangle().fill(.ultraThinMaterial).overlay(...)` below). DECISION (this task, 2026-08-19,
+/// per anh Khôi's spec 009 light-mode pass): the scrim itself stays a dark film in BOTH
+/// light and dark system appearance — Focus mode is "tắt đèn để tập trung," and a pale scrim
+/// doesn't serve that. That means anything drawn ON it must NOT use `VolarColor.textPri`/
+/// `.textSec`/`.textMut`/`.border`/`.veil(_:)`/`.high`/`.med`/`.low`/`.bg` — those are dynamic as
+/// of RETHEME 4 and flip polarity in light mode (`textPri` goes near-BLACK, `veil`/`border` go
+/// near-BLACK film) which on a still-dark scrim means invisible text/chrome. These constants
+/// mirror the exact hex values `VolarColor`'s DARK branch resolves to (`Shared/Design/Theme.swift`)
+/// — i.e. this screen keeps looking exactly like it did before light mode existed, pinned instead
+/// of accidentally inherited. Deliberately NOT applied to `StuckReasonPicker` (its own
+/// appearance-following `.popover` chrome, never drawn on this scrim) — that one genuinely needs
+/// to track the real system appearance, unlike everything else in this tree.
+///
+/// `SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/`StuckNextActionBanner`/`StuckTimerBanner`
+/// below (shared verbatim with `TodayView`'s NOW hero card) used to be a real gap here: pinning
+/// their `VolarColor.*` ink to this enum would've fixed them on this scrim but broken them on
+/// `TodayView`'s normal, appearance-following panel. Opus's follow-up (2026-08-19) closed that gap
+/// a different way — `FocusOverlay.body` now sets `.environment(\.colorScheme, .dark)` on the
+/// whole subtree, so those four banners' own dynamic tokens resolve to their dark branch here
+/// without any code of theirs changing, while still resolving normally (light or dark) inside
+/// `TodayView`, which never sees this override.
+///
+/// ponytail: `FocusInk` is now theoretically redundant with that `.environment` override — every
+/// `VolarColor.*` in this subtree already resolves dark on its own. Kept anyway because this repo
+/// has no Swift toolchain to build/verify on (Windows-authored, blind) and `.environment(\.colorScheme, .dark)`
+/// has never been run once. Pinned constants are the floor that can't be undone by a framework
+/// mechanism behaving unexpectedly; the `.environment` override is what actually closes the
+/// four-banner gap. Delete `FocusInk` (revert call sites to `VolarColor.*`) only after a Mac build
+/// visually confirms Focus mode still reads correctly with the system in light mode.
+private enum FocusInk {
+    static let text = Color(volar: 0xF2F2F7)      // == VolarColor.textPri, dark branch
+    static let textSec = Color(volar: 0x98989D)   // == VolarColor.textSec, dark branch
+    static let textMut = Color(volar: 0x7C7C80)   // == VolarColor.textMut, dark branch
+    static let high = Color(volar: 0xFF9F6B)      // == VolarColor.high, dark branch
+    static let med = Color(volar: 0xD9B77A)       // == VolarColor.med, dark branch
+    static let low = Color.white.opacity(0.30)    // == VolarColor.low, dark branch (white film)
+    static let border = Color.white.opacity(0.10) // == VolarColor.border, dark branch
+    /// == `VolarColor.veil(_:)`'s dark branch (white film at `opacity`).
+    static func veil(_ opacity: Double) -> Color { Color.white.opacity(opacity) }
+    static let scrim = Color(volar: 0x1C1C1E)     // == VolarColor.bg, dark branch
+}
+
 /// Fullscreen "one task" focus overlay — ports `volar-focus.jsx`'s `VolarFocusOverlay`. Reads all
 /// state from `AppState` via the environment (frozen contracts, spec §4) instead of taking props:
 /// the app only ever has one `AppState` instance, injected at the scene root.
@@ -47,25 +90,39 @@ struct FocusOverlay: View {
             goToNext()
             return .handled
         }
+        // Opus, 2026-08-19 follow-up: pins the WHOLE overlay subtree — including the four banners
+        // shared with `TodayView` (`SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/
+        // `StuckNextActionBanner`/`StuckTimerBanner`, plus every `VolarColor.*` anywhere in this
+        // tree) — to the dark branch, regardless of the system's actual light/dark setting. This
+        // is the framework's own built-in "on-scrim vs on-panel" context switch: SwiftUI resolves
+        // every dynamic `Color`/`NSColor` against `\.colorScheme`, so overriding it here (outermost
+        // modifier, applies to the whole subtree) makes those same banners keep resolving normally
+        // when `TodayView` renders them — this override never reaches that call site. Cheaper than
+        // threading an `onScrim` flag through both files. See `FocusInk`'s doc comment below for
+        // why the pinned constants stay anyway.
+        .environment(\.colorScheme, .dark)
     }
 
     // MARK: - Layout
 
     private func overlayContent(task: TaskItem, openTasks: [TaskItem], index: Int) -> some View {
         ZStack {
-            // Heavy dark glass: `.ultraThinMaterial` + a dark tint layered on top. Tint uses the
-            // `bg` token (not a hardcoded literal) so it tracks the palette automatically; see
-            // `FullScreenTakeoverWindow.swift` for the matching treatment.
+            // Heavy dark glass: `.ultraThinMaterial` + a dark tint layered on top. Pinned to
+            // `FocusInk.scrim` (a fixed dark hex), NOT the dynamic `VolarColor.bg` token — `bg`
+            // turns WHITE in light mode as of RETHEME 4, which would turn "tắt đèn để tập trung"
+            // into a bright wash instead of a dark one. See `FocusInk`'s doc comment above for the
+            // full reasoning; `FullScreenTakeoverWindow.swift` pins the same way for the same
+            // reason.
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .overlay(VolarColor.bg.opacity(0.78))
+                .overlay(FocusInk.scrim.opacity(0.78))
 
             VStack(spacing: 0) {
                 Text(appState.focusPaused ? "Paused" : "Focus")
                     .font(.system(size: 11, weight: .medium))
                     .tracking(1.98) // 0.18em @ 11pt
                     .textCase(.uppercase)
-                    .foregroundStyle(VolarColor.textMut)
+                    .foregroundStyle(FocusInk.textMut) // on the scrim — pinned ink, see `FocusInk`
                     .padding(.bottom, 10)
 
                 Text(formattedTime(appState.focusSecondsLeft))
@@ -131,7 +188,7 @@ struct FocusOverlay: View {
         let frac = min(max(Double(appState.focusSecondsLeft) / Double(focusTotalSeconds), 0), 1)
         return ZStack(alignment: .leading) {
             RoundedRectangle(cornerRadius: 1)
-                .fill(VolarColor.veil(0.10))
+                .fill(FocusInk.veil(0.10)) // on the scrim — pinned ink, see `FocusInk`
                 .frame(width: total, height: 2)
             RoundedRectangle(cornerRadius: 1)
                 .fill(timerColor)
@@ -146,7 +203,7 @@ struct FocusOverlay: View {
                 .font(.system(size: 23, weight: .medium))
                 .tracking(-0.345) // -0.015em @ 23pt
                 .multilineTextAlignment(.center)
-                .foregroundStyle(VolarColor.textPri)
+                .foregroundStyle(FocusInk.text) // on the scrim — pinned ink, see `FocusInk`
 
             HStack(spacing: 8) {
                 Circle().fill(priorityColor(task.priority)).frame(width: 5, height: 5)
@@ -165,7 +222,7 @@ struct FocusOverlay: View {
                 }
             }
             .font(.system(size: 12))
-            .foregroundStyle(VolarColor.textSec)
+            .foregroundStyle(FocusInk.textSec) // on the scrim — pinned ink, see `FocusInk`
 
             // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain here — this block through
             // `switchButton` below has not been compiled, run, or seen on screen. Needs a Mac visual
@@ -185,12 +242,12 @@ struct FocusOverlay: View {
                     + Text("\(progress.total)").font(Font.volarMono(size: 11.5).monospacedDigit())
                     + Text(" steps done").font(.system(size: 11.5))
                 )
-                    .foregroundStyle(VolarColor.textMut)
+                    .foregroundStyle(FocusInk.textMut) // on the scrim — pinned ink, see `FocusInk`
             }
             if let resumeNote = task.resumeNote, !resumeNote.isEmpty {
                 Text(resumeNote)
                     .font(.system(size: 12))
-                    .foregroundStyle(VolarColor.textMut)
+                    .foregroundStyle(FocusInk.textMut) // on the scrim — pinned ink, see `FocusInk`
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .padding(.top, 2)
@@ -199,7 +256,7 @@ struct FocusOverlay: View {
                 Text("\u{201C}\(transcript)\u{201D}")
                     .font(.system(size: 12))
                     .italic()
-                    .foregroundStyle(VolarColor.textMut)
+                    .foregroundStyle(FocusInk.textMut) // on the scrim — pinned ink, see `FocusInk`
                     .multilineTextAlignment(.center)
                     .lineLimit(2)
                     .padding(.top, 2)
@@ -234,6 +291,10 @@ struct FocusOverlay: View {
             appState.completeFocusTask(task.id)
         } label: {
             HStack(spacing: 8) {
+                // Hardcoded `.white`, not a token — intentional: this icon/text sits on
+                // `accent.solid`'s own filled pill, not directly on the scrim, and `accent.solid`'s
+                // light+dark variants are both tuned in `Theme.swift` to hit ≥6:1 contrast with
+                // white text specifically, so white text stays correct in either appearance.
                 VolarIcon(.check, size: 13, color: .white, weight: .semibold)
                 Text("Mark done")
             }
@@ -261,13 +322,17 @@ struct FocusOverlay: View {
             Text("Switch")
                 .font(.system(size: 13, weight: .medium))
                 .tracking(-0.065) // -0.005em @ 13pt
-                .foregroundStyle(VolarColor.textPri)
+                .foregroundStyle(FocusInk.text) // on the scrim — pinned ink, see `FocusInk`
                 .padding(.horizontal, 20)
                 .padding(.vertical, 9)
+                // `.background` below is chained on the Button, outside this label — without this,
+                // the tappable region is just the text glyphs, not the full padded/bordered pill
+                // that's visibly the button (luật 2026-08-09, clickable-area-covers-visible-area).
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(VolarColor.card)
-        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(VolarColor.border, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(FocusInk.border, lineWidth: 0.5))
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .opacity(appState.canSwitchFocusTask ? 1 : 0.4)
         .disabled(!appState.canSwitchFocusTask)
@@ -288,13 +353,16 @@ struct FocusOverlay: View {
             Text("Stuck?")
                 .font(.system(size: 13, weight: .medium))
                 .tracking(-0.065) // -0.005em @ 13pt
-                .foregroundStyle(VolarColor.textPri)
+                .foregroundStyle(FocusInk.text) // on the scrim — pinned ink, see `FocusInk`
                 .padding(.horizontal, 20)
                 .padding(.vertical, 9)
+                // Same clickable-area fix as `switchButton` right above — `.background` is chained
+                // outside this label.
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(VolarColor.card)
-        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(VolarColor.border, lineWidth: 0.5))
+        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(FocusInk.border, lineWidth: 0.5))
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .popover(isPresented: Binding(
             get: { appState.stuckPickerTask?.id == task.id },
@@ -328,7 +396,7 @@ struct FocusOverlay: View {
                 Text("\(index + 1) of \(openTasks.count)")
                     .font(Font.volarMono(size: 12))
                     .monospacedDigit()
-                    .foregroundStyle(VolarColor.textSec)
+                    .foregroundStyle(FocusInk.textSec) // on the scrim — pinned ink, see `FocusInk`
                     .frame(minWidth: 52)
                 FocusRoundBtn(icon: .chevron, title: "Next task (→)", disabled: index >= openTasks.count - 1) {
                     goToNext()
@@ -338,7 +406,7 @@ struct FocusOverlay: View {
                 Text("\(openTasks.count)").font(Font.volarMono(size: 11).monospacedDigit())
                 + Text(" task\(openTasks.count == 1 ? "" : "s") left today").font(.system(size: 11))
             )
-                .foregroundStyle(VolarColor.textMut)
+                .foregroundStyle(FocusInk.textMut) // on the scrim — pinned ink, see `FocusInk`
         }
     }
 
@@ -358,18 +426,25 @@ struct FocusOverlay: View {
         return String(format: "%d:%02d", clamped / 60, clamped % 60)
     }
 
+    /// The 76pt countdown digits, on the scrim — `.high`/`.med` pinned via `FocusInk` (see its doc
+    /// comment) since the dynamic `VolarColor` versions swing toward near-black in light mode.
+    /// `accent.solid` (the calm-state branch) is deliberately left DYNAMIC, not pinned: it's a
+    /// saturated purple in both appearances (`#8944AB` light / `#BF5AF2` dark, `Theme.swift`), so
+    /// it never approaches the near-black-on-near-black failure this file is guarding against —
+    /// only its vividness shifts slightly with system appearance, which is a minor, out-of-scope
+    /// polish item, not a legibility bug.
     private var timerColor: Color {
         let s = appState.focusSecondsLeft
-        if s <= 60 { return VolarColor.high }
-        if s <= 300 { return VolarColor.med }
+        if s <= 60 { return FocusInk.high }
+        if s <= 300 { return FocusInk.med }
         return accent.solid
     }
 
     private func priorityColor(_ priority: Priority) -> Color {
         switch priority {
-        case .high: return VolarColor.high
-        case .medium: return VolarColor.med
-        case .low: return VolarColor.low
+        case .high: return FocusInk.high
+        case .medium: return FocusInk.med
+        case .low: return FocusInk.low
         }
     }
 
@@ -401,13 +476,21 @@ private struct FocusRoundBtn: View {
 
     var body: some View {
         Button(action: action) {
+            // Hardcoded `Color.white`, not a token — correct as-is: this round button always sits
+            // directly on `FocusOverlay`'s dark scrim (topRightButtons/bottomNav), never on a
+            // light panel, so it needs the same fixed-bright treatment as `FocusInk` right above —
+            // it just doesn't need the enum since this is the file's only caller.
             VolarIcon(icon, size: 12, color: Color.white.opacity(0.7), weight: .regular)
                 .frame(width: 30, height: 30)
+                // `.background`/`.overlay` below are chained on the Button, outside this label —
+                // without this, the tappable region is just the icon glyph, not the full 30x30
+                // circle that's visibly the button (luật 2026-08-09).
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(isHovering && !disabled ? VolarColor.veil(0.12) : VolarColor.veil(0.06))
+        .background(isHovering && !disabled ? FocusInk.veil(0.12) : FocusInk.veil(0.06))
         .clipShape(Circle())
-        .overlay(Circle().stroke(VolarColor.veil(0.10), lineWidth: 0.5))
+        .overlay(Circle().strokeBorder(FocusInk.veil(0.10), lineWidth: 0.5))
         .opacity(disabled ? 0.3 : 1)
         .disabled(disabled)
         .help(title)
@@ -427,6 +510,17 @@ private struct FocusRoundBtn: View {
 /// red/warning styling. Declining ("Not now") just closes it — `AppState.switchBreakdownOffered`
 /// already recorded this task as offered the moment the banner appeared, so it never asks again for
 /// this task, even on a 4th/5th switch.
+///
+/// This view deliberately keeps DYNAMIC `VolarColor` tokens (not `FocusInk`) because `TodayView`'s
+/// hero card above also renders it on a normal, appearance-following surface — pinning ink here to
+/// suit `FocusOverlay`'s dark scrim would've broken it there. GAP CLOSED (Opus follow-up,
+/// 2026-08-19): `FocusOverlay.body` now sets `.environment(\.colorScheme, .dark)` on its whole
+/// subtree, so when THIS view renders inside `FocusOverlay` its `VolarColor.*` tokens (including
+/// the "Split it up" button's `textPri`) resolve against the dark branch automatically, same as
+/// everywhere else on that scrim — no change needed here. When `TodayView` renders this same view,
+/// no such override is in effect, so it still tracks the real system appearance there. See
+/// `FocusInk`'s doc comment in this file for why the pinned constants stay as a build-unverified
+/// fallback regardless.
 struct SwitchBreakdownSuggestionBanner: View {
     @Environment(AppState.self) private var appState: AppState
     let task: TaskItem
@@ -461,7 +555,7 @@ struct SwitchBreakdownSuggestionBanner: View {
         .background(VolarColor.card)
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(VolarColor.border, lineWidth: 0.5)
+                .strokeBorder(VolarColor.border, lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
@@ -520,6 +614,14 @@ struct StuckReasonPicker: View {
 /// behavior, and extracting it changes NOTHING about how `StuckDreadBanner`/`StuckTimerBanner`
 /// already looked or behaved (same padding/background/overlay/clipShape values as before, just
 /// named once).
+///
+/// `VolarColor.border` here (and `.textPri`/`.textSec`/`.textMut` inside `StuckDreadBanner`/
+/// `StuckNextActionBanner`/`StuckTimerBanner`, the only callers) stays DYNAMIC, not `FocusInk` —
+/// same reasoning as `SwitchBreakdownSuggestionBanner`'s doc comment above: these three are shared
+/// verbatim with `TodayView`'s hero card. GAP CLOSED the same way: `FocusOverlay.body`'s
+/// `.environment(\.colorScheme, .dark)` override resolves every `VolarColor.*` here to the dark
+/// branch when rendered inside `FocusOverlay`, while `TodayView` (no such override) still gets the
+/// real system appearance.
 private func stuckCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
     content()
         .padding(.horizontal, 14)
@@ -528,7 +630,7 @@ private func stuckCard<Content: View>(@ViewBuilder _ content: () -> Content) -> 
         .background(VolarColor.card)
         .overlay(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .stroke(VolarColor.border, lineWidth: 0.5)
+                .strokeBorder(VolarColor.border, lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
 }

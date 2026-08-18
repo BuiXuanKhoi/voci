@@ -155,37 +155,68 @@ private struct TakeoverContentView: View {
 
     @FocusState private var isFocused: Bool
 
+    /// Fixed "always-dark" ink for content painted directly on this view's scrim, mirroring
+    /// `FocusOverlay.swift`'s own `FocusInk` (same reasoning, same values — `VolarColor`'s DARK
+    /// branch, `Shared/Design/Theme.swift`). DECISION (this task, 2026-08-19, spec 009 light-mode
+    /// pass): this screen's dark tint stays dark in BOTH system appearances — it's the same
+    /// "screen is now about one thing" full-screen takeover family as `FocusOverlay`, and a pale
+    /// scrim doesn't serve an urgent deadline notice any better than it serves Focus mode. `bg`/
+    /// `textPri`/`textSec`/`textMut`/`veil(_:)` are dynamic as of RETHEME 4 and flip toward
+    /// near-black in light mode, which on a still-dark scrim means invisible text/chrome — hence
+    /// these pinned constants instead. `TakeoverContentView` is `private` to this file and used
+    /// nowhere else, so there is no shared-component conflict to flag here (unlike
+    /// `FocusOverlay.swift`'s `SwitchBreakdownSuggestionBanner`/stuck banners).
+    ///
+    /// ponytail: theoretically redundant now that `body` also sets
+    /// `.environment(\.colorScheme, .dark)` on the whole subtree below — same reasoning as
+    /// `FocusOverlay.swift`'s `FocusInk`. Kept as a build-unverified fallback (no Swift toolchain
+    /// on this machine, `.environment` override never run once) — delete only after a Mac build
+    /// visually confirms this takeover still reads correctly with the system in light mode.
+    private enum TakeoverInk {
+        static let text = Color(volar: 0xF2F2F7)
+        static let textSec = Color(volar: 0x98989D)
+        static let textMut = Color(volar: 0x7C7C80)
+        static func veil(_ opacity: Double) -> Color { Color.white.opacity(opacity) }
+        static let scrim = Color(volar: 0x1C1C1E)
+    }
+
     var body: some View {
         ZStack {
             // Same heavy dark glass treatment `FocusOverlay.swift` already uses for its own
             // fullscreen one-task surface, so this reads as the same family of "the whole screen
-            // is now about one thing" moment rather than a novel visual language. Tint uses the
-            // `bg` token (not a hardcoded literal) so it tracks the palette automatically.
+            // is now about one thing" moment rather than a novel visual language. Pinned to
+            // `TakeoverInk.scrim` (fixed dark hex), NOT the dynamic `VolarColor.bg` token — `bg`
+            // turns WHITE in light mode as of RETHEME 4; see `TakeoverInk`'s doc comment above.
             Rectangle()
                 .fill(.ultraThinMaterial)
-                .overlay(VolarColor.bg.opacity(0.82))
+                .overlay(TakeoverInk.scrim.opacity(0.82))
                 .ignoresSafeArea()
 
             VStack(spacing: 22) {
                 Text("DEADLINE")
                     .font(.system(size: 12, weight: .medium))
                     .tracking(2.0)
-                    .foregroundStyle(VolarColor.textMut)
+                    .foregroundStyle(TakeoverInk.textMut) // on the scrim — pinned ink, see `TakeoverInk`
 
                 Text(title)
                     .font(.system(size: 30, weight: .medium))
                     .multilineTextAlignment(.center)
-                    .foregroundStyle(VolarColor.textPri)
+                    .foregroundStyle(TakeoverInk.text) // on the scrim — pinned ink, see `TakeoverInk`
                     .frame(maxWidth: 640)
 
                 if let deadlineText {
                     Text(deadlineText)
                         .font(.system(size: 15))
-                        .foregroundStyle(VolarColor.textSec)
+                        .foregroundStyle(TakeoverInk.textSec) // on the scrim — pinned ink, see `TakeoverInk`
                 }
 
                 HStack(spacing: 14) {
                     Button(action: onDone) {
+                        // Hardcoded `.white`, not a token — intentional, same reasoning as
+                        // `FocusOverlay.swift`'s "Mark done" button: this text sits on
+                        // `VolarColor.done`'s own filled pill, not directly on the scrim, and
+                        // `done`'s light/dark variants (`Theme.swift`) are both medium-saturation
+                        // greens with plenty of contrast for white text in either appearance.
                         Text("Xong")
                             .font(.system(size: 16, weight: .medium))
                             .foregroundStyle(.white)
@@ -205,16 +236,16 @@ private struct TakeoverContentView: View {
                     Button(action: onSnooze) {
                         Text("Tôi thấy rồi — 10 phút nữa")
                             .font(.system(size: 16, weight: .medium))
-                            .foregroundStyle(VolarColor.textPri)
+                            .foregroundStyle(TakeoverInk.text) // on the scrim — pinned ink, see `TakeoverInk`
                             .padding(.horizontal, 28)
                             .padding(.vertical, 14)
                             // Cùng lý do với nút "Xong" ngay trên.
                             .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
-                    .background(VolarColor.veil(0.10))
+                    .background(TakeoverInk.veil(0.10)) // on the scrim — pinned ink, see `TakeoverInk`
                     .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).stroke(VolarColor.veil(0.14), lineWidth: 0.5))
+                    .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(TakeoverInk.veil(0.14), lineWidth: 0.5))
                     // Esc == snooze 10 (contract §C, explicit — "không có đường nào khiến user
                     // kẹt"). `.keyboardShortcut(.cancelAction)` on the real, visible button —
                     // NOT a separate invisible button/`.onExitCommand` — matching this repo's own
@@ -237,6 +268,13 @@ private struct TakeoverContentView: View {
         .focusEffectDisabled()
         .focused($isFocused)
         .onAppear { isFocused = true }
+        // Opus, 2026-08-19 follow-up (mirrors `FocusOverlay.swift`'s identical override): pins the
+        // whole subtree's dynamic colors to the dark branch regardless of system appearance. This
+        // view is `private` with no other caller, so there's no shared-component gap to close here
+        // — added anyway for the same belt-and-suspenders reason `TakeoverInk` stays below: a
+        // second, framework-level guarantee that this scrim reads correctly, in case any
+        // `VolarColor.*` ever gets added here later without a matching `TakeoverInk` entry.
+        .environment(\.colorScheme, .dark)
     }
 
     private var deadlineText: String? {

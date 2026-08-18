@@ -129,7 +129,13 @@ struct MenuBarLabel: View {
                 Circle()
                     .fill(VolarColor.nowAccent)
                     .frame(width: 6, height: 6)
-                    .overlay(Circle().stroke(Color.black.opacity(0.5), lineWidth: 0.5))
+                    // Was `Color.black.opacity(0.5)` — went invisible/wrong-polarity in light mode
+                    // (a status item's effective NSAppearance follows the *system menu bar*, and
+                    // `veil()` resolves through that same dynamic-NSColor mechanism, so it separates
+                    // the dot from the mic glyph correctly on both a light and a dark bar). No
+                    // `.clipShape` on this Circle, so `.stroke` (not `.strokeBorder`) stays correct —
+                    // the fill already IS the shape's bounds.
+                    .overlay(Circle().stroke(VolarColor.veil(0.5), lineWidth: 0.5))
                     .shadow(color: VolarColor.nowGlow, radius: 3)
                     .offset(x: 2, y: 2)
             }
@@ -162,6 +168,13 @@ struct MenuBarLabel: View {
     }
 }
 
+// NOTE (light-mode pass, specs/009): the two `Color.black` backgrounds below are Xcode-canvas-only
+// preview backdrops, not shipped UI — `MenuBarLabel`'s real `body` has no `.background` of its own
+// at all; NSStatusItem draws it directly onto the system menu bar, whose color is OS-controlled and
+// independent of the app's own light/dark appearance. Left as `Color.black` deliberately (approximates
+// the traditional dark menu bar this label was designed against) rather than swapped for a
+// `VolarColor` token, since a token would just track the *app's* appearance, not the bar's — out of
+// scope for the light-mode retheme.
 #Preview("Idle") {
     MenuBarLabel()
         .environment(AppState())

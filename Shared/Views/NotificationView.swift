@@ -67,6 +67,10 @@ struct NotificationView: View {
                 .foregroundStyle(solid ? accentColors.solid : VolarColor.textPri)
                 .frame(maxWidth: .infinity)
                 .frame(height: 28)
+                // `.plain` + `.background` outside the Button means the tap target defaults to the
+                // Text's tight glyph bounds, not the visually-filled pill — `.contentShape` makes
+                // the whole frame hit-testable (project rule: vùng bấm phải phủ đúng vùng nhìn thấy).
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(solid ? accentColors.surface : VolarColor.veil(0.08))
@@ -78,6 +82,10 @@ struct NotificationView: View {
     }
 }
 
+// NOTE (light-mode pass, specs/009): this `Color.black` is an Xcode-canvas-only preview backdrop —
+// the real toast's own background is already theme-correct (`.volarGlass(tint: VolarColor.surfaceHi)`
+// on `body` above), so there is no shipped hardcoded black here. Left as-is rather than swapped to
+// `VolarColor.bg` since it's dev-only and out of scope for this pass.
 #Preview {
     NotificationView()
         .environment(AppState())
