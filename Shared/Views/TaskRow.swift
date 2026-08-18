@@ -86,8 +86,15 @@ struct TaskRow: View {
     /// re-grepped `AppState` for a setter that takes a target task id: only `switchDashboardActiveTask()`
     /// exists, and it takes no id, it just hands the spotlight to whatever `nextSwitchTarget`
     /// computes — there's no "make THIS row active" entry point to wire a Start button to.
-    /// `start`/`defer`/`snooze`/`postpone`/`reschedule` status-setters: none exist; `triageDefer(_:)`
-    /// is inbox-triage-only state, not a general row action. Reported, not invented.
+    /// `start`/`snooze`/`postpone`/`reschedule` status-setters: none exist either. Reported, not
+    /// invented.
+    ///
+    /// A "Defer" button was considered and DROPPED by anh Khôi (2026-08-19). Do not re-add it: the
+    /// app already says "not now" in two other places (`SweepView`'s Skip, `triageDefer(_:)` in the
+    /// inbox flow) and a third spelling of the same idea is how a user stops being able to predict
+    /// what any of them does. If deferring ever gets built, it replaces one of those two rather
+    /// than joining them — and the mechanism already exists (`VolarCore.Condition.afterDate`, which
+    /// the engine honors and the blocked chip above already renders), so it needs no new concept.
     ///
     /// Icon: `.sparkle` is reused from the Pro/AI CTA elsewhere in the sidebar, which isn't a
     /// perfect semantic match for "split into steps" — but `VolarIconName` (not owned by this file)

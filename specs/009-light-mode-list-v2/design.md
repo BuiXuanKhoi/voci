@@ -217,7 +217,8 @@ triệu chứng anh Khôi thấy.
    icon khoá; nội dung lấy từ condition (`.taskDone` → "chờ: <tên task>", `.afterDate` → "từ
    <giờ>", `.external` → chính `description`). Row bị chặn hiển thị ở opacity 0.55 nhưng **KHÔNG bị
    ẩn** — luật "app không được nuốt mất việc".
-4. **Quick-action khi hover** — góc phải row, chỉ hiện khi `isHovering`: Start, Defer, Break down.
+4. **Quick-action khi hover** — góc phải row, chỉ hiện khi `isHovering`: Start, Break down.
+   ("Defer" từng nằm trong danh sách này, anh Khôi **bỏ** 2026-08-19 — xem backlog.)
    Ba `Button(.plain)` + `.contentShape(Rectangle())` cuối label (luật vùng-bấm-phủ-vùng-nhìn).
    Context menu giữ nguyên, không bỏ.
 
