@@ -400,6 +400,7 @@ struct PopoverView: View {
             refConditionRows(draft)
             duplicateHintRow(draft)
             overdueAdvisoryRow(draft)
+            calendarConflictRow(draft)
             conflictAdvisoryRow(draft)
         }
         .opacity(draft.isIncluded ? 1 : 0.45)
@@ -484,6 +485,25 @@ struct PopoverView: View {
         formatter.unitsStyle = .short
         let relative = formatter.localizedString(for: suggestion.originalDeadline, relativeTo: Date())
         return "Was due \(relative)"
+    }
+
+    /// specs/010-calendar-and-hard-deadlines/design.md §2.4(a): the highest-value warning in the
+    /// whole feature — catching "that's when Hạnh has a meeting" while the user is still looking
+    /// at the confirm card is far cheaper than letting them discover it at 2:25. `ConfirmDraft.
+    /// calendarConflict` is already a fully-formatted display string ("14:00–15:00 · Team sync"),
+    /// computed once in `buildConfirmDrafts` — same "never recomputed per render" convention as
+    /// `overdueSuggestion`/`conflicts` right above/below. Deliberately calm, same register as
+    /// `overdueAdvisoryRow`: `textSec`, no icon, no dismiss action (there's nothing to fix from
+    /// here — it's information, not a nudge with a one-tap resolution).
+    @ViewBuilder
+    private func calendarConflictRow(_ draft: ConfirmDraft) -> some View {
+        if let calendarConflict = draft.calendarConflict {
+            Text(calendarConflict)
+                .font(.system(size: 11.5))
+                .foregroundStyle(VolarColor.textSec)
+                .lineLimit(1)
+                .padding(.top, 2)
+        }
     }
 
     /// T074: AT MOST ONE calm advisory line — never a dialog, never a red/shame color (FR-036),

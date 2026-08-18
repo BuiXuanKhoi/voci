@@ -318,7 +318,8 @@ struct TodayView: View {
                         tasks: laterListTasks,
                         rowGap: appState.density.rowGap,
                         expanded: $laterExpanded,
-                        startIndex: 3
+                        startIndex: 3,
+                        alwaysVisibleKind: .hard
                     )
                 }
 
@@ -1261,6 +1262,36 @@ private struct CollapsibleTaskSection: View {
     /// drawers whose tasks aren't part of the ranked open-task sequence — the Completed call site
     /// never passes this, since done tasks have no rank/number.
     var startIndex: Int? = nil
+    /// specs/010-calendar-and-hard-deadlines/design.md §3.2 row 3: a `.hard` deadline must never
+    /// end up in the collapsed/hidden part of a drawer — a real, penalty-backed deadline hidden
+    /// by the app is exactly the failure mode this whole feature exists to stop (design.md §3.0:
+    /// "một hạn có chế tài mà bị app giấu đi"). `nil` (default, the Completed call site) leaves
+    /// every row inside the normal collapse/scroll behavior, unchanged — the "Later" call site
+    /// below passes `.hard` so those rows render above the fold whether `expanded` is on or off.
+    var alwaysVisibleKind: DeadlineKind? = nil
+
+    /// `tasks`, paired with each element's TRUE position in `tasks` (not the filtered subset's
+    /// local index) — both `pinnedRows`/`collapsibleRows` below read `offset` off of this so a
+    /// row's rank number (`startIndex + offset`) never shifts just because pinning moved it out
+    /// of the scrollable half.
+    private var indexedTasks: [(offset: Int, task: TaskItem)] {
+        // `.enumerated()`'s own element labels are `(offset:element:)`, not `(offset:task:)` —
+        // rebuilding each pair as an explicit tuple literal here (rather than `Array(tasks.
+        // enumerated())` directly) is what makes the label rename to `task` actually typecheck.
+        tasks.enumerated().map { (offset: $0.offset, task: $0.element) }
+    }
+
+    /// Always rendered, regardless of `expanded` — see `alwaysVisibleKind`'s doc comment.
+    private var pinnedRows: [(offset: Int, task: TaskItem)] {
+        guard let alwaysVisibleKind else { return [] }
+        return indexedTasks.filter { $0.task.deadlineKind == alwaysVisibleKind }
+    }
+
+    /// Everything NOT pinned — these are the only rows subject to `expanded`/the scroll cap.
+    private var collapsibleRows: [(offset: Int, task: TaskItem)] {
+        guard let alwaysVisibleKind else { return indexedTasks }
+        return indexedTasks.filter { $0.task.deadlineKind != alwaysVisibleKind }
+    }
 
     /// Roughly how many rows are visible before the drawer's own internal scroll takes over —
     /// "ranked, capped list — never a wall" without actually dropping any task from the data
@@ -1271,37 +1302,51 @@ private struct CollapsibleTaskSection: View {
     private let maxVisibleRows: CGFloat = 6
     private let approxRowHeight: CGFloat = 56
 
+    /// Shared by both the always-visible pinned rows and the collapsible scroll region below, so
+    /// the two never drift in how they build a `TaskRow` from an (offset, task) pair.
+    @ViewBuilder
+    private func row(_ offset: Int, _ task: TaskItem) -> some View {
+        // List v2 (design.md §5.6.1/§5.6.2, coordinator follow-up 2026-08-19): `rowIndex` is this
+        // row's 1-based engine-order position (nil when `startIndex` is nil, e.g. Completed, which
+        // never shows a reason). NOW (1) and NEXT (2) already show their own reason line via
+        // bespoke views above (`nowSpotlight`/`NextPeekRow`), not `TaskRow` — so for the "Later"
+        // call site (`startIndex: 3`), the reason cutoff is 5, i.e. the first 3 rows OF THIS
+        // DRAWER (global index 3, 4, 5). Below that it's noise, per design.md's "chỉ 3 row đầu".
+        let rowIndex = startIndex.map { $0 + offset }
+        TaskRow(
+            task: task,
+            isActive: false,
+            index: rowIndex,
+            reason: (rowIndex ?? .max) <= 5 ? volarRankReason(for: task) : nil
+        )
+        .transition(rowTransition)
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
 
-            if expanded && !tasks.isEmpty {
+            // Pinned rows (`.hard` deadlines, when `alwaysVisibleKind` is set) render OUTSIDE the
+            // `expanded` gate below — see `alwaysVisibleKind`'s doc comment.
+            if !pinnedRows.isEmpty {
+                VStack(spacing: rowGap) {
+                    ForEach(pinnedRows, id: \.task.id) { offset, task in row(offset, task) }
+                }
+                .padding(.horizontal, 14)
+                .padding(.top, 4)
+                .padding(.bottom, collapsibleRows.isEmpty ? 14 : 0)
+            }
+
+            if expanded && !collapsibleRows.isEmpty {
                 ScrollView {
                     VStack(spacing: rowGap) {
-                        // List v2 (design.md §5.6.1/§5.6.2, coordinator follow-up 2026-08-19):
-                        // `rowIndex` is this row's 1-based engine-order position (nil when
-                        // `startIndex` is nil, e.g. Completed, which never shows a reason).
-                        // NOW (1) and NEXT (2) already show their own reason line via bespoke
-                        // views above (`nowSpotlight`/`NextPeekRow`), not `TaskRow` — so for the
-                        // "Later" call site (`startIndex: 3`), the reason cutoff is 5, i.e. the
-                        // first 3 rows OF THIS DRAWER (global index 3, 4, 5). Below that it's
-                        // noise, per design.md's "chỉ 3 row đầu".
-                        ForEach(Array(tasks.enumerated()), id: \.element.id) { offset, task in
-                            let rowIndex = startIndex.map { $0 + offset }
-                            TaskRow(
-                                task: task,
-                                isActive: false,
-                                index: rowIndex,
-                                reason: (rowIndex ?? .max) <= 5 ? volarRankReason(for: task) : nil
-                            )
-                            .transition(rowTransition)
-                        }
+                        ForEach(collapsibleRows, id: \.task.id) { offset, task in row(offset, task) }
                     }
                     .padding(.horizontal, 14)
-                    .padding(.top, 4)
+                    .padding(.top, pinnedRows.isEmpty ? 4 : 0)
                     .padding(.bottom, 14)
                 }
-                .frame(maxHeight: min(CGFloat(tasks.count), maxVisibleRows) * (approxRowHeight + rowGap))
+                .frame(maxHeight: min(CGFloat(collapsibleRows.count), maxVisibleRows) * (approxRowHeight + rowGap))
             }
         }
         .background(VolarColor.surface)

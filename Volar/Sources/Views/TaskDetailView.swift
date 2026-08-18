@@ -72,6 +72,7 @@ private struct TaskDetailEditor: View {
     @State private var detailsBuffer: String
     @State private var priorityBuffer: Priority
     @State private var deadlineBuffer: Date?
+    @State private var deadlineKindBuffer: DeadlineKind
     @State private var startTimeBuffer: Date?
     @State private var durationBuffer: Int?
     @State private var remindPeriodBuffer: TimeInterval?
@@ -101,6 +102,7 @@ private struct TaskDetailEditor: View {
         _detailsBuffer = State(initialValue: task.details)
         _priorityBuffer = State(initialValue: task.priority)
         _deadlineBuffer = State(initialValue: task.deadline)
+        _deadlineKindBuffer = State(initialValue: task.deadlineKind)
         _startTimeBuffer = State(initialValue: task.startTime)
         _durationBuffer = State(initialValue: task.durationMinutes)
         _remindPeriodBuffer = State(initialValue: task.reminderOverride?.remindPeriod)
@@ -111,6 +113,11 @@ private struct TaskDetailEditor: View {
             VStack(alignment: .leading, spacing: 14) {
                 header
                 metaRow
+                // design.md §3.1 — meaningless without a deadline to tag, so it only appears once
+                // there is one (same guard `TaskItem.deadlineKind`'s own doc comment calls for).
+                if deadlineBuffer != nil {
+                    deadlineKindSection
+                }
                 descriptionSection
                 dependencySection
                 actions
@@ -161,6 +168,7 @@ private struct TaskDetailEditor: View {
             || detailsBuffer != task.details
             || priorityBuffer != task.priority
             || deadlineBuffer != task.deadline
+            || deadlineKindBuffer != task.deadlineKind
             || startTimeBuffer != task.startTime
             || durationBuffer != task.durationMinutes
             || remindPeriodBuffer != task.reminderOverride?.remindPeriod
@@ -173,6 +181,7 @@ private struct TaskDetailEditor: View {
             priority: priorityBuffer,
             startTime: startTimeBuffer,
             deadline: deadlineBuffer,
+            deadlineKind: deadlineKindBuffer,
             durationMinutes: durationBuffer,
             remindPeriod: remindPeriodBuffer
         )
@@ -293,6 +302,33 @@ private struct TaskDetailEditor: View {
                 set: { deadlineBuffer = $0; commitIfChanged() }
             )
         )
+    }
+
+    /// specs/010-calendar-and-hard-deadlines/design.md §3.1/§3.5 — manual-only marker for
+    /// whether `deadline` is a plan the user can freely move (`.soft`, default) or one an
+    /// outside party enforces (`.hard`). Label deliberately avoids the "hard deadline" jargon —
+    /// what the user actually needs to recognize is "did someone else set this, and is there a
+    /// real consequence if I miss it," which is the distinction `SweepView`'s "Change due date"
+    /// (instead of "Skip") acts on for `.hard` tasks. Commits through the same
+    /// `commitIfChanged()` path as every other buffer here — a `Toggle` flip is mechanism branch
+    /// (a), same as the priority `Menu`, so it saves immediately, no separate Save step.
+    private var deadlineKindSection: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Toggle(isOn: Binding(
+                get: { deadlineKindBuffer == .hard },
+                set: { deadlineKindBuffer = $0 ? .hard : .soft; commitIfChanged() }
+            )) {
+                Text("Someone else set this deadline")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(VolarColor.textSec)
+            }
+            .toggleStyle(.switch)
+
+            Text("Missing it has a real consequence — Volar won't quietly push it to tomorrow for you.")
+                .font(.system(size: 11))
+                .foregroundStyle(VolarColor.textMut)
+                .fixedSize(horizontal: false, vertical: true)
+        }
     }
 
     private var startTimeControl: some View {

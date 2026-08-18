@@ -242,7 +242,17 @@ struct TaskRow: View {
                 }
                 if !task.done, let reason, let reasonLabel = rankReasonLabel(reason) {
                     Text("·").opacity(0.4)
-                    Text(reasonLabel)
+                    // specs/010-calendar-and-hard-deadlines/design.md §3.2 row 2: a `.hard`
+                    // deadline that's overdue reads in `VolarColor.high` (muted terracotta —
+                    // still NOT `destruct` red, the anti-shame rule holds for both kinds); a
+                    // `.soft` overdue label keeps inheriting the subrow's own `textSec`, which
+                    // already equals `VolarColor.reschedule` (see that token's doc comment) —
+                    // so this `if` only ever touches the `.hard` case, `.soft` is unchanged.
+                    if case .overdue = reason, task.deadlineKind == .hard {
+                        Text(reasonLabel).foregroundStyle(VolarColor.high)
+                    } else {
+                        Text(reasonLabel)
+                    }
                 }
                 if let blockedLabel {
                     BlockedChip(text: blockedLabel)
@@ -256,12 +266,39 @@ struct TaskRow: View {
     @ViewBuilder
     private var trailing: some View {
         if let timeBadge = task.timeBadge, !task.done {
-            TimeBadge(timeBadge, filled: isActive)
+            if task.deadlineKind == .hard {
+                hardDeadlineBadge(timeBadge)
+            } else {
+                TimeBadge(timeBadge, filled: isActive)
+            }
         } else if task.done, let rawTimeLabel {
             Text(rawTimeLabel)
                 .font(Font.volarMono(size: 11))
                 .monospacedDigit()
                 .foregroundStyle(VolarColor.textMut)
         }
+    }
+
+    /// specs/010-calendar-and-hard-deadlines/design.md §3.2 row 1: `.hard`'s badge must read as a
+    /// DIFFERENT kind of mark than `.soft`'s `TimeBadge` — shape/weight, never color (the
+    /// anti-red-alarm rule: `VolarColor.destruct` stays reserved for the irreversible Delete
+    /// action only). Same footprint as `TimeBadge` (rounded rect, 22pt tall, mono digits) so the
+    /// trailing column doesn't jump around switching between the two, but filled with
+    /// `veil(0.10)` instead of the accent color and prefixed with a short "due" label instead of
+    /// relying on color/fill to say "this one's different".
+    private func hardDeadlineBadge(_ text: String) -> some View {
+        HStack(spacing: 4) {
+            Text("due")
+                .font(Font.volarMono(size: 9, weight: .semibold))
+                .tracking(0.3)
+            Text(text)
+                .font(Font.volarMono(size: 11.5, weight: .medium))
+                .monospacedDigit()
+        }
+        .foregroundStyle(VolarColor.textPri)
+        .padding(.horizontal, 9)
+        .frame(height: 22)
+        .background(VolarColor.veil(0.10))
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }
