@@ -22,13 +22,16 @@
 // design calls for. `TaskRow`/`Components.swift`/`AppState.swift` are all frozen — nothing outside
 // this file changed.
 import SwiftUI
+import VolarCore
 
 struct TodayView: View {
     @Environment(AppState.self) private var appState: AppState
 
-    /// NEW (retheme): "Later" drawer starts collapsed — deliberately toggled open, never a wall.
-    /// Pure presentation state.
-    @State private var laterExpanded = false
+    /// List v2 (design.md §5.7): "Later" starts with its first 5 rows already visible — a fully
+    /// collapsed drawer was part of why the screen read as near-empty. `CollapsibleTaskSection`'s
+    /// own `maxVisibleRows`/scroll cap still governs how many show once expanded; this only flips
+    /// the drawer's OWN default state.
+    @State private var laterExpanded = true
     /// NEW (retheme): "Completed" drawer, same collapsed-by-default convention as `laterExpanded`.
     @State private var completedExpanded = false
 
@@ -307,11 +310,15 @@ struct TodayView: View {
                 }
 
                 if !laterListTasks.isEmpty {
+                    // List v2 (design.md §5.6.1): NOW (`nowSpotlight`) and NEXT (`NextPeekRow`)
+                    // occupy engine-order positions 1 and 2 without a `TaskRow` of their own, so
+                    // this drawer's first row starts numbering at 3.
                     CollapsibleTaskSection(
                         title: "Later",
                         tasks: laterListTasks,
                         rowGap: appState.density.rowGap,
-                        expanded: $laterExpanded
+                        expanded: $laterExpanded,
+                        startIndex: 3
                     )
                 }
 
@@ -346,9 +353,13 @@ struct TodayView: View {
                 case .upcoming:
                     ForEach(appState.upcomingGroups) { group in
                         VStack(alignment: .leading, spacing: 6) {
-                            Text(group.header)
-                                .font(Font.volarMono(size: 11, weight: .medium))
-                                .foregroundStyle(VolarColor.textMut)
+                            // List v2 (design.md §5.4): every group-title label in this file is
+                            // 11pt/.semibold/uppercase/tracking+0.5/`textSec` — `textMut` (3.4:1)
+                            // is reserved for tertiary labels now, not section headers.
+                            Text(group.header.uppercased())
+                                .font(Font.volarMono(size: 11, weight: .semibold))
+                                .tracking(0.5)
+                                .foregroundStyle(VolarColor.textSec)
                             VStack(spacing: appState.density.rowGap) {
                                 ForEach(group.tasks) { task in
                                     TaskRow(task: task, isActive: false)
@@ -445,10 +456,17 @@ struct TodayView: View {
     private var nowSpotlight: some View {
         if let active = appState.dashboardActiveTask {
             VStack(spacing: 16) {
-                Text("◆ NOW")
+                // List v2 (design.md §5.3): "NOW" is a small chip, not a colored text label — the
+                // hero's saturation budget is spent on this chip + the 3px leading bar in
+                // `.background` below, never on a text color or a full-row fill.
+                Text("NOW")
                     .font(Font.volarMono(size: 11, weight: .semibold))
-                    .tracking(2.4)
-                    .foregroundStyle(VolarColor.nowAccent)
+                    .tracking(1.2)
+                    .foregroundStyle(VolarColor.bg)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 4)
+                    .background(VolarColor.nowAccent)
+                    .clipShape(Capsule())
 
                 Text(active.title)
                     .font(.system(size: 28, weight: .semibold))
@@ -457,6 +475,17 @@ struct TodayView: View {
                     .foregroundStyle(VolarColor.textPri)
                     .shadow(color: VolarColor.nowGlow, radius: 18)
                     .lineLimit(3)
+
+                // List v2 (design.md §5.6.1, coordinator follow-up 2026-08-19): NOW is the ONE
+                // place "why is this first" matters most, and it's bespoke (not `TaskRow`) so it
+                // never got a reason line in the first pass. Reuses `rankReasonLabel` from
+                // `Components.swift` (owned by another agent) rather than a second formatter —
+                // same rule `TaskRow`'s own reason display follows.
+                if let label = rankReasonLabel(volarRankReason(for: active)) {
+                    Text(label)
+                        .font(.system(size: 12.5))
+                        .foregroundStyle(VolarColor.textSec)
+                }
 
                 nowChips(for: active)
 
@@ -607,7 +636,18 @@ struct TodayView: View {
             // card fill. UNVERIFIED: layering reasoned from SwiftUI's `.background`/`.overlay`
             // stacking order, not rendered on this machine (Windows, no Xcode).
             .volarSpotlight(isActive: true)
-            .background(VolarColor.bg)
+            // List v2 (design.md §5.3/§3.4): `nowSurface` (accent pha ~8% into `bg`), not a solid
+            // `nowAccent` fill — white text on `#BF5AF2` is only 3.1:1, and a large saturated
+            // block would break the "one saturated point on screen" rule the chip above already
+            // spends. The 3px leading bar is the row's ONLY other saturated pixel. Put inside this
+            // same `.background` (not a separate `.overlay`) so it gets clipped to the rounded
+            // corners together with the fill below, instead of squaring off past them.
+            .background(
+                ZStack(alignment: .leading) {
+                    VolarColor.nowSurface
+                    Rectangle().fill(VolarColor.nowAccent).frame(width: 3)
+                }
+            )
             .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
@@ -1120,16 +1160,27 @@ private struct NextPeekRow: View {
             checkbox
 
             VStack(alignment: .leading, spacing: 3) {
+                // List v2 (design.md §5.4): same header spec as `CollapsibleTaskSection`'s own
+                // title label — 11pt/.semibold/uppercase/tracking+0.5/`textSec`.
                 Text("NEXT")
-                    .font(Font.volarMono(size: 10, weight: .medium))
-                    .tracking(1.8)
-                    .foregroundStyle(VolarColor.textMut)
+                    .font(Font.volarMono(size: 11, weight: .semibold))
+                    .tracking(0.5)
+                    .foregroundStyle(VolarColor.textSec)
                 Text(task.title)
                     .font(.system(size: 14.5))
                     .foregroundStyle(task.done ? VolarColor.textMut : VolarColor.textSec)
                     .strikethrough(task.done, pattern: .solid, color: VolarColor.veil(0.25))
                     .lineLimit(1)
                     .truncationMode(.tail)
+                // List v2 (design.md §5.6.1, coordinator follow-up 2026-08-19): NEXT is the
+                // other bespoke (non-`TaskRow`) row, same reasoning as `nowSpotlight`'s reason
+                // line above — reuses `rankReasonLabel`, no second formatter.
+                if !task.done, let label = rankReasonLabel(volarRankReason(for: task)) {
+                    Text(label)
+                        .font(.system(size: 11.5))
+                        .foregroundStyle(VolarColor.textSec)
+                        .lineLimit(1)
+                }
             }
 
             Spacer(minLength: 8)
@@ -1177,6 +1228,24 @@ private struct NextPeekRow: View {
     }
 }
 
+/// List v2 (design.md §5.6.1/§6): the row-list "why does this rank here" reason — shared by
+/// `nowSpotlight`, `NextPeekRow`, and every `CollapsibleTaskSection` call site below, since NOW/
+/// NEXT/Later are the three places a reason line is asked for. Reuses `TaskItem.snapshot()` — the
+/// exact `TaskItem` -> `VolarCore.Task` mapping `AppState.eligibleOrder`
+/// (`Shared/App/AppState.swift`) already uses — instead of a second hand-rolled mapping; that
+/// duplication is exactly the mistake `AppState.eligibleOrder`'s own doc comment says the codebase
+/// already paid for once.
+///
+/// `now: Date()` read fresh on every call (coordinator follow-up 2026-08-19: checked for a shared
+/// clock first) — `AppState.clock` exists but is `private`, this file has no other view-level
+/// "now", and every caller here (`nowSpotlight`, `NextPeekRow` peek, the first 3 Later rows) is a
+/// small, infrequently-recomputed set, not a hot loop — so a fresh `Date()` per call is the
+/// simplest correct option, same as `AppState.eligibleOrder`'s own callers each pass their own
+/// `now`. Revisit only if `AppState` ever exposes a public `now`/tick for views generally.
+private func volarRankReason(for task: TaskItem) -> RankReason {
+    VolarCore.rankReason(for: task.snapshot(), now: Date(), calendar: .current)
+}
+
 /// NEW (retheme): the collapsed-by-default, capped "Later"/"Completed" drawer — deliberately
 /// toggled open rather than always rendering every row, so a long list never becomes the "30-row
 /// wall" the constitution rules out. Every row inside is a real `TaskRow`, so nothing about
@@ -1188,6 +1257,10 @@ private struct CollapsibleTaskSection: View {
     let tasks: [TaskItem]
     let rowGap: CGFloat
     @Binding var expanded: Bool
+    /// List v2 (design.md §5.6.1): 1-based engine-order index of `tasks[0]`. `nil` (default) for
+    /// drawers whose tasks aren't part of the ranked open-task sequence — the Completed call site
+    /// never passes this, since done tasks have no rank/number.
+    var startIndex: Int? = nil
 
     /// Roughly how many rows are visible before the drawer's own internal scroll takes over —
     /// "ranked, capped list — never a wall" without actually dropping any task from the data
@@ -1205,9 +1278,23 @@ private struct CollapsibleTaskSection: View {
             if expanded && !tasks.isEmpty {
                 ScrollView {
                     VStack(spacing: rowGap) {
-                        ForEach(tasks) { task in
-                            TaskRow(task: task, isActive: false)
-                                .transition(rowTransition)
+                        // List v2 (design.md §5.6.1/§5.6.2, coordinator follow-up 2026-08-19):
+                        // `rowIndex` is this row's 1-based engine-order position (nil when
+                        // `startIndex` is nil, e.g. Completed, which never shows a reason).
+                        // NOW (1) and NEXT (2) already show their own reason line via bespoke
+                        // views above (`nowSpotlight`/`NextPeekRow`), not `TaskRow` — so for the
+                        // "Later" call site (`startIndex: 3`), the reason cutoff is 5, i.e. the
+                        // first 3 rows OF THIS DRAWER (global index 3, 4, 5). Below that it's
+                        // noise, per design.md's "chỉ 3 row đầu".
+                        ForEach(Array(tasks.enumerated()), id: \.element.id) { offset, task in
+                            let rowIndex = startIndex.map { $0 + offset }
+                            TaskRow(
+                                task: task,
+                                isActive: false,
+                                index: rowIndex,
+                                reason: (rowIndex ?? .max) <= 5 ? volarRankReason(for: task) : nil
+                            )
+                            .transition(rowTransition)
                         }
                     }
                     .padding(.horizontal, 14)
@@ -1238,10 +1325,11 @@ private struct CollapsibleTaskSection: View {
 
     private var header: some View {
         HStack(spacing: 10) {
+            // List v2 (design.md §5.4): 11pt/.semibold/uppercase/tracking+0.5/`textSec`.
             Text(title.uppercased())
-                .font(Font.volarMono(size: 11, weight: .medium))
-                .tracking(1.5)
-                .foregroundStyle(VolarColor.textMut)
+                .font(Font.volarMono(size: 11, weight: .semibold))
+                .tracking(0.5)
+                .foregroundStyle(VolarColor.textSec)
             Text("\(tasks.count)")
                 .font(Font.volarMono(size: 11))
                 .foregroundStyle(VolarColor.textMut)

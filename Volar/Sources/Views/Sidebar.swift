@@ -117,9 +117,12 @@ struct Sidebar: View {
     @ViewBuilder
     private var sidebarBackground: some View {
         if appState.ambient != .none {
+            // Was `VolarColor.surface.opacity(0.45)` — a magic number duplicating what
+            // `GlassLevel.bgOpacity` already exists to express ("opacity of the ink tint layered
+            // over the system material"). Reusing it instead of inventing a second constant.
             Rectangle()
                 .fill(appState.glass.material)
-                .overlay(VolarColor.surface.opacity(0.45))
+                .overlay(VolarColor.surface.opacity(appState.glass.bgOpacity))
         } else {
             VolarColor.surface
         }
@@ -156,12 +159,15 @@ struct Sidebar: View {
         .frame(maxWidth: .infinity)
     }
 
+    // §5.4 (specs/009-light-mode-list-v2/design.md): 11pt/.semibold/uppercase/tracking+0.5/textSec.
+    // Was 10.5pt/.medium/textMut (3.4:1, below AA) — textMut is reserved for tertiary labels now,
+    // never section headers.
     private var focusSectionLabel: some View {
         Text("Focus")
-            .font(.system(size: 10.5, weight: .medium))
-            .tracking(0.735)
+            .font(.system(size: 11, weight: .semibold))
+            .tracking(0.5)
             .textCase(.uppercase)
-            .foregroundStyle(VolarColor.textMut)
+            .foregroundStyle(VolarColor.textSec)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 12)
             .padding(.top, 14)
@@ -203,11 +209,16 @@ struct Sidebar: View {
                 .lineSpacing(2)
         }
         .padding(10)
-        .background(VolarColor.veil(0.03))
+        // Was `VolarColor.veil(0.03)`, an ad hoc alpha. §3 has no named token for a static
+        // (always-on, non-hover) subtle box, so reusing `cardHover` — same "one low-alpha ink
+        // surface" the row hover uses (§5.2) — instead of inventing another one-off constant.
+        .background(VolarColor.cardHover)
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .overlay(
+            // `.strokeBorder`, not `.stroke`: after `.clipShape` above, `.stroke` draws centered
+            // on the path and the outer half gets clipped away — the known half-width-border bug.
             RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .stroke(VolarColor.border, lineWidth: 0.5)
+                .strokeBorder(VolarColor.border, lineWidth: 0.5)
         )
     }
 }
@@ -223,8 +234,9 @@ private struct CaptureButtonStyle: ButtonStyle {
             .background(accentColor.opacity(0.15))
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
+                // `.strokeBorder`, not `.stroke` — see `onDeviceFooter` comment above for why.
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(accentColor.opacity(configuration.isPressed ? 0.9 : 0.27), lineWidth: configuration.isPressed ? 1 : 0.5)
+                    .strokeBorder(accentColor.opacity(configuration.isPressed ? 0.9 : 0.27), lineWidth: configuration.isPressed ? 1 : 0.5)
             )
             .animation(VolarMotion.press, value: configuration.isPressed)
     }
@@ -249,9 +261,13 @@ private struct SidebarItem: View {
             HStack(spacing: 9) {
                 VolarIcon(icon, size: 14, color: active ? accentColors.solid : VolarColor.textSec)
                 Text(label)
-                    .font(.system(size: 13, weight: active ? .medium : .regular))
+                    .font(.system(size: 13, weight: active ? .semibold : .regular))
                     .tracking(-0.065)
-                    .foregroundStyle(active ? accentColors.solid : VolarColor.textPri)
+                    // §5.3: active label reads `textPri` (not accent-colored — the accent budget
+                    // goes to the icon + the left bar below, not the whole row). Inactive is
+                    // `textSec`, not `textPri`: it was backwards before this pass (inactive rows
+                    // were reading as bright as the header, active rows as dim as body text).
+                    .foregroundStyle(active ? VolarColor.textPri : VolarColor.textSec)
                     .lineLimit(1)
                 Spacer(minLength: 0)
                 if let count {
@@ -276,8 +292,25 @@ private struct SidebarItem: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .background(active ? accentColors.surface : (isHovering ? VolarColor.veil(0.04) : .clear))
+        // §5.3: active = solid `surfaceHi` fill (was `accentColors.surface`, an accent wash at
+        // .15 alpha — anh Khôi's "chìm vào giao diện" report). Inactive hover = `cardHover`, the
+        // one hover surface (§5.2), replacing the near-invisible ad hoc `veil(0.04)`.
+        .background(active ? VolarColor.surfaceHi : (isHovering ? VolarColor.cardHover : .clear))
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .overlay(alignment: .leading) {
+            if active {
+                // §5.3 left bar, 2px, `accentColors.solid` — this row's only saturated pixels.
+                // Bo tròn nhẹ (radius 1) + inset dọc 3pt thay vì cao sát mép trên/dưới: mép trên/
+                // dưới của row đã bo góc 5pt bởi `.clipShape` ở trên (mà bar này vẽ SAU, không bị
+                // clip theo), một thanh vuông góc cao đúng bằng chiều cao row sẽ tràn nhẹ ra ngoài
+                // đường bo đó ở hai đầu. Inset + bo nhẹ tránh phần tràn mà không cần tự vẽ lại toàn
+                // bộ shape của row.
+                RoundedRectangle(cornerRadius: 1, style: .continuous)
+                    .fill(accentColors.solid)
+                    .frame(width: 2)
+                    .padding(.vertical, 3)
+            }
+        }
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
     }
@@ -348,8 +381,9 @@ private struct ProSidebarRow: View {
             )
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
             .overlay(
+                // `.strokeBorder`, not `.stroke` — see `onDeviceFooter` comment above for why.
                 RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(accentColors.solid.opacity(isHovering ? 0.75 : 0.45), lineWidth: isHovering ? 1 : 0.75)
+                    .strokeBorder(accentColors.solid.opacity(isHovering ? 0.75 : 0.45), lineWidth: isHovering ? 1 : 0.75)
             )
             .onHover { isHovering = $0 }
             .animation(VolarMotion.hover, value: isHovering)

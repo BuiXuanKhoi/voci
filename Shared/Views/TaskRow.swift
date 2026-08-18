@@ -1,18 +1,30 @@
 // Sources/Views/TaskRow.swift — single task row (checkbox, title, priority/dur/frog subrow, time badge)
-// Ported from `design/volar-mac.jsx`'s `TaskRow`.
+// Ported from `design/volar-mac.jsx`'s `TaskRow`. List v2 (specs/009-light-mode-list-v2/design.md
+// §5): rows no longer carry their own background/border (§5.1) — hover and selection are the only
+// fills a row ever gets (§5.2/§5.3) — plus four additions (§5.6): rank index, rank-reason subrow
+// text, a blocked/waiting chip, and hover quick-actions.
 import SwiftUI
+import VolarCore
 
 struct TaskRow: View {
     let task: TaskItem
     let isActive: Bool
+    /// Position in the engine's ranked order (1-based), supplied by the caller — NOT `task.id`.
+    /// `nil` (default) opts a call site out of numbering entirely, same as before this pass.
+    let index: Int?
+    /// Why this task ranks where it does (`VolarCore.rankReason`), for the "3 lines" caller opts
+    /// into per design.md §5.6.2. `nil` (default) keeps every existing call site compiling as-is.
+    let reason: RankReason?
 
     @Environment(AppState.self) private var appState: AppState
     @State private var isHovering = false
     @GestureState private var isPressed = false
 
-    init(task: TaskItem, isActive: Bool) {
+    init(task: TaskItem, isActive: Bool, index: Int? = nil, reason: RankReason? = nil) {
         self.task = task
         self.isActive = isActive
+        self.index = index
+        self.reason = reason
     }
 
     private var accentColors: Accent { appState.accent.accent }
@@ -40,42 +52,108 @@ struct TaskRow: View {
         return deadline.formatted(.dateTime.hour().minute())
     }
 
+    /// §5.1/§5.2/§5.3: no chrome of its own — `cardHover` is the only fill an unselected row gets
+    /// (hover), `surfaceHi` the only fill a selected row gets. No more `card`/`rowBorderColor`.
     private var rowBackground: Color {
-        if isActive { return accentColors.surface }
-        return isHovering ? VolarColor.cardHover : VolarColor.card
+        if isActive { return VolarColor.surfaceHi }
+        return isHovering ? VolarColor.cardHover : .clear
     }
 
-    private var rowBorderColor: Color {
-        isActive ? accentColors.solid.opacity(0.25) : VolarColor.border
+    /// §5.3 "Selected (không phải NOW)" treatment: a solid 2px leading bar in the active accent —
+    /// NOT the NOW row's 3px `nowAccent` treatment, which is a different call site's concern.
+    @ViewBuilder
+    private var selectionBar: some View {
+        if isActive {
+            Rectangle()
+                .fill(accentColors.solid)
+                .frame(width: 2)
+        }
+    }
+
+    /// §5.6.1: fixed-width gutter so every open row's title lines up regardless of digit count.
+    /// Only ever placed in the tree when `index != nil` (see `body`) — an absent index must not
+    /// reserve a gap via an invisible view, so this itself is never conditional on `index` being
+    /// nil, only its inclusion in `body` is.
+    private var indexLabel: some View {
+        Text(task.done ? "" : "\(index ?? 0)")
+            .font(Font.volarMono(size: 11))
+            .foregroundStyle(VolarColor.textMut)
+            .frame(width: 18, alignment: .leading)
+    }
+
+    /// §5.6.4: only "Break down" has a real `AppState` action to call (`openBreakdown(for:)`).
+    /// No generic "mark in progress" / "postpone deadline" action exists for an arbitrary row —
+    /// re-grepped `AppState` for a setter that takes a target task id: only `switchDashboardActiveTask()`
+    /// exists, and it takes no id, it just hands the spotlight to whatever `nextSwitchTarget`
+    /// computes — there's no "make THIS row active" entry point to wire a Start button to.
+    /// `start`/`defer`/`snooze`/`postpone`/`reschedule` status-setters: none exist; `triageDefer(_:)`
+    /// is inbox-triage-only state, not a general row action. Reported, not invented.
+    ///
+    /// Icon: `.sparkle` is reused from the Pro/AI CTA elsewhere in the sidebar, which isn't a
+    /// perfect semantic match for "split into steps" — but `VolarIconName` (not owned by this file)
+    /// has no branch/split/list glyph closer to that meaning, so this keeps it rather than adding a
+    /// case there. `.help` gives the mismatch a text fallback on hover.
+    @ViewBuilder
+    private var quickActions: some View {
+        if isHovering, !task.done {
+            HStack(spacing: 4) {
+                QuickActionButton(icon: .sparkle) { appState.openBreakdown(for: task) }
+                    .help("Break down into steps")
+            }
+            .transition(.opacity)
+        }
+    }
+
+    /// §5.6.3: one id -> status lookup built once per row render, not per condition — feeds
+    /// `Condition.isSatisfied(statusByID:now:)` (now `public`, VolarCore/Condition.swift) so this
+    /// view calls the engine's own answer instead of hand-copying its three cases (that copy is
+    /// exactly how `AppState.eligibleOrder` drifted from `eligibleTasks` once before, backlog.md).
+    private var statusByID: [UUID: TaskStatus] {
+        Dictionary(uniqueKeysWithValues: appState.tasks.map { ($0.id, $0.status) })
+    }
+
+    private var unsatisfiedCondition: VolarCore.Condition? {
+        // ponytail: early-out before building statusByID — most tasks have zero conditions, so
+        // this skips the O(n) dictionary build for nearly every row on every re-render. Rows that
+        // DO have conditions still pay O(n) per read (read twice per render, see body/blockedLabel),
+        // so it's still O(n²) across a list where every row is blocked — fine at hundreds of tasks,
+        // not at thousands. Upgrade path: hoist statusByID onto AppState, built once per list render.
+        guard !task.conditions.isEmpty else { return nil }
+        let byID = statusByID
+        return task.conditions.first { !$0.isSatisfied(statusByID: byID, now: Date()) }
+    }
+
+    /// "waiting: <title>" / "from <time>" / the condition's own description — design.md §5.6.3.
+    private var blockedLabel: String? {
+        guard let condition = unsatisfiedCondition else { return nil }
+        switch condition {
+        case .taskDone(let id):
+            let title = appState.tasks.first(where: { $0.id == id })?.title ?? "another task"
+            return "waiting: \(title)"
+        case .afterDate(let date):
+            return "from \(date.formatted(.dateTime.hour().minute()))"
+        case .external(let description, _):
+            return description
+        }
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
+            if index != nil { indexLabel }
             checkbox
             titleAndSubrow
             Spacer(minLength: 0)
             trailing
+            quickActions
         }
         .padding(.horizontal, 12)
         .padding(.vertical, appState.density.rowPadY)
         .background(rowBackground)
+        .overlay(alignment: .leading) { selectionBar }
         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                .stroke(rowBorderColor, lineWidth: 0.5)
-        )
-        .overlay(
-            // Extra inner hairline while active, mirroring the prototype's
-            // `boxShadow: inset 0 0 0 0.5px accent30` treatment.
-            Group {
-                if isActive {
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(accentColors.solid.opacity(0.19), lineWidth: 0.5)
-                        .padding(0.5)
-                }
-            }
-        )
         .contentShape(Rectangle())
+        // §5.6.3: blocked rows stay visible, just dimmed — "app không được nuốt mất việc".
+        .opacity(unsatisfiedCondition != nil ? 0.55 : 1)
         .scaleEffect(isPressed ? 0.985 : 1)
         .onHover { isHovering = $0 }
         // Row tap opens the detail inspector panel (panel-refactor.md); the checkbox above is its
@@ -106,9 +184,9 @@ struct TaskRow: View {
             appState.toggleDone(task.id)
         } label: {
             Circle()
-                .strokeBorder(task.done ? accentColors.solid : VolarColor.veil(0.28), lineWidth: 1.5)
+                .strokeBorder(task.done ? accentColors.solid : VolarColor.veil(0.45), lineWidth: 1.5)
                 .background(Circle().fill(task.done ? accentColors.solid : .clear))
-                .frame(width: 17, height: 17)
+                .frame(width: 18, height: 18)
                 .overlay {
                     if task.done {
                         VolarIcon(.check, size: 11, color: .white, weight: .bold)
@@ -154,6 +232,13 @@ struct TaskRow: View {
                         .fontWeight(.medium)
                         .tracking(0.22)
                         .foregroundStyle(VolarColor.high)
+                }
+                if !task.done, let reason, let reasonLabel = rankReasonLabel(reason) {
+                    Text("·").opacity(0.4)
+                    Text(reasonLabel)
+                }
+                if let blockedLabel {
+                    BlockedChip(text: blockedLabel)
                 }
             }
             .font(.system(size: 11))
