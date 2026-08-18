@@ -1,137 +1,201 @@
 // Sources/Design/Theme.swift — frozen design tokens: palette, accents, density, glass (spec §3)
 //
-// RETHEME 3 — "Volar Graphite" (2026-08-07, specs/005-cursor-retheme/design-spec.md). Supersedes
-// RETHEME 2 "Volar Twilight" (2026-07-26) on ink/hairline/text VALUES only — the mint spotlight
-// rule, the anti-red rule, and the mint logo family it all serves are untouched. Token NAMES are
-// unchanged yet again, so every call site keeps compiling — only values moved.
+// RETHEME 4 — "Volar Paper" (2026-08-19, specs/009-light-mode-list-v2/design.md). Supersedes
+// RETHEME 3 "Volar Graphite" on every color VALUE; token NAMES are unchanged yet again (71 call
+// sites across 26 files keep compiling untouched — see design.md §2). Two real changes:
 //
-// What changed vs. Twilight, and why: Twilight's three ink layers (`bg`/`surface`/`surfaceHi`) and
-// its hairline/veil base were tinted cool blue (`0x94B2E0`) on the theory that a night-blue room
-// makes the mint spotlight read as a light source rather than a green chip on gray. In practice the
-// blue ink was the SAME family as the mint accent it was supposed to set off — it competed with the
-// spotlight instead of making it pop. This pass (borrowing Cursor's IDE palette, see the spec's §0)
-// moves the ink to a near-neutral graphite (R≈G, B nudged +2) and reverts every hairline/veil/card
-// token to a plain white base at lower alphas, exactly as it was before Twilight. A neutral ground
-// is the best possible backdrop for a single colored light source: nothing on the page competes
-// with mint for "warmest/coolest thing in the room" except mint itself.
+// 1. LIGHT MODE EXISTS NOW. Every `VolarColor` static let (and every `VolarAccent` case) is a
+//    dynamic color that resolves differently under light vs. dark appearance, via
+//    `NSColor(name:dynamicProvider:)` on macOS / `UIColor { traits in }` on iOS (`Shared/` is
+//    compiled by both `Volar` and `VolarIOS`, so both branches must be correct — see the
+//    `Color(volarLight:dark:)` initializer below). `veil(_:)` is the load-bearing case: it flips
+//    from a white film (dark) to a BLACK film (light) so the ~70 call sites that build hover
+//    tints / chip fills / progress tracks out of `veil(x)` still read correctly on a white page.
+//    Previously this file was dark-only ("no light variant exists" — that claim is now false).
 //
-// THE ONE RULE (unchanged, still the whole point): mint (`nowAccent` family) is a spotlight, not a
-// brand-everywhere color — reserved for the single active/NOW task (spotlight glow, NOW label, NOW
-// focus ring). The app-wide accent (`VolarAccent.indigo`, the default) and every informational
-// token resolve to the ICE BLUE instrument family instead. If two things on a screen are mint, one
-// of them is wrong.
+// 2. THE ACCENT IS PURPLE, NOT MINT. `VolarAccent.indigo` (the default; name is a persisted
+//    misnomer, unchanged) now resolves to Apple's `systemPurple` family (accessible light variant
+//    `#8944AB` / dark `#BF5AF2`) instead of ice blue. Mint (`nowAccent` family) keeps its token
+//    names but ALSO now resolves to the same purple — mint the hue is retired from UI entirely and
+//    lives on only in the logo mark (untouched, tracked separately in backlog.md per design.md §9).
+//    The rule "one saturated color on screen at a time" still holds, it's just purple now: a 3px
+//    bar + a small chip, never a large fill (see `nowSurface`, new token, §3.4). `instrument`
+//    (ice-blue readout accent) is retired too — it now equals `textSec` (no color).
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#elseif canImport(UIKit)
+import UIKit
+#endif
 
 extension Color {
     /// Constructs a `Color` from a 24-bit RGB literal (e.g. `0xFF6B6B`), always going through
     /// the exact `Color(.sRGB, red:green:blue:opacity:)` initializer the token spec calls for.
     /// Centralizing the hex math here (instead of hand-computing decimals at each call site)
-    /// keeps every token numerically exact.
+    /// keeps every token numerically exact. NOT dynamic — kept as-is for the one remaining
+    /// caller outside this file (`AmbientBackground.swift`'s still-dark-only weather scenes,
+    /// which design.md §9 explicitly defers: "chưa được xét trên nền trắng → backlog").
     init(volar hex: UInt32, opacity: Double = 1) {
         let r = Double((hex >> 16) & 0xFF) / 255
         let g = Double((hex >> 8) & 0xFF) / 255
         let b = Double(hex & 0xFF) / 255
         self.init(.sRGB, red: r, green: g, blue: b, opacity: opacity)
     }
+
+    /// Dynamic color: resolves to `lightHex`/`lightOpacity` under a light appearance and
+    /// `darkHex`/`darkOpacity` under dark, re-resolving live if the user (or the app, via
+    /// `NSApp.appearance`/`overrideUserInterfaceStyle`) flips appearance at runtime. This is the
+    /// single mechanism the whole light-mode pass rides on (design.md §2): every `VolarColor`
+    /// token below changes VALUE only through this initializer, so no call site anywhere in the
+    /// app has to change. `Shared/` is compiled by both the AppKit (macOS) and UIKit (iOS)
+    /// targets, so both branches below must stay correct.
+    init(volarLight lightHex: UInt32, lightOpacity: Double = 1, dark darkHex: UInt32, darkOpacity: Double = 1) {
+        #if canImport(AppKit)
+        self.init(nsColor: NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return isDark
+                ? NSColor(volar: darkHex, opacity: darkOpacity)
+                : NSColor(volar: lightHex, opacity: lightOpacity)
+        })
+        #elseif canImport(UIKit)
+        self.init(uiColor: UIColor { traits in
+            traits.userInterfaceStyle == .dark
+                ? UIColor(volar: darkHex, opacity: darkOpacity)
+                : UIColor(volar: lightHex, opacity: lightOpacity)
+        })
+        #else
+        self.init(volar: darkHex, opacity: darkOpacity)
+        #endif
+    }
 }
 
-/// Base palette — Studio Dark ink + text + priority/status tokens, ported from
-/// `volar-redesign/foundations.html`'s `:root` custom properties (`--ink-*`, `--surface-*`,
-/// `--tx-*`, `--sage`, etc). Dark-only; this app is dark-first Studio Dark (see §"Support
-/// light+dark?" — no light variant exists here, so none needs preserving).
+#if canImport(AppKit)
+private extension NSColor {
+    /// Same hex math as `Color(volar:opacity:)`, for building the two fixed endpoints a dynamic
+    /// `NSColor` picks between.
+    convenience init(volar hex: UInt32, opacity: Double) {
+        self.init(
+            srgbRed: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: opacity
+        )
+    }
+}
+#elseif canImport(UIKit)
+private extension UIColor {
+    /// Same hex math as `Color(volar:opacity:)`, for building the two fixed endpoints a dynamic
+    /// `UIColor` picks between.
+    convenience init(volar hex: UInt32, opacity: Double) {
+        self.init(
+            red: CGFloat((hex >> 16) & 0xFF) / 255,
+            green: CGFloat((hex >> 8) & 0xFF) / 255,
+            blue: CGFloat(hex & 0xFF) / 255,
+            alpha: opacity
+        )
+    }
+}
+#endif
+
+/// Base palette — ink + text + priority/status tokens. As of RETHEME 4 ("Volar Paper",
+/// design.md §3) every token here is a dynamic light+dark color built via `Color(volarLight:dark:)`
+/// above; values are Apple's own system-gray/system-color hex, not hand-invented, per design.md §1
+/// ("Ink lấy theo thang xám hệ thống của Apple, không tự bịa hex").
 enum VolarColor {
-    // --- Ink / depth — Graphite's three near-neutral layers ---
-    /// `--ink-0` — base bg, deepest. Graphite page ground.
-    static let bg = Color(volar: 0x0F0F11)
-    /// `--surface-1` — raised surface, one step up from `bg`. NOTE: name predates the retheme.
-    static let surface = Color(volar: 0x16161A)
-    /// `--surface-2` — raised surface, higher. Card / input / hover panel.
-    static let surfaceHi = Color(volar: 0x1E1E23)
-    /// Low-key translucent card fill over whichever surface it sits on. Base reverted to plain
-    /// white (was Twilight's cool-blue `0x94B2E0`, see file header): the ink is now a near-neutral
-    /// graphite, so a white film no longer greys the surface out the way it did over night-blue ink
-    /// — a white veil is what Cursor itself uses over its own neutral ground.
-    static let card = Color.white.opacity(0.035)
-    static let cardHover = Color.white.opacity(0.06)
-    /// `--hairline` — reverted to white (was Twilight's cool-blue `rgba(148,178,224,.10)`); alpha
-    /// also dropped 0.10 → 0.07. Cursor separates panels by a fill delta more than a drawn line, so
-    /// the hairline can afford to sit lighter than it did on Twilight's blue ink.
-    static let border = Color.white.opacity(0.07)
-    /// `--hairline-strong` — reverted to white, alpha dropped 0.18 → 0.12 (was Twilight's
-    /// `rgba(148,178,224,.18)`).
-    static let borderHi = Color.white.opacity(0.12)
+    // --- Ink / depth — Apple system-gray ramp (design.md §3.1) ---
+    /// Base bg, deepest. `#FFFFFF` light / `#1C1C1E` dark (Apple systemGray6 dark) — NOT the old
+    /// `#0F0F11`, which is darker than any Apple window background and was why every low-alpha
+    /// veil on top of it used to read as invisible (design.md §0).
+    static let bg = Color(volarLight: 0xFFFFFF, dark: 0x1C1C1E)
+    /// Raised surface, one step up from `bg`. NOTE: name predates the retheme.
+    static let surface = Color(volarLight: 0xF2F2F7, dark: 0x232326)
+    /// Raised surface, higher. Selected-row fill (§5.3), input / hover panel.
+    static let surfaceHi = Color(volarLight: 0xE5E5EA, dark: 0x2C2C2E)
+    /// Row background. Now fully transparent in BOTH modes (design.md §3.1, §5.1) — List v2 rows
+    /// carry no background of their own; `cardHover`/`surfaceHi` are the only fills a row ever
+    /// gets, and only on hover/selection. Kept as a token (not deleted) so the ~handful of call
+    /// sites that reference `VolarColor.card` don't need to change.
+    static let card = Color.clear
+    /// The one surface fill that actually shows on an unselected row: a hover tint. Low alpha
+    /// reads clearly now because it's the ONLY fill on the page (design.md §0/§5.2).
+    static let cardHover = Color(volarLight: 0x000000, lightOpacity: 0.05, dark: 0xFFFFFF, darkOpacity: 0.06)
+    /// Hairline between sections (not between every row — §5.1 drops per-row hairlines entirely).
+    static let border = Color(volarLight: 0x000000, lightOpacity: 0.10, dark: 0xFFFFFF, darkOpacity: 0.10)
+    /// Stronger hairline / focus outline.
+    static let borderHi = Color(volarLight: 0x000000, lightOpacity: 0.18, dark: 0xFFFFFF, darkOpacity: 0.18)
 
-    /// One-off translucent film at an arbitrary strength, for the ~40 places across the views that
+    /// One-off translucent film at an arbitrary strength, for the ~70 places across the views that
     /// need a fill/stroke between two named tokens (hover tints, chip backgrounds, progress-track
-    /// fills). Reverted to the pre-Twilight formula — plain `Color.white.opacity(x)` — now that the
-    /// ink underneath it is graphite instead of night-blue, so every one of those ~40 call sites
-    /// needs no edits: the base changed here, not at the call site. Prefer a named token when one
-    /// fits — this exists so a view never has to reach back for `Color.white` directly.
-    static func veil(_ opacity: Double) -> Color { Color.white.opacity(opacity) }
+    /// fills). THE load-bearing token of the whole light-mode pass (design.md §2): it inverts
+    /// polarity by appearance — black film in light mode, white film in dark — so none of those 70
+    /// call sites need to change to keep working on a white background. Prefer a named token when
+    /// one fits — this exists so a view never has to reach back for `Color.white` directly.
+    static func veil(_ opacity: Double) -> Color {
+        Color(volarLight: 0x000000, lightOpacity: opacity, dark: 0xFFFFFF, darkOpacity: opacity)
+    }
 
-    // --- Text (foundations.html --tx-1/2/3) ---
-    /// `--tx-1` primary. Contrast vs `bg` (#0F0F11) ≈ 15.7:1 — passes WCAG AAA for body text.
-    static let textPri = Color(volar: 0xE8E8EA)
-    /// `--tx-2` secondary. Contrast vs `bg` ≈ 7.5:1 — passes WCAG AA (and AAA) for body text.
-    static let textSec = Color(volar: 0xA1A1A8)
-    /// `--tx-3` tertiary / muted. Contrast vs `bg` ≈ 3.6:1 — intentionally BELOW body-text AA per
-    /// the source spec (this token is for de-emphasized/tertiary labels, never body copy).
-    static let textMut = Color(volar: 0x6B6B74)
+    // --- Text (design.md §3.2) ---
+    /// Primary. Contrast vs `bg` ≈ 16:1 light / ≈15:1 dark — AAA both.
+    static let textPri = Color(volarLight: 0x1C1C1E, dark: 0xF2F2F7)
+    /// Secondary. Contrast vs `bg` ≈ 5:1 light / ≈6:1 dark — AA. Header-section label color as of
+    /// List v2 (§5.4) — `textMut` is no longer used for headers.
+    static let textSec = Color(volarLight: 0x6E6E73, dark: 0x98989D)
+    /// Tertiary / muted. Contrast vs `bg` ≈ 3:1 light / ≈4:1 dark — intentionally BELOW body-text
+    /// AA (tertiary/de-emphasized labels only, never body copy, never a section header).
+    static let textMut = Color(volarLight: 0x8E8E93, dark: 0x7C7C80)
 
-    // --- Priority / status dots & badges ---
-    // No red, ever (anti-shame rule, foundations.html §01 rule-callout) and no mint (mint is
-    // reserved exclusively for `nowAccent`/the NOW spotlight — see file header). Priority hierarchy
-    // is expressed as a warm-neutral clay → taupe → cool-gray ramp, which stays clear of the
-    // reserved hue by construction: nothing in this ramp is green.
-    /// High priority — muted clay/terracotta. Deliberately NOT alarm red. (Pre-Twilight this also
-    /// had to dodge the amber NOW spotlight; amber is no longer reserved. Held again through the
-    /// Graphite pass, unchanged — on a neutral graphite ground this warm ramp becomes the ONLY warm
-    /// hue anywhere on screen, so the priority tier reads even more clearly than it did on Twilight's
-    /// blue ink: warm = priority, cool = information, mint = NOW.)
-    static let high = Color(volar: 0xB9705A)
-    /// Medium priority — muted warm taupe, between `high` and `low`.
-    static let med = Color(volar: 0x9C8C6B)
-    /// Low priority — neutral gray, unchanged formula (already palette-safe).
-    static let low = Color.white.opacity(0.30)
-    /// Destructive action (e.g. Delete). This is the standard macOS destructive-affordance red,
-    /// distinct from the "never red for overdue/badges" anti-shame rule — that rule governs
-    /// task-status badges, not an irreversible system action button. Toned down from a neon red to
-    /// a muted brick to stay in the Studio Dark register.
-    static let destruct = Color(volar: 0xC85C4C)
-    /// `--sage` — success. Muted, not neon.
-    static let done = Color(volar: 0x7FA88C)
+    // --- Priority / status dots & badges (design.md §3.5) ---
+    // No red, ever, for status/badges (anti-shame rule) — `destruct` below is the one exception,
+    // reserved for the irreversible Delete action itself, not a judgment on the user.
+    /// High priority — muted clay/terracotta, deliberately NOT alarm red.
+    static let high = Color(volarLight: 0xC04A26, dark: 0xFF9F6B)
+    /// Medium priority — muted warm brown/taupe, between `high` and `low`.
+    static let med = Color(volarLight: 0x8A6D3B, dark: 0xD9B77A)
+    /// Low priority — neutral gray film, same polarity-inverting formula as `veil(_:)`.
+    static let low = Color(volarLight: 0x000000, lightOpacity: 0.28, dark: 0xFFFFFF, darkOpacity: 0.30)
+    /// Destructive action (e.g. Delete). Apple systemRed accessible light / systemRed dark — the
+    /// standard macOS destructive-affordance red. Distinct from the "never red for
+    /// overdue/badges" anti-shame rule: that rule governs task-status badges, not an irreversible
+    /// system action button.
+    static let destruct = Color(volarLight: 0xD70015, dark: 0xFF453A)
+    /// Success. Apple systemGreen accessible light / systemGreen dark.
+    static let done = Color(volarLight: 0x248A3D, dark: 0x30D158)
 
-    // MARK: - NOW / spotlight tokens (foundations.html §01, §03; hues from the Twilight board)
+    // MARK: - NOW / spotlight tokens (design.md §3.4)
 
-    /// `--mint` — THE key light, and the same mint as the lit dot in the logo mark. Used ONLY on
-    /// the one NOW task (spotlight glow, NOW label, NOW focus ring, NOW primary action). Never the
-    /// general/app-wide accent.
-    static let nowAccent = Color(volar: 0x8FEDCB)
-    /// `--mint-soft` — lighter mint, NOW title text / primary-button gradient top. Top stop of the
-    /// logo mark's own gradient.
-    static let nowAccentSoft = Color(volar: 0xA9F5DA)
-    /// `--mint-deep` — deeper mint, gradient bottom / pressed states. Bottom stop of that same
-    /// logo gradient, so a NOW button and the app icon are cut from one ramp.
-    static let nowAccentDeep = Color(volar: 0x74DDB6)
-    /// `--mint-glow` — the spotlight pool's inner glow.
-    static let nowGlow = Color(volar: 0x8FEDCB, opacity: 0.20)
-    /// `--mint-glow-soft` — the spotlight pool's outer falloff.
-    static let nowGlowSoft = Color(volar: 0x8FEDCB, opacity: 0.10)
-    /// `--mint-ring` — NOW-specific focus ring / hairline accent (e.g. `m-chip` border).
-    static let nowRing = Color(volar: 0x8FEDCB, opacity: 0.55)
+    /// The NOW row's 3px accent bar + "NOW" chip fill. Same purple as `VolarAccent.indigo.solid`
+    /// on purpose — the app has exactly ONE saturated hue (design.md §1), and NOW is the one place
+    /// that hue is allowed to be a small, dense mark. Never a large fill — see `nowSurface`.
+    static let nowAccent = Color(volarLight: 0x8944AB, dark: 0xBF5AF2)
+    /// Hover state of the NOW chip.
+    static let nowAccentSoft = Color(volarLight: 0xA855C9, dark: 0xDA8FFF)
+    /// Pressed/deep state.
+    static let nowAccentDeep = Color(volarLight: 0x6E3589, dark: 0x9A3FD0)
+    /// NEW token (design.md §3.4/§5.3) — the NOW row's background. NOT `nowAccent` at full
+    /// strength: white text on `#BF5AF2` is only 3.1:1, and a large saturated fill would break the
+    /// "one saturated point on screen" rule. This is `nowAccent` pha (mixed) ~8% into `bg`, so the
+    /// row reads as "marked" while `textPri` stays fully legible on top of it and all the
+    /// saturation stays in the 3px bar + chip.
+    static let nowSurface = Color(volarLight: 0xF5EAFA, dark: 0x2E2036)
+    /// The spotlight pool's inner glow (`SpotlightBackground` below).
+    static let nowGlow = Color(volarLight: 0x8944AB, lightOpacity: 0.08, dark: 0xBF5AF2, darkOpacity: 0.20)
+    /// The spotlight pool's outer falloff.
+    static let nowGlowSoft = Color(volarLight: 0x8944AB, lightOpacity: 0.04, dark: 0xBF5AF2, darkOpacity: 0.10)
+    /// NOW-specific focus ring / hairline accent (e.g. chip border).
+    static let nowRing = Color(volarLight: 0x8944AB, lightOpacity: 0.45, dark: 0xBF5AF2, darkOpacity: 0.55)
 
-    // MARK: - Instrument tokens (foundations.html §05 "Instrument readouts")
+    // MARK: - Instrument tokens (design.md §1: "ice blue `instrument` bỏ")
 
-    /// `--cool` — ice-blue instrument accent ("xanh băng = thông tin"). Informational only,
-    /// sparing: WIP counter, timers, links, dependency dots. Never used for the NOW spotlight.
-    static let instrument = Color(volar: 0x86B9FF)
-    /// `--cool-dim` — dimmed ice blue, for dashed dependency chips / secondary instrument marks.
-    static let instrumentDim = Color(volar: 0x3A4E75)
+    /// Instrument readout accent (WIP counter, timers, step counts). Used to be ice blue
+    /// (`#86B9FF`); retired per design.md §1 — instruments are unstyled text now, same color as
+    /// any other secondary label.
+    static let instrument = textSec
+    /// Dimmed instrument mark (dashed dependency chips etc).
+    static let instrumentDim = textMut
 
-    /// `--reschedule` — calm neutral "needs rescheduling" tone. This is what overdue uses INSTEAD
-    /// of red (anti-shame rule) — provided here so a later per-view pass has a token ready rather
-    /// than reaching for `destruct` or inventing a one-off color.
-    static let reschedule = Color(volar: 0x8A8FA0)
+    /// Calm neutral "needs rescheduling" tone. What overdue uses INSTEAD of red (anti-shame rule).
+    /// Intentionally the same value as `textSec` — a neutral label, not a colored badge.
+    static let reschedule = textSec
 }
 
 /// One accent family's four derived roles (`VOLAR_ACCENTS.*`).
@@ -143,15 +207,17 @@ struct Accent: Sendable {
 }
 
 /// Selectable accent families (`VOLAR_ACCENTS`). Default is `.indigo`, whose NAME is now a
-/// misnomer kept for wire/settings compatibility (it is persisted by rawValue): it resolves to the
-/// same ice blue as `VolarColor.instrument` (`--cool`), because the general-purpose/app-wide accent
-/// (active states, capture button, selection) must never be the reserved mint `nowAccent`.
+/// misnomer kept for wire/settings compatibility (it is persisted by rawValue): as of RETHEME 4 it
+/// resolves to Apple's `systemPurple` accessible family (design.md §1/§3.3) — the app's one and
+/// only saturated hue, used sparingly (a 3px bar, a small chip), never a large fill.
 ///
-/// `.teal` (#3DBFAF) is the one family that now sits uncomfortably close to the reserved mint — a
-/// user who selects it gets a second green-ish signal competing with the NOW spotlight, the same
-/// problem `.amber` had before Twilight moved the spotlight off amber. Left as-is deliberately:
-/// it is opt-in and off by default, and re-picking a user-facing palette entry is a design decision
-/// of its own rather than a mechanical consequence of this retheme (tracked in backlog.md).
+/// `.teal`/`.amber`/`.magenta` keep their original dark-mode hue unchanged and gain a light-mode
+/// pair computed by lowering HSL lightness ~25% at the same hue/saturation (design.md §3.3: "opt-
+/// in, không đáng tốn thời gian tinh chỉnh" — these are user-selectable alternates, not the
+/// default, so the light values are a mechanical hue-preserving derivation, not hand-tuned). The
+/// old note about `.teal` sitting "uncomfortably close to mint" no longer applies: mint has left
+/// the UI entirely (design.md §9 — it tự tan, "resolves itself", once nothing else on screen is
+/// mint).
 enum VolarAccent: String, CaseIterable, Identifiable, Sendable, Equatable, Hashable {
     case indigo, teal, amber, magenta
 
@@ -160,61 +226,69 @@ enum VolarAccent: String, CaseIterable, Identifiable, Sendable, Equatable, Hasha
     var accent: Accent {
         switch self {
         case .indigo:
-            // Ice blue (`--cool`) — the app-wide default. NOT mint.
-            let solid = Color(volar: 0x86B9FF)
-            return Accent(solid: solid, hover: Color(volar: 0xB3D2FF), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
+            // Apple systemPurple, accessible variant. #8944AB light is chosen specifically because
+            // #AF52DE (systemPurple's ordinary light value) only hits 3.6:1 on white — #8944AB
+            // hits 6.0:1, which also makes white-on-it 6.0:1 (design.md §3.3).
+            let solid = Color(volarLight: 0x8944AB, dark: 0xBF5AF2)
+            let hover = Color(volarLight: 0x6E3589, dark: 0xDA8FFF)
+            let surface = Color(volarLight: 0x8944AB, lightOpacity: 0.10, dark: 0xBF5AF2, darkOpacity: 0.16)
+            let glow = Color(volarLight: 0x8944AB, lightOpacity: 0.30, dark: 0xBF5AF2, darkOpacity: 0.40)
+            return Accent(solid: solid, hover: hover, surface: surface, glow: glow)
         case .teal:
-            let solid = Color(volar: 0x3DBFAF)
-            return Accent(solid: solid, hover: Color(volar: 0x63D6C7), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
+            // Dark hue unchanged (#3DBFAF / #63D6C7); light pair = same hue/sat, L × 0.75.
+            let solid = Color(volarLight: 0x2E8F83, dark: 0x3DBFAF)
+            let hover = Color(volarLight: 0x31BAA8, dark: 0x63D6C7)
+            return Accent(solid: solid, hover: hover, surface: solid.opacity(0.15), glow: solid.opacity(0.45))
         case .amber:
-            // Copper/burnt-orange. Was shaped this way to dodge the old amber NOW spotlight; since
-            // Twilight moved the spotlight to mint it no longer has to, but the hex stays put so
-            // anyone already using it doesn't wake up to a different accent.
-            let solid = Color(volar: 0xD9853D)
-            return Accent(solid: solid, hover: Color(volar: 0xE9A165), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
+            // Dark hue unchanged (#D9853D / #E9A165); light pair = same hue/sat, L × 0.75.
+            let solid = Color(volarLight: 0xAE6322, dark: 0xD9853D)
+            let hover = Color(volarLight: 0xDB751F, dark: 0xE9A165)
+            return Accent(solid: solid, hover: hover, surface: solid.opacity(0.15), glow: solid.opacity(0.45))
         case .magenta:
-            let solid = Color(volar: 0xD16BC0)
-            return Accent(solid: solid, hover: Color(volar: 0xE38BD4), surface: solid.opacity(0.15), glow: solid.opacity(0.45))
+            // Dark hue unchanged (#D16BC0 / #E38BD4); light pair = same hue/sat, L × 0.75.
+            let solid = Color(volarLight: 0xB538A0, dark: 0xD16BC0)
+            let hover = Color(volarLight: 0xD141B9, dark: 0xE38BD4)
+            return Accent(solid: solid, hover: hover, surface: solid.opacity(0.15), glow: solid.opacity(0.45))
         }
     }
 }
 
-/// Row/section spacing presets (`VOLAR_DENSITY`). Default is `.comfy`. Tightened in the Graphite
-/// pass (§1.7): Cursor's list density reads chattier/denser than Twilight's, so every tier's
-/// padding/gap moved down a notch. See per-case comments below for the old (Twilight) numbers.
+/// Row/section spacing presets (`VOLAR_DENSITY`). Default is `.comfy`. Unchanged by RETHEME 4
+/// (color-only pass) except `rowGap`, which List v2 (design.md §5.1) drops toward zero so rows sit
+/// flush against each other now that they carry no per-row background/border of their own.
 enum Density: Sendable, Equatable, Hashable {
     case cozy, comfy, roomy
 
     var rowPadY: CGFloat {
         switch self {
         case .cozy: return 5
-        case .comfy: return 8   // was 10 (Twilight)
-        case .roomy: return 12  // was 14 (Twilight)
+        case .comfy: return 8
+        case .roomy: return 12
         }
     }
 
+    /// design.md §5.1: `0 / 0 / 2` — rows sit sat against each other; only hairlines between
+    /// sections separate content now, not per-row gaps.
     var rowGap: CGFloat {
         switch self {
-        case .cozy: return 2
-        case .comfy: return 3   // was 4 (Twilight)
-        case .roomy: return 5   // was 6 (Twilight)
+        case .cozy: return 0
+        case .comfy: return 0
+        case .roomy: return 2
         }
     }
 
     var sectionGap: CGFloat {
         switch self {
         case .cozy: return 14
-        case .comfy: return 18  // was 22 (Twilight)
-        case .roomy: return 26  // was 30 (Twilight)
+        case .comfy: return 18
+        case .roomy: return 26
         }
     }
 }
 
-/// Glass/material intensity presets (`VOLAR_GLASS`). Default is `.standard`. `blur` and `material`
-/// are unchanged by the Graphite pass; `bgOpacity` moved up sharply (§1.5, "flatten by default" —
-/// design-spec.md §0 rule 5) because blur is now reserved for surfaces that truly float over the
-/// desktop (menubar popover, `FocusOverlay`) — every panel inside the main window should read flat
-/// and opaque instead of glassy. See per-case comments below for the old (Twilight) numbers.
+/// Glass/material intensity presets (`VOLAR_GLASS`). Default is `.standard`. Unchanged by
+/// RETHEME 4 (color-only pass) — `bg` opacity is layered over whichever `Material` these resolve
+/// to, and since `bg` is now dynamic light/dark, so is every material-backed surface using it.
 enum GlassLevel: Sendable, Equatable, Hashable {
     case subtle, standard, heavy
 
@@ -231,9 +305,9 @@ enum GlassLevel: Sendable, Equatable, Hashable {
     /// Opacity of the `VolarColor.bg` tint layered over the system material.
     var bgOpacity: Double {
         switch self {
-        case .subtle: return 1.00    // was 0.92 (Twilight) — fully flat, no material shows through
-        case .standard: return 0.97  // was 0.78 (Twilight) — material still present, nearly invisible
-        case .heavy: return 0.80     // was 0.55 (Twilight) — still glass; for surfaces floating over the desktop
+        case .subtle: return 1.00
+        case .standard: return 0.97
+        case .heavy: return 0.80
         }
     }
 
@@ -258,10 +332,10 @@ extension Font {
         .system(size: size, weight: weight)
     }
 
-    /// NEW — the prototype's `--mono` instrument face (`ui-monospace, SFMono-Regular, Menlo, …`).
-    /// Reserved for instrument readouts per foundations.html §02/§05: WIP counter, timers, step
-    /// counts, estimates — NOT general UI copy. SwiftUI's `.system(design: .monospaced)` resolves
-    /// to SF Mono on macOS, matching the prototype's stack head (`ui-monospace`/`SFMono-Regular`).
+    /// The prototype's `--mono` instrument face (`ui-monospace, SFMono-Regular, Menlo, …`).
+    /// Reserved for instrument readouts: WIP counter, timers, step counts, estimates — NOT
+    /// general UI copy. SwiftUI's `.system(design: .monospaced)` resolves to SF Mono on macOS,
+    /// matching the prototype's stack head (`ui-monospace`/`SFMono-Regular`).
     static func volarMono(size: CGFloat, weight: Weight = .regular) -> Font {
         .system(size: size, weight: weight, design: .monospaced)
     }
@@ -278,9 +352,6 @@ extension View {
 /// premium feel. NEVER use `.repeatForever` on a MenuBarExtra/NSStatusItem-hosted view. Durations
 /// unchanged by the retheme — all four are already state-change-only and ≤380ms, consistent with
 /// the Studio Dark motion rule ("minimal, state-change only, ≤300ms-ish, no looping/breathing").
-/// `menubar-now.html`'s `.mic.live` breathing `@keyframes` is intentionally NOT ported here — the
-/// spec itself only applies it to a live-listening mic affordance, not spotlight/token-level motion,
-/// and this file must not introduce any looping animation.
 enum VolarMotion {
     /// Hover / active / selection feedback — snappy but soft.
     static let hover = Animation.spring(response: 0.26, dampingFraction: 0.82)
@@ -292,17 +363,15 @@ enum VolarMotion {
     static let state = Animation.easeInOut(duration: 0.20)
 }
 
-// MARK: - NEW: Spotlight primitive (foundations.html §03 "The spotlight — the signature";
-// menubar-now.html `.pool` + `.vignette`)
+// MARK: - Spotlight primitive (design.md §3.4)
 
-/// The reusable mint radial pool + vignette-into-shadow that sits behind exactly ONE (the
-/// active/NOW) task. Theme-level only — no view currently adopts this; it's prepared here so a
-/// later per-view pass can drop `.volarSpotlight()` onto the NOW task's container without
-/// reinventing the gradient math. Two layers, matching the prototype 1:1:
-///   1. `.pool` — a soft mint radial glow (`nowGlow` → `nowGlowSoft` → clear), blurred.
-///   2. `.vignette` — a dark radial overlay that settles the pool's edges into `bg` shadow (graphite
-///      as of the RETHEME 3 pass, was night-blue under Twilight — the overlay itself is unchanged,
-///      it just reads `VolarColor.bg` live).
+/// The reusable radial pool + vignette-into-shadow that sits behind exactly ONE (the active/NOW)
+/// task. Code unchanged by RETHEME 4 (design.md §8: "SpotlightBackground giữ nguyên code, chỉ ăn
+/// theo token mới") — it just reads `nowGlow`/`nowGlowSoft`/`bg`, which are now the purple/light-
+/// dark tokens above instead of mint/graphite-only ones. Two layers, matching the prototype 1:1:
+///   1. `.pool` — a soft radial glow (`nowGlow` → `nowGlowSoft` → clear), blurred.
+///   2. `.vignette` — a radial overlay that settles the pool's edges into `bg` shadow, live per
+///      appearance since `bg` itself is now dynamic.
 /// UNVERIFIED: not build-checked on this machine (Windows, no Xcode) — `RadialGradient`,
 /// `ZStack`, and `.blur(radius:)` are all macOS 10.15+ SwiftUI API, so this should compile
 /// cleanly on the macOS 14 floor, but the composited visual result hasn't been rendered/verified.
@@ -345,9 +414,9 @@ struct SpotlightBackground: ViewModifier {
 }
 
 extension View {
-    /// Applies the mint spotlight pool + vignette behind this view. Intended for exactly one
-    /// (the NOW) task container at a time — if two things on a screen are mint, one of them is
-    /// wrong (foundations.html §01 rule-callout; Twilight's "bạc hà = NOW duy nhất").
+    /// Applies the NOW spotlight pool + vignette behind this view. Intended for exactly one
+    /// (the NOW) task container at a time — the app has one saturated hue and one spotlight
+    /// (design.md §1).
     func volarSpotlight(isActive: Bool = true) -> some View {
         modifier(SpotlightBackground(isActive: isActive))
     }
