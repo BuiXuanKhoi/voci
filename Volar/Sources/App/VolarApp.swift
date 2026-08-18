@@ -361,21 +361,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var textCapturePanelController: CapturePanelController?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Fix (2026-07-27, first real-Mac run): Volar's whole palette (`Design/Theme.swift`,
-        // `VolarColor.bg` etc.) is hardcoded dark — there is no light variant anywhere in this
-        // app. But `Picker`/`Menu`/`TextField`/`Toggle` are backed by real AppKit controls, and
-        // AppKit controls draw themselves according to the SYSTEM appearance, not this app's own
-        // color tokens. On a Mac running Light Mode that meant every dropdown/menu popup painted
-        // its text BLACK on top of Volar's near-black background — unreadable. Forcing the whole
-        // app's `NSApplication.appearance` to `.darkAqua`, once, here at launch, is what fixes
+        // Fix (2026-07-27, first real-Mac run): originally, Volar's whole palette (`Design/
+        // Theme.swift`, `VolarColor.bg` etc.) was hardcoded dark — there was no light variant
+        // anywhere in this app. But `Picker`/`Menu`/`TextField`/`Toggle` are backed by real AppKit
+        // controls, and AppKit controls draw themselves according to the SYSTEM appearance, not
+        // this app's own color tokens. On a Mac running Light Mode that meant every dropdown/menu
+        // popup painted its text BLACK on top of Volar's near-black background — unreadable.
+        // Forcing the whole app's `NSApplication.appearance`, once, here at launch, is what fixes
         // this for every window AND every floating surface AppKit draws on the app's behalf —
         // including a `Picker`'s popup menu, which AppKit renders in its OWN separate window,
         // outside the SwiftUI view tree entirely. That's specifically why this is `NSApp.appearance`
-        // and not `.preferredColorScheme(.dark)` on a SwiftUI scene: `.preferredColorScheme` only
+        // and not `.preferredColorScheme(...)` on a SwiftUI scene: `.preferredColorScheme` only
         // reaches views SwiftUI itself draws, and cannot reach an AppKit-owned popup window. Set
         // as early as possible in the launch sequence (before any window/menu is materialized) so
         // nothing has a chance to draw once in the wrong appearance first.
-        NSApp.appearance = NSAppearance(named: .darkAqua)
+        //
+        // specs/009-light-mode-list-v2/design.md §7: the app now HAS a light palette
+        // (`Shared/Design/Theme.swift`), so hardcoding `.darkAqua` unconditionally would fight the
+        // user's own System/Light/Dark pick in Settings → General (`AppState.appearance`,
+        // `AppearancePreference`, `Shared/App/AppState.swift`). The reasoning above for WHY this
+        // line has to exist at all is unchanged — AppKit controls still need to be told an
+        // appearance explicitly — it just now reads WHICH appearance from that pref instead of
+        // always forcing dark. `.system` maps to `nil` (let AppKit follow the Mac's own setting,
+        // same as if this app never touched `NSApp.appearance`), `.light`/`.dark` pin it.
+        NSApp.appearance = nsAppearance(for: appState?.appearance ?? .system)
 
         // F1/F2 fix (MAJOR, liveness): `activateServices()` used to be reachable ONLY from the main
         // `Window`'s `.task` above, which never ran while the app launched with that window closed
@@ -402,6 +411,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             up: { [weak self] in self?.glance.hotkeyUp() }
         )
         observeGlanceMode()
+
+        // specs/009-light-mode-list-v2/design.md §7: re-applies `NSApp.appearance` LIVE whenever
+        // the user changes the picker in Settings → General, so the effect isn't "restart the app
+        // to see it" — see this method's own doc comment for why `NSApp.appearance` has to be set
+        // at all. `NSApp.appearance = nsAppearance(...)` right above only covers launch; without
+        // this observer, every AppKit control (Picker/Menu/TextField popups) would keep whatever
+        // appearance was current at launch until the next relaunch.
+        observeAppearancePreference()
 
         // Best-effort; ignore the result/error — notifications are a nice-to-have, not required
         // for the app to function (see backlog: real notification scheduling not yet wired).
@@ -571,6 +588,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in
                 self?.syncGlancePanel()
                 self?.observeGlanceMode()
+            }
+        }
+    }
+
+    /// specs/009-light-mode-list-v2/design.md §7: maps the user's System/Light/Dark preference to
+    /// the `NSAppearance` `NSApp.appearance` needs. `.system` -> `nil` (follow the Mac's own
+    /// setting — passing `nil` here is exactly what "don't touch it" looks like for this API);
+    /// `.light`/`.dark` pin every AppKit control to one specific appearance regardless of System
+    /// Settings, same reasoning as `applicationDidFinishLaunching`'s doc comment above.
+    private func nsAppearance(for pref: AppearancePreference) -> NSAppearance? {
+        switch pref {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
+
+    /// specs/009-light-mode-list-v2/design.md §7: keeps `NSApp.appearance` in sync with
+    /// `AppState.appearance` for the rest of the app's lifetime — same one-shot-`withObservationTracking`-
+    /// re-armed-from-inside-`onChange` pattern as `observeCaptureState()`/`observeGlanceMode()`
+    /// above (see `observeCaptureState()`'s doc comment for why the re-registration has to happen
+    /// INSIDE the deferred `Task { @MainActor in ... }` hop rather than before it).
+    /// `appState?.setAppearance(_:)` (`Shared/App/AppState.swift`) is the only writer of
+    /// `AppState.appearance`, and it's called from `SettingsView`'s picker — this is what turns
+    /// that Settings change into an immediate visual effect instead of a "restart to apply" pref.
+    private func observeAppearancePreference() {
+        withObservationTracking {
+            _ = appState?.appearance
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                NSApp.appearance = self.nsAppearance(for: self.appState?.appearance ?? .system)
+                self.observeAppearancePreference()
             }
         }
     }

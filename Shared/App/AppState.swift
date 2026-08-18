@@ -77,6 +77,24 @@ enum ParseEnginePreference: String, Sendable, Equatable, CaseIterable, Identifia
     }
 }
 
+/// specs/009-light-mode-list-v2/design.md §7: System/Light/Dark appearance preference (Settings →
+/// General). String-backed + `CaseIterable`/`Identifiable`, same picker/persistence convention as
+/// `SpeechEngineChoice`/`ParseEnginePreference` above. Deliberately holds NO `NSAppearance`
+/// mapping itself — this file is compiled for iOS too (`#if canImport(AppKit)` at the top), so the
+/// AppKit-only side effect (`NSApp.appearance = ...`) lives in `Volar/Sources/App/VolarApp.swift`'s
+/// `AppDelegate` instead, which observes `AppState.appearance` and applies it there.
+enum AppearancePreference: String, Sendable, Equatable, CaseIterable, Identifiable {
+    case system, light, dark
+    var id: String { rawValue }
+    var label: String {
+        switch self {
+        case .system: return "System"
+        case .light: return "Light"
+        case .dark: return "Dark"
+        }
+    }
+}
+
 /// How reminders are delivered (Phase 4 contract B): the visual `UNUserNotificationCenter`
 /// notification always fires; this only gates the ADDITIONAL spoken channel
 /// (`VoiceReminderChannel`, sibling-owned). Persisted under `AppState.voiceDeliveryModeKey` — the
@@ -781,6 +799,10 @@ final class AppState {
     /// engine actually used for a given capture is further gated by `selectedEngine` (e.g.
     /// WhisperKit falls back to Apple when unsupported or its model isn't loaded yet).
     private(set) var speechEngineChoice: SpeechEngineChoice
+    /// specs/009-light-mode-list-v2/design.md §7: System/Light/Dark appearance preference
+    /// (Settings → General). Persisted; `VolarApp.swift`'s `AppDelegate` applies it to
+    /// `NSApp.appearance` at launch AND live on every change (see `setAppearance` below).
+    private(set) var appearance: AppearancePreference
     /// True when capture failed because on-device recognition is unavailable (Dictation off) and
     /// the user hasn't consented to server recognition yet — drives the popover's hint + consent UI.
     private(set) var pendingServerConsent = false
@@ -1306,6 +1328,10 @@ final class AppState {
     /// same values, same default-to-`.comfy` fallback — so this is the established convention,
     /// not a new one.
     private static let densityKey = "volar.density"
+    /// specs/009-light-mode-list-v2/design.md §7. Grepped every `UserDefaults` key literal in this
+    /// file before picking this string (self-review (5) of this task's brief) — `"volar.appearance"`
+    /// was unclaimed.
+    private static let appearanceKey = "volar.appearance"
     /// Guided-tour "seen" flag (`Sources/Views/Tour/*`). `V1` suffix mirrors `VolarApp.swift`'s own
     /// `hasOnboardedV1` `@AppStorage` key versioning convention, so a future tour redesign can force
     /// everyone through it again just by bumping the suffix, without touching this file's read/write
@@ -1381,6 +1407,11 @@ final class AppState {
         // new default still transcribes 100% on-device on every capture, exactly as before — the
         // default only changes WHICH engine gets attempted first once an account is configured.
         self.speechEngineChoice = SpeechEngineChoice(rawValue: UserDefaults.standard.string(forKey: Self.speechEngineKey) ?? "") ?? .groq
+        // specs/009-light-mode-list-v2/design.md §7: no init parameter (unlike `accent`/`density`
+        // above) — nothing in this codebase constructs an `AppState` expecting a specific
+        // appearance, so straight-from-`UserDefaults`-with-a-default is enough, same shape as
+        // `speechEngineChoice` right above.
+        self.appearance = AppearancePreference(rawValue: UserDefaults.standard.string(forKey: Self.appearanceKey) ?? "") ?? .system
         self.cloudParseConsent = UserDefaults.standard.object(forKey: Self.cloudParseConsentKey) as? Bool
         self.voiceDeliveryMode = VoiceDeliveryMode(
             rawValue: UserDefaults.standard.string(forKey: Self.voiceDeliveryModeKey) ?? ""
@@ -5669,6 +5700,18 @@ final class AppState {
         case "roomy": return .roomy
         default: return nil
         }
+    }
+
+    /// specs/009-light-mode-list-v2/design.md §7: sets the System/Light/Dark appearance
+    /// preference and persists it — same "mutate + persist" shape as `setAccent`/`setDensity`
+    /// above. Deliberately does NOT touch `NSApp.appearance` here: that's an AppKit-only side
+    /// effect and this file is compiled for iOS too (`#if canImport(AppKit)` at the top of this
+    /// file). `VolarApp.swift`'s `AppDelegate` observes this property (same `withObservationTracking`
+    /// re-arm pattern as `observeCaptureState()` there) and applies it to `NSApp.appearance` —
+    /// both at launch and live, the moment this setter runs.
+    func setAppearance(_ pref: AppearancePreference) {
+        appearance = pref
+        UserDefaults.standard.set(pref.rawValue, forKey: Self.appearanceKey)
     }
 
     /// Sets the ambient visual mode and persists it, so it survives relaunch.

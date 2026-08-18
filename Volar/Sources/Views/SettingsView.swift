@@ -14,6 +14,16 @@ import Speech
 import UniformTypeIdentifiers
 import UserNotifications
 
+/// Recessed "well" fill behind key-combo chips and the code preview block (light-mode fix,
+/// specs/009-light-mode-list-v2/design.md §7 follow-up — anh Khôi 2026-08-19). The original
+/// `Color.black.opacity(0.25)` darkened the dark-mode `bg` (`#1C1C1E`) just slightly, reading as a
+/// subtle recess. A flat black film at the SAME 0.25 alpha over the light-mode `bg` (`#FFFFFF`)
+/// reads as a heavy gray box instead — not a recess, a slab — so this keeps black on both sides but
+/// tunes the alpha per mode rather than reusing `VolarColor.veil(_:)` (which would also flip to a
+/// WHITE film in dark mode, the wrong direction for a "well"). File-scope (not a `Theme.swift`
+/// token) since only this file's three well-style chips use it.
+private let volarWellFill = Color(volarLight: 0x000000, lightOpacity: 0.04, dark: 0x000000, darkOpacity: 0.25)
+
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
         case general, hotkeys, notifications, permissions, appearance, integrations, account, about
@@ -68,8 +78,6 @@ struct SettingsView: View {
     @State private var showReminders = true
     @State private var notifSound = true
     @State private var focusModeAware = false
-
-    @State private var themeChoice = "dark"
 
     // "Launch at login" — unlike every `@State` above this line, this is NOT cosmetic/local: it
     // mirrors the REAL `SMAppService.mainApp.status` (`LoginItem.swift`), re-read fresh in
@@ -560,7 +568,7 @@ struct SettingsView: View {
                 }
                 .padding(.horizontal, 10)
                 .frame(height: 28)
-                .background(Color.black.opacity(0.25))
+                .background(volarWellFill)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .volarHairline(cornerRadius: 8)
             }
@@ -888,10 +896,27 @@ struct SettingsView: View {
 
     private func appearanceTab(appState: AppState) -> some View {
         VStack(spacing: 16) {
-            SettingsRow(label: "Theme", hint: "Volar is dark-only — the way Mac power users live.") {
-                Segmented(value: $themeChoice, options: [
-                    .init(id: "dark", label: "Dark"), .init(id: "system", label: "Match system", disabled: true),
-                ])
+            // specs/009-light-mode-list-v2/design.md §7, moved here from General per anh Khôi
+            // (2026-08-19): the old "Theme" row above was a dead `@State` control ("Volar is
+            // dark-only" — no longer true now that a real light palette exists) that never
+            // touched `AppState`. This is the real one: routes through `AppState.setAppearance`
+            // (persists to UserDefaults + applies to `NSApp.appearance` live — see
+            // `VolarApp.swift`'s `observeAppearancePreference()`), same
+            // `Picker`/`Binding(get:set:)`/rawValue convention as "Speech engine"/"Task parsing"
+            // in the General tab.
+            SettingsRow(label: "Appearance", hint: "System follows your Mac's Light/Dark setting. Light and Dark pin Volar regardless of it.") {
+                Picker("", selection: Binding(
+                    get: { appState.appearance.rawValue },
+                    set: { if let pref = AppearancePreference(rawValue: $0) { appState.setAppearance(pref) } }
+                )) {
+                    ForEach(AppearancePreference.allCases) { pref in
+                        Text(pref.label).tag(pref.rawValue)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .tint(accentColors.solid)
+                .frame(width: 200)
             }
             SettingsRow(label: "Background", hint: "A live scene or your own image behind the glass. Task list and panels stay readable on top.") {
                 Segmented(
@@ -941,7 +966,11 @@ struct SettingsView: View {
                             .fill(candidate.accent.solid)
                             .frame(width: 22, height: 22)
                             .overlay(
-                                Circle().stroke(selected ? Color.white : VolarColor.veil(0.2), lineWidth: 0.5)
+                                // Was `Color.white` — invisible on a white light-mode bg, so the
+                                // selected swatch's ring vanished (2026-08-19 light-mode fix).
+                                // `VolarColor.textPri` self-inverts (near-black light / near-white
+                                // dark), so the ring stays readable against either.
+                                Circle().stroke(selected ? VolarColor.textPri : VolarColor.veil(0.2), lineWidth: 0.5)
                             )
                             .overlay(
                                 Circle().stroke(candidate.accent.solid, lineWidth: selected ? 1.5 : 0)
@@ -1094,7 +1123,7 @@ struct SettingsView: View {
                 .textSelection(.enabled)
                 .padding(10)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(Color.black.opacity(0.25))
+                .background(volarWellFill)
                 .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
                 .volarHairline(cornerRadius: 8)
 
@@ -1168,8 +1197,12 @@ struct SettingsView: View {
         .background(solid ? accentColors.solid : VolarColor.surfaceHi)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .overlay(
+            // `.strokeBorder` (was `.stroke`) — same `RoundedRectangle(cornerRadius: 8)` shape as
+            // the `.clipShape` two lines up, so a centered `.stroke` would draw half its 0.5pt line
+            // outside that clip boundary; `.strokeBorder` draws entirely inside, staying flush with
+            // the actual clipped edge.
             RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(solid ? VolarColor.veil(0.18) : VolarColor.borderHi, lineWidth: 0.5)
+                .strokeBorder(solid ? VolarColor.veil(0.18) : VolarColor.borderHi, lineWidth: 0.5)
         )
     }
 
@@ -1626,7 +1659,11 @@ struct SettingsView: View {
             .foregroundStyle(appState.accountTier == .pro ? VolarColor.done : VolarColor.textSec)
             .padding(.horizontal, 8)
             .padding(.vertical, 3)
-            .background((appState.accountTier == .pro ? VolarColor.done : Color.white).opacity(0.14))
+            // Was `Color.white.opacity(0.14)` for the Free branch — invisible on a white light-mode
+            // bg (2026-08-19 light-mode fix). `VolarColor.veil(0.14)` already bakes in the 0.14 and
+            // self-inverts polarity, so it's swapped in whole rather than composed with `.opacity`
+            // again (that would double-apply the alpha).
+            .background(appState.accountTier == .pro ? VolarColor.done.opacity(0.14) : VolarColor.veil(0.14))
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 
@@ -1868,7 +1905,7 @@ private struct KeyRecorder: View {
         }
         .padding(.horizontal, 10)
         .frame(height: 28)
-        .background(Color.black.opacity(0.25))
+        .background(volarWellFill)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .volarHairline(cornerRadius: 8)
     }
