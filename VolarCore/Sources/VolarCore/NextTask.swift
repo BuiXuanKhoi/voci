@@ -85,6 +85,56 @@ public func eligibleTasks(in snapshot: [Task], now: Date) -> [Task] {
     }
 }
 
+/// Why a task ranks where it does, for UI display (specs/009-light-mode-list-v2 §6) — e.g. "quá
+/// hạn 2h" / "hạn hôm nay 16:00" / "ưu tiên cao" instead of making the user infer the order.
+///
+/// The cases mirror the first four tiers of `Task.orderedBefore(_:now:calendar:)` in the same
+/// order (tier 5, the id tiebreak, has no user-facing reason). This is a *reason*, not a
+/// *ranking* — `rankReason` does not re-run `orderedBefore` or compare tasks against each other;
+/// it classifies a single task against `now` using the same tier rules.
+public enum RankReason: Sendable, Equatable {
+    case inProgress
+    case overdue(by: TimeInterval)
+    case dueToday(Date)
+    case priority(Int)
+    case none
+}
+
+/// Classifies why `task` would rank highly, for display alongside it in a list — NOT a
+/// replacement for `orderedBefore`'s comparison and NOT used by `nextTask`/`eligibleTasksOrdered`
+/// (their ordering is untouched).
+///
+/// Tier order matches `orderedBefore` exactly: in-progress status, then overdue/due-today
+/// deadline, then explicit priority, then `.none`. Reuses `statusRank` and `isNearTermDeadline` —
+/// the same private helpers `orderedBefore` uses — so the "near-term" threshold and status
+/// ordering can never drift between the reason shown to the user and the actual comparator
+/// (see `AppState.eligibleOrder`'s past hand-copy mistake, backlog.md).
+///
+/// Pure: reads only its arguments, no global clock or `Calendar.current` (Constitution
+/// Principle III) — same contract as `orderedBefore`.
+public func rankReason(for task: Task, now: Date, calendar: Calendar) -> RankReason {
+    // Tier 1: in-progress status, same classifier `orderedBefore` tier 1 uses.
+    if statusRank(task.status) == statusRank(.inProgress) {
+        return .inProgress
+    }
+
+    // Tier 2: deadline urgency (today/overdue), same classifier `orderedBefore` tier 2 uses.
+    if let deadline = task.deadline, isNearTermDeadline(deadline, now: now, calendar: calendar) {
+        if deadline < now {
+            return .overdue(by: now.timeIntervalSince(deadline))
+        }
+        return .dueToday(deadline)
+    }
+
+    // Tier 3: explicit priority; `nil` (unset) falls through to `.none`, matching `orderedBefore`
+    // tier 3's treatment of unset priority as "sorts last, not a value".
+    if let priority = task.priority {
+        return .priority(priority)
+    }
+
+    return .none
+}
+
 extension Task {
     /// A strict total order over tasks for a given reference time: returns `true` iff `self`
     /// should be selected before `other`.

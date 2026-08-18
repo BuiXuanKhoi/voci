@@ -21,7 +21,13 @@ public enum Condition: Sendable, Equatable {
 extension Condition {
     /// Whether this condition currently holds, given a precomputed `id -> status` lookup over
     /// the snapshot and the reference instant `now`. Pure: no I/O, no clock reads.
-    func isSatisfied(statusByID: [UUID: TaskStatus], now: Date) -> Bool {
+    ///
+    /// `public` (specs/009-light-mode-list-v2/design.md): the UI layer needs to answer this exact
+    /// question too (`TaskRow`'s blocked/waiting chip, §5.6.3) — keeping this `internal` would
+    /// force a second hand-copied implementation outside the engine, which is precisely how
+    /// `AppState.eligibleOrder` drifted from `eligibleTasks` once before (backlog.md). One
+    /// definition, two callers.
+    public func isSatisfied(statusByID: [UUID: TaskStatus], now: Date) -> Bool {
         switch self {
         case .taskDone(let id):
             guard let status = statusByID[id] else {
