@@ -194,13 +194,19 @@ final class CalendarAccess {
     /// task into a wall. The permission for this was already granted and already requested for the
     /// task mirror — this reads it back for the first time.
     ///
-    /// Three exclusions, each load-bearing:
+    /// Filtered through `isBig` (design.md §2.1/§2.2 — see that function's doc comment) plus two
+    /// exclusions specific to "what's next", not shared with `busyBlocks`:
     ///  - **Volar's own mirror calendar.** Without this, Glance would announce your own tasks back
     ///    to you as if they were meetings — the mirror writes every deadline into a calendar.
     ///    `CalendarSync.volarCalendarID` is the identifier to pass here.
-    ///  - **All-day events.** "Alice's birthday" is not a thing that starts in 12 minutes.
     ///  - **Already-started events.** Glance answers "what's coming", not "what you're late for";
     ///    an event in progress has nothing actionable left to say on a one-second surface.
+    ///    (`isBig` itself has no opinion on "started" — `busyBlocks` needs in-progress events too.)
+    ///
+    /// ⚠️ BEHAVIOR CHANGE (design.md §2.2, deliberate): this used to only exclude all-day/mirror/
+    /// already-started events. Routing through `isBig` means Glance now ALSO stops announcing
+    /// `.free`-marked events and events the user has declined — both correct per §2.1, but a real
+    /// change from before, not a silent no-op refactor.
     ///
     /// Returns `nil` on anything other than full access rather than throwing: a missing calendar
     /// permission must degrade Glance to its normal self, never to an error.
@@ -218,7 +224,7 @@ final class CalendarAccess {
         )
         let next = eventStore.events(matching: predicate)
             .filter { event in
-                guard !event.isAllDay else { return false }
+                guard Self.isBig(event, now: now) else { return false }
                 guard let start = event.startDate, start > now else { return false }
                 if let excludingCalendarID, event.calendar?.calendarIdentifier == excludingCalendarID {
                     return false
@@ -228,11 +234,89 @@ final class CalendarAccess {
             .min { ($0.startDate ?? .distantFuture) < ($1.startDate ?? .distantFuture) }
 
         guard let next, let start = next.startDate else { return nil }
-        let title = (next.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return UpcomingEvent(
-            title: title.isEmpty ? "Untitled event" : title,
+            title: Self.displayTitle(next),
             start: start,
             minutesAway: max(0, Int(start.timeIntervalSince(now) / 60))
         )
+    }
+
+    /// A block of time occupied by a "big" event (`isBig`, §2.1) — used to warn about conflicts
+    /// when creating/reviewing tasks (design.md §2.4). Deliberately does NOT model attendees,
+    /// location, or any other event content — see §2.5 on why event titles never leave this layer
+    /// uninspected (never sent to `CloudParser`).
+    struct BusyBlock: Equatable, Sendable {
+        let title: String
+        let start: Date
+        let end: Date
+    }
+
+    /// Every `BusyBlock` intersecting `[from, to)`, filtered through `isBig` (§2.1) and excluding
+    /// `excludingCalendarID` (Volar's own mirror calendar — same reasoning as `nextEvent`, without
+    /// it the app would report its own tasks back as "meetings"). Sorted by `start` ascending.
+    ///
+    /// Returns `[]` — never throws — on anything other than full access. Same convention as
+    /// `nextEvent`: a missing permission (or, per §2.5, the separate "read my calendar" toggle
+    /// being off — that check lives in the caller, `AppState`, not here) must make the feature
+    /// disappear, not surface an error.
+    func busyBlocks(from: Date, to: Date, excludingCalendarID: String?) -> [BusyBlock] {
+        guard status == .granted, from < to else { return [] }
+
+        let predicate = eventStore.predicateForEvents(withStart: from, end: to, calendars: nil)
+        return eventStore.events(matching: predicate)
+            .filter { event in
+                guard Self.isBig(event, now: from) else { return false }
+                if let excludingCalendarID, event.calendar?.calendarIdentifier == excludingCalendarID {
+                    return false
+                }
+                return true
+            }
+            .compactMap { event -> BusyBlock? in
+                guard let start = event.startDate, let end = event.endDate else { return nil }
+                return BusyBlock(title: Self.displayTitle(event), start: start, end: end)
+            }
+            .sorted { $0.start < $1.start }
+    }
+
+    /// The ONE place "is this event big enough to matter" is decided (design.md §2.1) — both
+    /// `nextEvent` and `busyBlocks` route through this so the two calendar-reading paths can never
+    /// drift into two different ideas of "significant event". That drift is exactly the class of
+    /// bug `AppState.eligibleOrder`/`eligibleTasks` already cost this repo once (see backlog).
+    ///
+    /// Four conditions, ALL required:
+    ///  1. `availability != .free` — the PRIMARY criterion. This is the calendar's own busy/free
+    ///     flag, already self-declared by the user (or the invite they accepted) for exactly the
+    ///     question being asked here ("does this actually occupy time") — not a duration threshold
+    ///     this app invents.
+    ///  2. Not all-day — "Alice's birthday" doesn't occupy a block of the day.
+    ///  3. Not an event the user has explicitly DECLINED: their own attendee record
+    ///     (`EKParticipant.isCurrentUser == true`) shows `.declined`. Attending something you
+    ///     turned down isn't a conflict. `attendees` can be `nil` (no invitees, e.g. a
+    ///     self-created event) — that's simply "no declined record", not excluded.
+    ///  4. Duration >= 15 minutes — NOT the definition of "big" (condition 1 already answered
+    ///     that); this only suppresses noise from sub-15-minute markers/reminders that happen to
+    ///     be marked busy.
+    private static func isBig(_ event: EKEvent, now: Date) -> Bool {
+        // `now` is not read by any of the four conditions today — kept in the signature because
+        // design.md §2.2 pins it there and both call sites already have it in hand for free.
+        // `nextEvent`'s own "already started" exclusion deliberately does NOT live here (it's not
+        // part of "big", and `busyBlocks` needs in-progress events too).
+        guard event.availability != .free else { return false }
+        guard !event.isAllDay else { return false }
+        if let attendees = event.attendees,
+           let me = attendees.first(where: { $0.isCurrentUser }),
+           me.participantStatus == .declined {
+            return false
+        }
+        guard let start = event.startDate, let end = event.endDate else { return false }
+        guard end.timeIntervalSince(start) >= 15 * 60 else { return false }
+        return true
+    }
+
+    /// Shared title-normalization so `nextEvent` and `busyBlocks` never drift on this either —
+    /// empty/whitespace-only titles read as "Untitled event".
+    private static func displayTitle(_ event: EKEvent) -> String {
+        let title = (event.title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return title.isEmpty ? "Untitled event" : title
     }
 }

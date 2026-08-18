@@ -7,21 +7,23 @@
 // working-memory load, `docs/adhd-research-v1.md` §7). Volar holding the anchor externally is
 // what frees that working memory back up (Barkley-style externalization).
 //
-// PROXY WARNING (anh Khôi, read before touching this file): Volar has no "appointment" kind.
-// `TaskItem.startTime` looks tempting but is INERT — it is only ever set from an urgent utterance
-// ("làm ngay lập tức" / "right now") and deliberately does not drive ordering/eligibility/anything
-// (`TaskItem.swift`'s own doc comment on `startTime`). The only real hard-instant Volar owns today
-// is `deadline`, so this file treats "the earliest upcoming `deadline`" as a stand-in for "the
-// next hard anchor of the day". That is a proxy, not a modeling claim that every deadline is an
-// appointment — when Volar eventually grows a real `.appointment`/calendar-anchored kind, THIS is
-// the file to narrow. Until then: calendar read access was explicitly rejected by anh Khôi on
-// 2026-08-07 (`specs/006-cues-and-waiting/design.md` §0.2) — this file must never grow an
-// `EventKit`/`EKEvent`/`busyIntervals` dependency to "improve" on the proxy.
+// ANCHORS ARE DATA, NOT DISCOVERED HERE (anh Khôi lật lại quyết định 2026-08-07 vào 2026-08-19,
+// specs/010-calendar-and-hard-deadlines/design.md §0/§2.3): Volar now reads the calendar
+// (`CalendarAccess.busyBlocks`) and this file's job changed accordingly — `decide` used to hunt
+// for "the earliest upcoming `deadline`" itself as a proxy for "the next hard anchor of the day"
+// (task deadlines were the only hard instant Volar had). It no longer hunts for anything: the
+// caller now hands in `anchors: [HardAnchor]`, already merged from BOTH task deadlines and
+// calendar events, and `decide` just picks the nearest future one. The reason this file still must
+// NEVER grow an `EventKit`/`EKEvent`/`Calendar.current` dependency is no longer "Volar can't read
+// calendars" (it can, elsewhere) — it's that `decide` has to stay a PURE function so it stays
+// unit-testable with hand-built values and so `AppState` (the one place allowed to know about both
+// task storage and EventKit) is the only place that ever has to reconcile the two sources.
 //
 // Pure-decision convention this repo already follows (`FullScreenEscalationDecision.swift`'s own
-// header): no `Date()`, no `UserDefaults`, no SwiftData/`AppState`, no calendar. Every input is a
-// plain parameter, including the fallback duration — so this stays unit-testable with hand-built
-// `TaskItem` values (`Tests/WaitingModeTests.swift`) with zero UI/store involved.
+// header): no `Date()`, no `UserDefaults`, no SwiftData/`AppState`, no calendar, no `import
+// EventKit`. Every input is a plain parameter, including the fallback duration and now the anchor
+// list itself — so this stays unit-testable with hand-built `TaskItem`/`HardAnchor` values
+// (`Tests/WaitingModeTests.swift`) with zero UI/store/EventKit involved.
 //
 // Ordering discipline (design.md §2, §5 — do not relax): `eligibleOrder` is the order
 // `VolarCore.nextTask` already decided. This file only FILTERS that order looking for the first
@@ -30,12 +32,30 @@
 import Foundation
 
 enum WaitingMode {
-    /// One "waiting mode" reading — the next hard anchor of the day (see proxy warning above) plus
-    /// what, if anything, fits in the time before it.
+    /// One hard moment in the day the caller wants `decide` to weigh — a task's `deadline`, or a
+    /// calendar event's start (`CalendarAccess.BusyBlock`). `decide` treats both uniformly: whoever
+    /// is nearest in the future wins the anchor slot. Merging the two sources is `AppState`'s job,
+    /// not this file's — see the header comment above.
+    struct HardAnchor: Equatable, Sendable {
+        enum Source: Equatable, Sendable {
+            /// Backed by a real `TaskItem` — carries its id so `decide` can still enforce "an
+            /// anchor never suggests itself" and "is the anchor task itself already actionable".
+            case deadline(taskID: UUID)
+            /// Backed by a calendar event — not a task, so there is no id to exclude/look up.
+            case calendar
+        }
+        let title: String
+        let at: Date
+        let source: Source
+    }
+
+    /// One "waiting mode" reading — the next hard anchor of the day (see `HardAnchor`) plus what,
+    /// if anything, fits in the time before it.
     struct Decision: Sendable, Equatable {
-        /// The task whose `deadline` is being held. NEVER equal to `suggestedTaskId` (an anchor
-        /// can't suggest itself — see `decide` below).
-        let anchorTaskId: UUID
+        /// The task backing this anchor, when `HardAnchor.source == .deadline` — `nil` for a
+        /// calendar-sourced anchor, which has no task. NEVER equal to `suggestedTaskId` (a
+        /// task-backed anchor can't suggest itself — see `decide` below).
+        let anchorTaskId: UUID?
         /// Carried alongside the id purely so callers (menu bar / popover copy) don't need a
         /// second task lookup just to render "Xe đón lúc 1:30 — anchorTitle".
         let anchorTitle: String
@@ -47,10 +67,12 @@ enum WaitingMode {
         /// buffer exists so "suggest a task that fits" never means "arrive at the anchor exactly
         /// as time runs out" — see `bufferMinutes`.
         let fitMinutes: Int
-        /// `true` iff the anchor's own id appears in `eligibleOrder` — i.e. `VolarCore.nextTask`
-        /// already considers the anchor itself an actionable task right now (not blocked by any
-        /// condition). When `true`, `suggestedTaskId` is ALWAYS `nil` — see that field's doc
-        /// comment for why, and the Opus review (2026-08-08) that caught the bug this guards.
+        /// `true` iff `anchorTaskId` is non-`nil` AND that id appears in `eligibleOrder` — i.e.
+        /// `VolarCore.nextTask` already considers the anchor itself an actionable task right now
+        /// (not blocked by any condition). A calendar-sourced anchor (`anchorTaskId == nil`) is
+        /// never "eligible" in this sense — it isn't a task the engine has an opinion on. When
+        /// `true`, `suggestedTaskId` is ALWAYS `nil` — see that field's doc comment for why, and
+        /// the Opus review (2026-08-08) that caught the bug this guards.
         let anchorIsEligible: Bool
         /// First task in `eligibleOrder` (engine's own order, untouched) whose duration fits
         /// inside `fitMinutes` — but ONLY computed when `anchorIsEligible == false`.
@@ -61,10 +83,9 @@ enum WaitingMode {
         /// SOME OTHER task that also takes ~30 minutes and suggests THAT instead — telling the
         /// user to spend the last 30 minutes before their own deadline on a different task
         /// entirely. Root cause: waiting mode exists for APPOINTMENTS — a moment the user must
-        /// merely be present for, not execute — but Volar has no appointment kind, so `deadline`
-        /// is used as a proxy (see the proxy warning at the top of this file). "Hold the anchor"
-        /// is always a valid use of a deadline; "fill the gap before it" is not, whenever the
-        /// anchor is itself the very task the user should be doing right now. `anchorIsEligible`
+        /// merely be present for, not execute. "Hold the anchor" is always a valid use of a
+        /// deadline; "fill the gap before it" is not, whenever the anchor is itself the very task
+        /// the user should be doing right now. `anchorIsEligible`
         /// is exactly that signal: if the engine already says the anchor is actionable
         /// (`.todo`/`.inProgress`, not blocked by any condition), the correct suggestion is
         /// always "the anchor itself", which this field can't even express as a *different* id —
@@ -85,11 +106,14 @@ enum WaitingMode {
 
     /// Decide today's waiting-mode reading, or `nil` if there is nothing to hold.
     ///
-    /// Anchor selection: the `.todo`/`.inProgress` task (never `.done`/`.archived`) with the
-    /// earliest `deadline` strictly inside `(now, now + horizonMinutes']` — i.e. `deadline > now`
-    /// (equal-to-now does not count as "future") and `deadline <= now + horizonMinutes`. No anchor
-    /// in that window ⇒ `nil`. Silence is the default here on purpose (design.md §2): an empty
-    /// horizon must never be dressed up into ambient noise.
+    /// Anchor selection: the `HardAnchor` (from `anchors`, already merged by the caller from task
+    /// deadlines + calendar events — see the file header) with the earliest `at` strictly inside
+    /// `(now, now + horizonMinutes']` — i.e. `at > now` (equal-to-now does not count as "future")
+    /// and `at <= now + horizonMinutes`. No anchor in that window ⇒ `nil`. Silence is the default
+    /// here on purpose (design.md §2): an empty horizon must never be dressed up into ambient
+    /// noise. `decide` does NOT filter `anchors` by task status or anything else — that filtering
+    /// (e.g. excluding `.done`/`.archived` tasks' deadlines) is the caller's job when building the
+    /// list, since a calendar-sourced anchor has no status to check in the first place.
     ///
     /// Suggestion: walks `eligibleOrder` — the order `VolarCore.nextTask` already produced —
     /// front to back, and returns the FIRST task (excluding the anchor itself) whose
@@ -111,30 +135,30 @@ enum WaitingMode {
     /// direction; there is no safe way to shorten this input.
     static func decide(
         now: Date,
+        anchors: [HardAnchor],
         tasks: [TaskItem],
         eligibleOrder: [UUID],
         defaultDurationMinutes: Int = 30
     ) -> Decision? {
         let horizonEnd = now.addingTimeInterval(TimeInterval(horizonMinutes * 60))
 
-        // Resolve deadline into a non-optional up front so nothing downstream force-unwraps it.
-        let anchorCandidates: [(task: TaskItem, deadline: Date)] = tasks.compactMap { task in
-            guard task.status != .done, task.status != .archived else { return nil }
-            guard let deadline = task.deadline else { return nil }
-            guard deadline > now, deadline <= horizonEnd else { return nil }
-            return (task, deadline)
-        }
+        let anchorCandidates = anchors.filter { $0.at > now && $0.at <= horizonEnd }
 
-        // Earliest deadline wins. `min(by:)` keeps the FIRST minimal element on a tie (stable),
-        // which only matters for two tasks sharing the exact same instant — not a case the design
-        // calls out, so "first in `tasks` order" is an acceptable, deterministic tiebreak.
-        guard let anchor = anchorCandidates.min(by: { $0.deadline < $1.deadline }) else {
+        // Earliest `at` wins. `min(by:)` keeps the FIRST minimal element on a tie (stable), which
+        // only matters for two anchors sharing the exact same instant — not a case the design
+        // calls out, so "first in `anchors` order" is an acceptable, deterministic tiebreak.
+        guard let anchor = anchorCandidates.min(by: { $0.at < $1.at }) else {
             return nil
         }
 
-        let minutesUntil = Int(anchor.deadline.timeIntervalSince(now) / 60)
+        let anchorTaskId: UUID? = {
+            if case let .deadline(taskID) = anchor.source { return taskID }
+            return nil
+        }()
+
+        let minutesUntil = Int(anchor.at.timeIntervalSince(now) / 60)
         let fitMinutes = max(0, minutesUntil - bufferMinutes)
-        let anchorIsEligible = eligibleOrder.contains(anchor.task.id)
+        let anchorIsEligible = anchorTaskId.map { eligibleOrder.contains($0) } ?? false
 
         // `reduce(into:)` (first-wins) rather than `Dictionary(uniqueKeysWithValues:)` — the latter
         // traps at runtime if the caller ever hands in a duplicate id, and this function has no
@@ -145,13 +169,13 @@ enum WaitingMode {
         var suggestedTaskId: UUID?
         // Anchor already actionable ⇒ never search for a substitute (Opus review 2026-08-08 —
         // see `anchorIsEligible`'s doc comment for the exact bug this skip prevents). The
-        // `candidateId != anchor.task.id` guard below is therefore redundant *by construction*
-        // whenever this loop runs (anchor not eligible ⇒ its id can't be in `eligibleOrder`
-        // either) — kept anyway as cheap belt-and-suspenders against a future refactor that
-        // decouples the two checks.
+        // `candidateId != anchorTaskId` guard below is therefore redundant *by construction*
+        // whenever this loop runs (anchor not eligible ⇒ its id, if any, can't be in
+        // `eligibleOrder` either) — kept anyway as cheap belt-and-suspenders against a future
+        // refactor that decouples the two checks.
         if !anchorIsEligible {
             for candidateId in eligibleOrder {
-                guard candidateId != anchor.task.id else { continue }
+                if let anchorTaskId, candidateId == anchorTaskId { continue }
                 guard let candidate = tasksById[candidateId] else { continue }
                 let duration = candidate.durationMinutes ?? defaultDurationMinutes
                 if duration <= fitMinutes {
@@ -162,9 +186,9 @@ enum WaitingMode {
         }
 
         return Decision(
-            anchorTaskId: anchor.task.id,
-            anchorTitle: anchor.task.title,
-            anchorAt: anchor.deadline,
+            anchorTaskId: anchorTaskId,
+            anchorTitle: anchor.title,
+            anchorAt: anchor.at,
             minutesUntil: minutesUntil,
             fitMinutes: fitMinutes,
             anchorIsEligible: anchorIsEligible,
