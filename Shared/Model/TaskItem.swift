@@ -23,6 +23,17 @@ enum When: Sendable, Equatable, Codable {
     case later
 }
 
+/// specs/010-calendar-and-hard-deadlines/design.md §3.1/§3.5 — whether `deadline` is a mark the
+/// user can freely move (`.soft`) or one an outside party enforces with a real consequence
+/// (`.hard`, e.g. a tax filing). v1 is manual-toggle only, never inferred from the utterance
+/// (§3.5: guessing "does this have legal consequence" from words is exactly the wrong kind of
+/// silent-failure guess). Deliberately UI-facing only — see `TaskItem.deadlineKind` for why this
+/// never reaches `VolarCore.Task`.
+enum DeadlineKind: String, Sendable, Equatable, CaseIterable {
+    case soft   // mốc tự đặt — đẩy được, không ai phạt
+    case hard   // mốc bên ngoài áp, có chế tài — app không đẩy được
+}
+
 struct TaskItem: Identifiable, Sendable, Equatable {
     let id: UUID
     var title: String
@@ -33,6 +44,11 @@ struct TaskItem: Identifiable, Sendable, Equatable {
     /// `NextTask.swift`) and the reminder subsystem. Contrast with `startTime` immediately below,
     /// which is a different instant entirely.
     var deadline: Date?
+    /// specs/010-calendar-and-hard-deadlines/design.md §3.1 — `.soft` (default) vs `.hard`.
+    /// Meaningless when `deadline == nil`; deliberately NOT validated/normalized back to `.soft`
+    /// in that case (no throw, no silent coercion) — every read site that cares must already be
+    /// gating on `deadline` being non-nil first, same as `timeBadge` below does.
+    var deadlineKind: DeadlineKind = .soft
     /// The moment the user said they'd START working — set from an urgent utterance ("làm ngay
     /// lập tức" / "right now"), where `startTime` = the instant the utterance was spoken.
     /// Deliberately inert: it does NOT drive ordering, eligibility, or reminders (those all stay
@@ -94,6 +110,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         priority: Priority,
         status: TaskStatus = .todo,
         deadline: Date? = nil,
+        deadlineKind: DeadlineKind = .soft,
         startTime: Date? = nil,
         conditions: [VolarCore.Condition] = [],
         createdAt: Date = Date(),
@@ -118,6 +135,7 @@ struct TaskItem: Identifiable, Sendable, Equatable {
         self.priority = priority
         self.status = status
         self.deadline = deadline
+        self.deadlineKind = deadlineKind
         self.startTime = startTime
         self.conditions = conditions
         self.createdAt = createdAt

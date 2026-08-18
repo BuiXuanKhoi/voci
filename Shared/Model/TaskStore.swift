@@ -221,9 +221,11 @@ final class TaskStore {
     }
 
     /// Manual-edit contract §1.3
-    /// (`specs/002-workflow-command-center/contracts/manual-edit-contract.md`): writes ONLY the 7
-    /// fields a user can edit by hand on an already-created task — `title`, `details`, `notes`,
-    /// `priorityRaw`, `startTime`, `deadline`, `durationMinutes`, `reminderOverride` — then saves.
+    /// (`specs/002-workflow-command-center/contracts/manual-edit-contract.md`): writes the 7
+    /// contract fields a user can edit by hand on an already-created task — `title`, `details`,
+    /// `notes`, `priorityRaw`, `startTime`, `deadline`, `durationMinutes`, `reminderOverride` —
+    /// plus `deadlineKind` (specs/010-calendar-and-hard-deadlines/design.md §3.1/§3.2: the
+    /// `.hard`/`.soft` toggle in task detail writes through this same path) — then saves.
     /// `AppState.updateTask` (the manual-edit contract's single write path, §1.4) is the sole
     /// caller. Returns `false` (no save) for an unknown id.
     ///
@@ -234,7 +236,7 @@ final class TaskStore {
     /// structure, recurring-task no-children rule, completion history) this call has no validated
     /// snapshot to re-check. `mergeIntoExisting` earns the right to use `apply` by re-running
     /// `sanitizedConditions`/the recurrence-vs-children guard on the merged result first; a bare
-    /// 7-field manual edit does none of that and has no business touching any of the four.
+    /// 8-field manual edit does none of that and has no business touching any of the four.
     @discardableResult
     func updateEditableFields(from item: TaskItem) -> Bool {
         guard let model = fetchModel(item.id) else { return false }
@@ -244,6 +246,7 @@ final class TaskStore {
         model.priorityRaw = item.priority.rawValue
         model.startTime = item.startTime
         model.deadline = item.deadline
+        model.deadlineKind = item.deadlineKind
         model.durationMinutes = item.durationMinutes
         model.reminderOverride = item.reminderOverride
         save()
@@ -653,6 +656,7 @@ final class TaskStore {
         model.notes = item.notes
         model.sourceTranscript = item.sourceTranscript
         model.kind = item.kind
+        model.deadlineKind = item.deadlineKind
         // Rule 2 (recurrence only on leaves): a brand-new task has no children yet, so accepting
         // `item.recurrence` unconditionally here can never violate it — children can only be
         // attached afterward via `setParent`, which itself rejects attaching to a recurring

@@ -98,6 +98,17 @@ final class VolarTask {
     var notes: String?
     var sourceTranscript: String?
     var kindRaw: String = "task"
+    /// specs/010-calendar-and-hard-deadlines/design.md §3.1 — mirrors `TaskItem.deadlineKind`.
+    /// Raw-string backed (not the enum directly), same reason `statusRaw`/`whenRaw`/`kindRaw`
+    /// above are: keeps the persisted schema decoupled from the Swift enum shape. Literal
+    /// default (not a static-property reference), same convention `kindRaw`/`isSensitive` use,
+    /// for a plain unambiguous default the `@Model` macro can see for lightweight-migration
+    /// inference.
+    /// // UNVERIFIED: confirm on Mac that adding this new non-optional `String` attribute to
+    /// the existing `@Model` performs lightweight migration in-place for rows written before
+    /// this column existed (same caveat this file already carries for `kindRaw`/`isSensitive`/
+    /// `conditionsData` above) rather than requiring a destructive store reset.
+    var deadlineKindRaw: String = "soft"
     var resumeNote: String?
     var switchAwayCount: Int = 0
     var completedAt: Date?
@@ -224,6 +235,15 @@ final class VolarTask {
         set { kindRaw = newValue.rawValue }
     }
 
+    /// specs/010-calendar-and-hard-deadlines/design.md §3.1. Unrecognized/corrupted raw value
+    /// fails closed to `.soft` — same "never invent a stricter state than the data supports"
+    /// posture as `status(from:)`/`when(from:)` below (a `.hard` marking should only ever come
+    /// from an explicit prior write, never from a decode failure).
+    var deadlineKind: DeadlineKind {
+        get { DeadlineKind(rawValue: deadlineKindRaw) ?? .soft }
+        set { deadlineKindRaw = newValue.rawValue }
+    }
+
     var recurrence: Recurrence? {
         get { recurrenceData.flatMap { try? JSONDecoder().decode(Recurrence.self, from: $0) } }
         set { recurrenceData = newValue.flatMap { try? JSONEncoder().encode($0) } }
@@ -289,6 +309,7 @@ final class VolarTask {
             priority: Priority(rawValue: priorityRaw) ?? .medium,
             status: status,
             deadline: deadline,
+            deadlineKind: deadlineKind,
             startTime: startTime,
             conditions: conditions,
             createdAt: createdAt,
@@ -319,6 +340,7 @@ final class VolarTask {
         priorityRaw = item.priority.rawValue
         status = item.status
         deadline = item.deadline
+        deadlineKind = item.deadlineKind
         startTime = item.startTime
         conditions = item.conditions
         createdAt = item.createdAt
