@@ -71,14 +71,31 @@ private final class WindowChromeView: NSView {
         // Titlebar thôi vẽ nền riêng và để lộ `backgroundColor` của window bên dưới — đây là thứ
         // làm header và body thành một màu. KHÔNG kèm `.fullSizeContentView`, layout giữ nguyên.
         window.titlebarAppearsTransparent = true
+        // Đường kẻ mảnh dưới titlebar/toolbar: AppKit vẽ nó bằng màu hệ thống, không theo
+        // `backgroundColor` mình vừa đặt, nên nó là vệt sáng còn sót lại ngay cả khi cả dải đã
+        // cùng màu. `.none` bỏ hẳn — hai thứ này độc lập nhau, tắt cái này không thay cái kia.
+        window.titlebarSeparatorStyle = .none
+        window.toolbar?.showsBaselineSeparator = false
         // Chữ "Volar" trên titlebar bị ẩn: một dải màu liền không nên có chữ lơ lửng giữa nó.
         // Lựa chọn THẨM MỸ — đổi thành `.visible` nếu anh Khôi muốn giữ tiêu đề.
         window.titleVisibility = .hidden
-        // Resolve `VolarColor.bg` dưới đúng appearance của cửa sổ ngay lúc gán. Đây là chỗ hai bản
-        // trước sai: chúng resolve dưới appearance đang hiện hành lúc launch (có thể là aqua) rồi
-        // giữ nguyên giá trị trắng đó mãi.
-        window.effectiveAppearance.performAsCurrentDrawingAppearance {
-            window.backgroundColor = NSColor(VolarColor.bg)
-        }
+        // Tự rẽ nhánh theo appearance của CHÍNH cửa sổ này, không đi qua `NSColor(VolarColor.bg)`.
+        //
+        // Lý do (anh Khôi 2026-08-20: "máy đang dark, nhưng header vẫn light"): `VolarColor.bg` là
+        // một `SwiftUI.Color` bọc quanh `NSColor(name:dynamicProvider:)`. Bắc cầu ngược
+        // `Color -> NSColor` ở NGOÀI một lượt vẽ của SwiftUI là chỗ không có gì bảo đảm: không có
+        // environment `colorScheme` nào ở đây, và khi không resolve được thì nó rơi về nhánh mặc
+        // định — nhánh light, tức TRẮNG. `performAsCurrentDrawingAppearance` không cứu được, vì
+        // thứ bị thiếu không phải drawing appearance mà là ngữ cảnh SwiftUI.
+        //
+        // Hai hex dưới đây là bản SAO CÓ CHỦ Ý của `VolarColor.bg` (design.md §3.1: `#FFFFFF`
+        // light / `#1C1C1E` dark). Trùng lặp giá trị là cái giá phải trả để chắc chắn, và nó an
+        // toàn vì `viewDidChangeEffectiveAppearance` ở trên áp lại mỗi lần Light↔Dark đổi — không
+        // có giá trị nào bị đóng băng. Nếu sau này `VolarColor` có một API resolve-về-NSColor tin
+        // được thì thay chỗ này, nhưng phải nhìn tận mắt trên Mac rồi mới đổi.
+        let isDark = window.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        window.backgroundColor = isDark
+            ? NSColor(srgbRed: CGFloat(0x1C) / 255, green: CGFloat(0x1C) / 255, blue: CGFloat(0x1E) / 255, alpha: 1)
+            : NSColor(srgbRed: 1, green: 1, blue: 1, alpha: 1)
     }
 }

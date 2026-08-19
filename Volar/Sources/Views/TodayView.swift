@@ -643,7 +643,9 @@ struct TodayView: View {
             }
             .padding(.horizontal, 40)
             .padding(.vertical, 44)
-            .frame(maxWidth: .infinity, minHeight: 300)
+            // 300 -> 220 (anh Khôi, ảnh 2026-08-20: card rỗng mênh mông cho một task hai dòng).
+            // Vẫn là khối cao nhất màn hình nên NOW không mất vị thế, chỉ bớt khoảng trống chết.
+            .frame(maxWidth: .infinity, minHeight: 220)
             // Spotlight glow must sit BETWEEN the ink base and the text/chips — applying it here
             // (innermost, before the opaque `.background(VolarColor.bg)` below) instead of after
             // is what keeps the warm pool actually visible instead of hidden behind the opaque

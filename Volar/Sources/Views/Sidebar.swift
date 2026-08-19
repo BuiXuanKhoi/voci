@@ -52,6 +52,7 @@ struct Sidebar: View {
                     count: appState.openTasks.count,
                     active: appState.selectedSection == .today
                 ) { appState.selectedSection = .today }
+                peekRows(todayPeek)
                 SidebarItem(
                     icon: .upcoming,
                     label: "Upcoming",
@@ -134,6 +135,26 @@ struct Sidebar: View {
     //     Cột phải là TUỔI ("3d"), không phải hạn — thứ vừa nói ra không nên chìm mất.
 
     private static let peekLimit = 3
+
+    /// Ba task đầu của Today, THEO ĐÚNG THỨ TỰ ENGINE (`appState.openTasks`) — tức là cùng NOW và
+    /// NEXT mà cột chính đang hiện, ở đúng thứ tự đó.
+    ///
+    /// Lúc đầu Today cố ý KHÔNG có peek (cột chính đã dành hẳn một hero card cho NOW + một row cho
+    /// NEXT, nên lồng thêm vào sidebar là hiện cùng mấy task đó hai lần). Anh Khôi lật lại
+    /// 2026-08-20: cả ba section đều phải có, cho giống sidebar Notion. Sự trùng lặp đó là có
+    /// thật và là cái giá đã biết trước, không phải sót.
+    private var todayPeek: [PeekEntry] {
+        let now = Date()
+        return appState.openTasks.prefix(Self.peekLimit).map { task in
+            PeekEntry(
+                task: task,
+                // `timeBadge` (giờ của hạn) chứ không phải nhãn ngày như Upcoming: mọi thứ trong
+                // Today đều là hôm nay, nên ngày không mang thông tin gì, chỉ giờ mới mang.
+                trailing: task.timeBadge ?? "",
+                tint: DeadlineUrgency.tint(for: task, now: now)
+            )
+        }
+    }
 
     /// Struct chứ không phải tuple `(task:trailing:)`: `ForEach` cần định danh từng row, mà Swift
     /// KHÔNG cho key path trỏ vào phần tử tuple (`\.task.id` trên một tuple là lỗi compile). Cho nó
