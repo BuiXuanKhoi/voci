@@ -95,7 +95,7 @@ struct TodayView: View {
                 .zIndex(20)
                 .task(id: appState.reminderBanner?.id) {
                     guard appState.reminderBanner != nil else { return }
-                    try? await Task.sleep(for: .seconds(5))
+                    try? await _Concurrency.Task.sleep(for: .seconds(5))
                     appState.dismissBanner()
                 }
             }
@@ -500,6 +500,8 @@ struct TodayView: View {
                                 .foregroundStyle(VolarColor.bg)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 10)
+                                // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09).
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .background(
@@ -526,6 +528,7 @@ struct TodayView: View {
                             .foregroundStyle(VolarColor.textPri)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 10)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.surfaceHi)
@@ -555,6 +558,7 @@ struct TodayView: View {
                                 .foregroundStyle(VolarColor.textPri)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 10)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.surfaceHi)
@@ -582,6 +586,7 @@ struct TodayView: View {
                                 .foregroundStyle(VolarColor.textPri)
                                 .padding(.horizontal, 16)
                                 .padding(.vertical, 10)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.surfaceHi)
@@ -616,6 +621,7 @@ struct TodayView: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.vertical, 10)
+                            .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
                         .background(VolarColor.instrumentDim.opacity(0.18))
@@ -849,6 +855,7 @@ struct TodayView: View {
             } label: {
                 VolarIcon(appState.focusPaused ? .play : .pause, size: 10, color: VolarColor.textPri)
                     .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .background(VolarColor.veil(0.08))
@@ -859,6 +866,7 @@ struct TodayView: View {
             } label: {
                 VolarIcon(.stop, size: 9, color: VolarColor.textSec)
                     .frame(width: 22, height: 22)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .background(VolarColor.veil(0.08))
@@ -901,6 +909,7 @@ struct TodayView: View {
                 .foregroundStyle(.white)
                 .padding(.horizontal, 9)
                 .padding(.vertical, 3)
+                .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .background(accentColors.solid)
@@ -982,6 +991,7 @@ private struct SettingsToolButton: View {
         SettingsLink {
             VolarIcon(.settings, size: 14, color: VolarColor.textSec, weight: .regular)
                 .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(SettingsToolButtonStyle())
         .background(isHovering ? VolarColor.veil(0.06) : .clear)
@@ -1030,6 +1040,7 @@ private struct SignInToolPill: View {
                 .foregroundStyle(accentColors.solid)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(SettingsToolButtonStyle())
         .background(accentColors.surface)
@@ -1224,6 +1235,7 @@ private struct NextPeekRow: View {
                         VolarIcon(.check, size: 9, color: VolarColor.bg, weight: .bold)
                     }
                 }
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
     }
@@ -1281,16 +1293,24 @@ private struct CollapsibleTaskSection: View {
         tasks.enumerated().map { (offset: $0.offset, task: $0.element) }
     }
 
+    /// design.md §3.1 — `deadlineKind` is meaningless without a `deadline` (same guard
+    /// `SweepView.SweepRow.isHardDeadline` applies): a `.hard`-tagged task whose deadline has
+    /// since been cleared has no outside date left to protect, so it must NOT be pinned above the
+    /// fold forever. One predicate for both halves so pinned + collapsible always partition
+    /// `indexedTasks` exactly — no row can go missing or render twice.
+    private func isPinned(_ task: TaskItem) -> Bool {
+        guard let alwaysVisibleKind else { return false }
+        return task.deadline != nil && task.deadlineKind == alwaysVisibleKind
+    }
+
     /// Always rendered, regardless of `expanded` — see `alwaysVisibleKind`'s doc comment.
     private var pinnedRows: [(offset: Int, task: TaskItem)] {
-        guard let alwaysVisibleKind else { return [] }
-        return indexedTasks.filter { $0.task.deadlineKind == alwaysVisibleKind }
+        indexedTasks.filter { isPinned($0.task) }
     }
 
     /// Everything NOT pinned — these are the only rows subject to `expanded`/the scroll cap.
     private var collapsibleRows: [(offset: Int, task: TaskItem)] {
-        guard let alwaysVisibleKind else { return indexedTasks }
-        return indexedTasks.filter { $0.task.deadlineKind != alwaysVisibleKind }
+        indexedTasks.filter { !isPinned($0.task) }
     }
 
     /// Roughly how many rows are visible before the drawer's own internal scroll takes over —
@@ -1387,6 +1407,7 @@ private struct CollapsibleTaskSection: View {
                     .foregroundStyle(VolarColor.textSec)
                     .padding(.horizontal, 10)
                     .padding(.vertical, 5)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .background(VolarColor.surfaceHi)
@@ -1492,6 +1513,7 @@ private struct DelegationAmbientSection: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 9)
                             .frame(height: 26)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .background(VolarColor.card)
@@ -1552,6 +1574,7 @@ private struct DelegationAmbientSection: View {
                 .foregroundStyle(solid ? Color.white : VolarColor.textPri)
                 .padding(.horizontal, 12)
                 .frame(height: 28)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .background(solid ? VolarColor.instrument : VolarColor.surfaceHi)
