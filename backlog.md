@@ -1,5 +1,10 @@
 # Backlog - voci
 
+> **★ SIDEBAR PEEK (anh Khôi chốt 2026-08-20, commit sau `d43ee09`).** Ba task đầu của Upcoming + Inbox hiện lồng dưới nav row, kiểu sidebar Notion. Today cố ý KHÔNG có (main column đã hiện đúng mấy task đó).
+> - [ ] **Verify bằng mắt trên Mac:** tên task bị cắt sớm cỡ nào trong 172pt; ba dòng lồng có làm sidebar chật khi Pro row + footer cùng hiện không; nếu chật thì nới sidebar lên ~210pt (anh Khôi đã cân nhắc và chọn giữ 172pt trước).
+> - [ ] **Windows + iOS chưa có** — `Sidebar.swift` là file macOS-only; bản Windows là `SidebarControl.xaml`, iOS chưa có sidebar. Đồng bộ là pass riêng, chờ macOS chốt bằng mắt.
+> - [ ] **Chưa có test** cho `upcomingLabel`/`ageLabel` (hai hàm thuần, biên "ngày mai" và "trong tuần" đáng test). Bỏ qua tạm vì cả repo chưa build Mac lần nào.
+
 > **★★ 010 — ĐỌC LỊCH + HẠN CỨNG/HẠN MỀM (anh Khôi chốt 2026-08-19). Spec: `specs/010-calendar-and-hard-deadlines/design.md`. ĐANG THI CÔNG.**
 > - **★ LẬT MỘT QUYẾT ĐỊNH CŨ:** "calendar đọc-vào" bị anh Khôi bác 2026-08-07 (vì thế `cueKind = calendarEventEnd` bị bỏ khỏi 006, và `WaitingMode.decide` phải dùng `deadline` làm proxy cho "mốc cứng của ngày"). **Nay lật lại: CÓ đọc lịch.** Hệ quả: proxy trong `WaitingMode` hết lý do tồn tại; comment "đừng thêm EventKit vào file này" vẫn giữ nhưng lý do đổi (giữ hàm thuần, không phải vì Volar mù lịch). `cueKind = calendarEventEnd` **chưa** khôi phục — quyết định riêng, chưa làm.
 > - **Phần lớn đã có sẵn, đây là nối dây:** `CalendarAccess.nextEvent(...)` đã đọc lịch thật từ trước nhưng CHỈ `GlanceHUD` dùng, chỉ trả 1 event/2h. Quyền EventKit đã xin cho mirror.
