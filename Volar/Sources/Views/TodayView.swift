@@ -1286,11 +1286,17 @@ private struct CollapsibleTaskSection: View {
     /// local index) — both `pinnedRows`/`collapsibleRows` below read `offset` off of this so a
     /// row's rank number (`startIndex + offset`) never shifts just because pinning moved it out
     /// of the scrollable half.
-    private var indexedTasks: [(offset: Int, task: TaskItem)] {
-        // `.enumerated()`'s own element labels are `(offset:element:)`, not `(offset:task:)` —
-        // rebuilding each pair as an explicit tuple literal here (rather than `Array(tasks.
-        // enumerated())` directly) is what makes the label rename to `task` actually typecheck.
-        tasks.enumerated().map { (offset: $0.offset, task: $0.element) }
+    private var indexedTasks: [IndexedTask] {
+        tasks.enumerated().map { IndexedTask(offset: $0.offset, task: $0.element) }
+    }
+
+    /// Struct chứ không phải tuple `(offset:task:)`: hai `ForEach` bên dưới cần định danh từng
+    /// row, mà Swift KHÔNG cho key path trỏ vào phần tử tuple — `ForEach(pinnedRows, id: \.task.id)`
+    /// là lỗi compile, không phải chuyện chạy sai. `Identifiable` để `ForEach(rows)` khỏi cần `id:`.
+    private struct IndexedTask: Identifiable {
+        let offset: Int
+        let task: TaskItem
+        var id: UUID { task.id }
     }
 
     /// design.md §3.1 — `deadlineKind` is meaningless without a `deadline` (same guard
@@ -1304,12 +1310,12 @@ private struct CollapsibleTaskSection: View {
     }
 
     /// Always rendered, regardless of `expanded` — see `alwaysVisibleKind`'s doc comment.
-    private var pinnedRows: [(offset: Int, task: TaskItem)] {
+    private var pinnedRows: [IndexedTask] {
         indexedTasks.filter { isPinned($0.task) }
     }
 
     /// Everything NOT pinned — these are the only rows subject to `expanded`/the scroll cap.
-    private var collapsibleRows: [(offset: Int, task: TaskItem)] {
+    private var collapsibleRows: [IndexedTask] {
         indexedTasks.filter { !isPinned($0.task) }
     }
 
@@ -1350,7 +1356,7 @@ private struct CollapsibleTaskSection: View {
             // `expanded` gate below — see `alwaysVisibleKind`'s doc comment.
             if !pinnedRows.isEmpty {
                 VStack(spacing: rowGap) {
-                    ForEach(pinnedRows, id: \.task.id) { offset, task in row(offset, task) }
+                    ForEach(pinnedRows) { row($0.offset, $0.task) }
                 }
                 .padding(.horizontal, 14)
                 .padding(.top, 4)
@@ -1360,7 +1366,7 @@ private struct CollapsibleTaskSection: View {
             if expanded && !collapsibleRows.isEmpty {
                 ScrollView {
                     VStack(spacing: rowGap) {
-                        ForEach(collapsibleRows, id: \.task.id) { offset, task in row(offset, task) }
+                        ForEach(collapsibleRows) { row($0.offset, $0.task) }
                     }
                     .padding(.horizontal, 14)
                     .padding(.top, pinnedRows.isEmpty ? 4 : 0)

@@ -58,12 +58,14 @@ struct Sidebar: View {
                     count: appState.upcomingNavCount,
                     active: appState.selectedSection == .upcoming
                 ) { appState.selectedSection = .upcoming }
+                peekRows(upcomingPeek)
                 SidebarItem(
                     icon: .inbox,
                     label: "Inbox",
                     count: appState.inboxNavCount,
                     active: appState.selectedSection == .inbox
                 ) { appState.selectedSection = .inbox }
+                peekRows(inboxPeek)
             }
             .padding(.horizontal, 8)
 
@@ -112,6 +114,92 @@ struct Sidebar: View {
         .sheet(isPresented: $showSignInSheet) {
             SignInSheet()
         }
+    }
+
+    // MARK: - Section peek (anh Khôi chốt 2026-08-20, gợi ý từ sidebar của Notion)
+    //
+    // Ba task đầu của Upcoming và Inbox hiện thẳng dưới nav row của chúng. CHỈ hai section này,
+    // KHÔNG có Today: main column đã dành cả một hero card cho NOW + một row peek cho NEXT +
+    // drawer Later, nên lồng thêm Today vào sidebar là hiện đúng mấy task đó hai lần cùng lúc.
+    // Cái sidebar peek giải quyết là thứ đang KHUẤT tầm mắt — Upcoming/Inbox chỉ thấy được sau
+    // khi đổi section.
+    //
+    // "Ba task đầu" của mỗi bên không cùng một phép so, và đó là chủ ý:
+    //   - Upcoming: sớm nhất trước. `upcomingGroups` đã sắp theo ngày tăng dần nên `flatMap` giữ
+    //     nguyên thứ tự đó. Mốc hiển thị lấy từ `TaskSections.upcomingDate`, KHÔNG phải
+    //     `TaskItem.timeBadge` — một task hoãn tới thứ Tư (`.afterDate`) không có deadline nào để
+    //     `timeBadge` đọc, mà nó vẫn thuộc Upcoming (xem header của TaskSections.swift).
+    //   - Inbox: mới capture nhất trước. Inbox theo định nghĩa là task KHÔNG có ngày, nên không có
+    //     deadline lẫn rank engine để xếp; `appState.inboxTasks` vốn đã sắp `createdAt` giảm dần.
+    //     Cột phải là TUỔI ("3d"), không phải hạn — thứ vừa nói ra không nên chìm mất.
+
+    private static let peekLimit = 3
+
+    /// Struct chứ không phải tuple `(task:trailing:)`: `ForEach` cần định danh từng row, mà Swift
+    /// KHÔNG cho key path trỏ vào phần tử tuple (`\.task.id` trên một tuple là lỗi compile). Cho nó
+    /// `Identifiable` luôn để `ForEach(rows)` khỏi cần tham số `id:`.
+    private struct PeekEntry: Identifiable {
+        let task: TaskItem
+        let trailing: String
+        var id: UUID { task.id }
+    }
+
+    private var upcomingPeek: [PeekEntry] {
+        // `startOfTomorrow` trong `AppState` là `private`, nên gọi lại chính hàm thuần mà nó gọi,
+        // thay vì tự dựng một định nghĩa "sau hôm nay" thứ hai (một nguồn luật, khác chỗ gọi).
+        let cutoff = TaskSections.startOfTomorrow(now: Date(), timeZone: .current)
+        return appState.upcomingGroups.flatMap(\.tasks).prefix(Self.peekLimit).map { task in
+            PeekEntry(
+                task: task,
+                trailing: Self.upcomingLabel(TaskSections.upcomingDate(task, startOfTomorrow: cutoff))
+            )
+        }
+    }
+
+    private var inboxPeek: [PeekEntry] {
+        appState.inboxTasks.prefix(Self.peekLimit).map {
+            PeekEntry(task: $0, trailing: Self.ageLabel($0.createdAt))
+        }
+    }
+
+    @ViewBuilder
+    private func peekRows(_ rows: [PeekEntry]) -> some View {
+        ForEach(rows) { row in
+            SectionPeekRow(task: row.task, trailing: row.trailing) {
+                appState.openDetail(row.task.id)
+            }
+        }
+    }
+
+    /// Cột phải của một row Upcoming, đủ ngắn để sống trong sidebar 172pt: giờ nếu là ngày mai,
+    /// thứ trong tuần nếu còn trong tuần này, ngày-tháng nếu xa hơn (lúc đó "Thu" đã mơ hồ).
+    private static func upcomingLabel(_ date: Date?, now: Date = Date()) -> String {
+        guard let date else { return "" }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        if calendar.isDateInTomorrow(date) {
+            return date.formatted(.dateTime.hour().minute())
+        }
+        let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: now),
+            to: calendar.startOfDay(for: date)
+        ).day ?? 0
+        return days <= 6
+            ? date.formatted(.dateTime.weekday(.abbreviated))
+            : date.formatted(.dateTime.month(.abbreviated).day())
+    }
+
+    /// Tuổi của một capture trong Inbox — "today" cho hôm nay, còn lại "3d".
+    private static func ageLabel(_ createdAt: Date, now: Date = Date()) -> String {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let days = calendar.dateComponents(
+            [.day],
+            from: calendar.startOfDay(for: createdAt),
+            to: calendar.startOfDay(for: now)
+        ).day ?? 0
+        return days <= 0 ? "today" : "\(days)d"
     }
 
     @ViewBuilder
@@ -313,6 +401,55 @@ private struct SidebarItem: View {
         }
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
+    }
+}
+
+/// Một task lồng dưới nav row Upcoming/Inbox — tên (cắt đuôi) + một cột mono ngắn bên phải.
+/// Không phải `TaskRow`: `TaskRow` mang checkbox, chip blocked, context menu, số thứ tự… trong
+/// 172pt trừ thụt lề thì không còn chỗ cho bất cứ thứ nào trong số đó. Cũng không phải
+/// `SidebarItem`: row này không đổi section, nó mở detail panel — bấm vào một task ở đâu trong app
+/// cũng ra cùng một chỗ (`AppState.openDetail`, đúng quy ước `TaskRow`/`NextPeekRow` đang theo).
+private struct SectionPeekRow: View {
+    let task: TaskItem
+    let trailing: String
+    let action: () -> Void
+
+    @State private var isHovering = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Text(task.title)
+                    .font(.system(size: 12))
+                    .foregroundStyle(VolarColor.textSec)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+                Spacer(minLength: 4)
+                if !trailing.isEmpty {
+                    Text(trailing)
+                        .font(Font.volarMono(size: 10.5))
+                        .monospacedDigit()
+                        .foregroundStyle(VolarColor.textMut)
+                        // Cột ngày/tuổi không bao giờ bị ép co lại: tít task dài thì cắt đuôi
+                        // chính nó, không phải cắt con số bên phải.
+                        .layoutPriority(1)
+                }
+            }
+            // Thụt lề 33pt để tên task thẳng hàng với chữ của nav row bên trên (padding 10 + icon
+            // 14 + spacing 9), giữ nguyên padding ngang 10 của `SidebarItem` ở cạnh phải.
+            .padding(.leading, 33)
+            .padding(.trailing, 10)
+            .padding(.vertical, 4)
+            // Cùng lý do đã ghi trong `SidebarItem`: `Spacer` và `padding` không vẽ gì, thiếu dòng
+            // này thì vùng bấm thủng lỗ chỗ trong khi nền hover trông như cả dải.
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .background(isHovering ? VolarColor.cardHover : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(VolarMotion.hover, value: isHovering)
+        .accessibilityLabel(trailing.isEmpty ? task.title : "\(task.title), \(trailing)")
     }
 }
 
