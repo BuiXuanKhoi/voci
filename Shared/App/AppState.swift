@@ -3729,8 +3729,15 @@ final class AppState {
         // Việc 3.1: duplicate hint computed ONCE here, at draft-creation time — never recomputed
         // per chip edit (self-review "performance"; see `ConfirmDraft.duplicateCandidates`'s doc
         // comment).
+        // Chỉ mục dựng MỘT lần cho cả lô, không phải mỗi draft một lần — `duplicateCandidates`
+        // được gọi trong vòng lặp ngay dưới.
+        let searchIndex = TaskSearchIndex(tasks: existingTasks)
         for i in drafts.indices {
-            drafts[i].duplicateCandidates = Self.duplicateCandidates(for: drafts[i].effectiveTitle, in: existingTasks).map(\.id)
+            drafts[i].duplicateCandidates = Self.duplicateCandidates(
+                for: drafts[i].effectiveTitle,
+                in: existingTasks,
+                index: searchIndex
+            ).map(\.id)
         }
         drafts = preResolveConditions(drafts, openTasks: existingTasks)
         for i in drafts.indices {
@@ -4085,12 +4092,34 @@ final class AppState {
     /// Việc 3.1 (2026-07-28): tối đa `duplicateHintLimit` task đã lưu trông như CÓ THỂ chính là
     /// `title` — một GỢI Ý để liếc rồi quyết, không bao giờ tự áp (xem
     /// `ConfirmDraft.duplicateResolution`: luôn khởi đầu ở `.addNew`).
-    private static func duplicateCandidates(for title: String, in openTasks: [TaskItem]) -> [FuzzyMatch] {
-        Array(
-            scoredMatches(for: title, candidates: openTasks.map { ($0.id, $0.title) })
-                .filter { $0.score >= duplicateHintBar }
-                .prefix(duplicateHintLimit)
-        )
+    private static func duplicateCandidates(
+        for title: String,
+        in openTasks: [TaskItem],
+        index: TaskSearchIndex
+    ) -> [FuzzyMatch] {
+        // Hai đường tìm, lấy điểm CAO HƠN — không phải trung bình, không phải nhân. Chúng bắt hai
+        // kiểu trùng khác hẳn nhau và mỗi đường mù đúng chỗ đường kia nhìn thấy:
+        //   - trigram trên TIÊU ĐỀ: bắt "nói lại gần y hệt, lệch vài ký tự" ("dems"/"dem").
+        //   - chỉ mục term (`TaskSearchIndex`): bắt "nói về cùng một việc bằng chữ khác", vì nó tra
+        //     cả `notes`/`sourceTranscript` của task đã lưu — chữ "Solr" chỉ nằm trong câu nói gốc
+        //     chứ chẳng bao giờ lọt vào tiêu đề, nên trigram-trên-tiêu-đề không thể thấy nó.
+        // Lấy max là hệ quả trực tiếp của luật anh Khôi chốt 2026-08-20 ("thà tìm ra task trùng còn
+        // hơn không tìm ra cái nào"): chỉ cần MỘT đường nhận ra là đủ để đưa lên cho người nhìn.
+        var best: [UUID: Double] = [:]
+        for match in scoredMatches(for: title, candidates: openTasks.map { ($0.id, $0.title) }) {
+            best[match.id] = max(best[match.id] ?? 0, match.score)
+        }
+        for match in index.matches(for: title, limit: openTasks.count) {
+            best[match.id] = max(best[match.id] ?? 0, match.score)
+        }
+        return best
+            .map { FuzzyMatch(id: $0.key, score: $0.value) }
+            .filter { $0.score >= duplicateHintBar }
+            // `Dictionary` không có thứ tự, nên phải phá hoà bằng id — nếu không, cùng một dữ liệu
+            // có thể cho ra hai danh sách gợi ý khác nhau giữa hai lần chạy.
+            .sorted { $0.score == $1.score ? $0.id.uuidString < $1.id.uuidString : $0.score > $1.score }
+            .prefix(duplicateHintLimit)
+            .map { $0 }
     }
 
     /// O(n) trên `openTasks` cho mỗi condition — nhiều nhất ~10 condition một lượt confirm, nên
