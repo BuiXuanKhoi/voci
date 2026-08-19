@@ -600,9 +600,9 @@ struct ConfirmDraft: Identifiable, Equatable {
 /// reason: a `nil` here would conflate "resolved to nothing yet" with "not yet attempted."
 enum RefResolution: Equatable {
     /// A confident fuzzy match against an ALREADY-PERSISTED open task (`AppState.bestFuzzyMatch`,
-    /// same ≥0.7 `Similarity.strict` bar `preResolveConditions` uses for `.taskDone` — see that
-    /// method's doc comment for why a wrong match here is real corruption, not a glance-and-ignore
-    /// hint, and therefore needs the strict scorer).
+    /// same ≥0.7 bar `preResolveConditions` uses for `.taskDone` — see `scoredMatches`'s doc
+    /// comment for why a wrong match here is real corruption, not a glance-and-ignore hint, and
+    /// therefore keeps that bar even though the scorer underneath it got more forgiving).
     case existing(UUID)
     /// A confident fuzzy match against ANOTHER draft in this SAME batch (`AppState.scoredMatches`,
     /// same bar) — "task A ... và cập nhật task B luôn" where B is a task this very utterance is
@@ -3822,9 +3822,9 @@ final class AppState {
     /// time per ref — every `ParsedTaskUpdate.refIndex` sharing the same ref shares the same
     /// resolution (task brief: "Resolve each ref ONCE"). Mirrors `preResolveConditions`'s EXACT
     /// ladder/thresholds/scorer: step 1 is the identical `bestFuzzyMatch(for:in:)` call
-    /// `preResolveConditions` makes against `openTasks` (≥0.7, `Similarity.strict` — see that
-    /// method's own doc comment for why a wrong match here is real corruption, not a glance-and-
-    /// ignore hint, and therefore needs the STRICT scorer, never `.lenient`); step 2 is the
+    /// `preResolveConditions` makes against `openTasks` (≥0.7 — see `scoredMatches`'s own doc
+    /// comment for why a wrong match here is real corruption, not a glance-and-ignore hint, and
+    /// therefore keeps the 0.7 bar untouched); step 2 is the
     /// identical `scoredMatches(for:candidates:)` call against this batch's OTHER drafts (task
     /// brief explicitly says "the batch's other drafts," so unlike `preResolveConditions`'s
     /// intra-batch step, this does NOT exclude any particular draft by index — a ref legitimately
@@ -3976,98 +3976,128 @@ final class AppState {
 
     private struct FuzzyMatch { let id: UUID; let score: Double }
 
-    /// Shared token-overlap scorer (Jaccard over whitespace tokens, case/diacritic-insensitive so
-    /// Vietnamese input matches sensibly) used by `bestFuzzyMatch` (single best, threshold checked
-    /// by the caller) and `duplicateCandidates` (top-3 above a lower bar) — one formula, two
-    /// thresholds, rather than two copies of the same loop. Returns every candidate with a
-    /// nonzero-union score, sorted by score DESCENDING; `Array.sorted` is stable (Swift 5+), so
-    /// candidates tied on score keep `candidates`' original relative order — matching the original
-    /// `bestFuzzyMatch`'s "first max-scoring entry wins" behavior exactly for that caller.
-    /// // UNVERIFIED: a deliberately simple placeholder heuristic — swap for a real string-
-    /// distance/fuzzy library later if parsing quality demands it (backlog candidate).
-    /// Which formula `scoredMatches` uses. The two callers want opposite error profiles, so they
-    /// must NOT share one — this used to be a single Jaccard score for both, and loosening it
-    /// globally would have silently loosened dependency auto-resolution too.
-    private enum Similarity {
-        /// Jaccard only: `shared / union`. Strict, and strictness is the point for
-        /// `preResolveConditions` — a wrong match there commits a real `.taskDone` edge with no
-        /// further confirmation, so a false positive is a wrong task graph.
-        case strict
-        /// `max(jaccard, overlap)` where overlap is `shared / min(|a|, |b|)`. Overlap is the one
-        /// that handles "one title is a subset of the other" — restating a stored task more briefly
-        /// is the single most common way a real duplicate shows up, and Jaccard scores it terribly
-        /// because it counts every extra word in the longer title against the match. Concretely:
-        /// "sanitize html tag" vs "sanitize html tags this afternoon" is 2/6 = 0.33 by Jaccard —
-        /// under the 0.45 duplicate bar, so the app would silently create a second copy — but
-        /// 2/min(3,5) = 0.67 by overlap, which surfaces it.
-        case lenient
-    }
-
+    /// Shared fuzzy scorer — **trigram** (3 ký tự liên tiếp) chứ không phải token, anh Khôi chốt
+    /// 2026-08-20 sau khi gặp ca thật: tạo task "Làm task Dem Search", nói lại "dems search", app
+    /// không tìm ra. Bảng dưới là điểm thật của chính ca đó, cột trái là công thức cũ (Jaccard
+    /// theo TỪ), cột phải là công thức này:
+    ///
+    ///     tiêu đề đã lưu                       Jaccard-từ   trigram
+    ///     "Dems Search"                            1.00       1.00
+    ///     "Làm task Dems Search"                   0.50       1.00   <- trượt bar 0.7 ở bản cũ
+    ///     "Làm task Dem Search"                    0.20       0.727  <- ca của anh Khôi
+    ///     "Làm task Custom Metadata Autotest"      0.50       0.00   <- báo trùng BẬY ở bản cũ
+    ///     "Search" (một từ)                        0.50       0.462  <- loại đúng ở cả hai bar
+    ///
+    /// Hai điều Jaccard-theo-từ làm sai mà trigram làm đúng, và đều là hệ quả của cùng một chuyện
+    /// (nó đo "hai tiêu đề GIỐNG nhau bao nhiêu phần" chứ không đo "cụm vừa nói có NẰM TRONG tiêu
+    /// đề không"):
+    ///   1. Chữ đệm ("làm", "task") nằm ở mẫu số, nên tiêu đề càng dài điểm càng tụt — dù cụm anh
+    ///      nói khớp nguyên vẹn. Đây là lý do ca trên trượt.
+    ///   2. Ngược lại, hai task khác hẳn nhau mà cùng bắt đầu bằng chữ đệm thì được cộng điểm —
+    ///      "Làm task Dem Search" vs "Làm task Custom Metadata Autotest" đạt 0.50 ở nhánh lỏng,
+    ///      vượt bar 0.45 của gợi ý trùng, tức app đi hỏi "có phải cùng một việc không" cho hai
+    ///      việc chẳng liên quan. Trigram cho 0.00.
+    /// Trigram còn chịu được lệch một ký tự ("Dem"/"Dems") mà không cần thư viện edit-distance nào.
+    ///
+    /// KHÔNG hạ bar 0.7 của `preResolveConditions`. Anh Khôi nói "thà tìm ra task trùng còn hơn
+    /// không tìm ra cái nào" — đúng cho GỢI Ý (`duplicateCandidates`, bar thấp, người nhìn rồi
+    /// chọn), nhưng bar 0.7 canh một việc khác hẳn: nó TỰ ĐỘNG gắn cạnh phụ thuộc `.taskDone` mà
+    /// không hỏi ai, và gắn nhầm thì task mới biến mất khỏi Today cho tới khi task-nhầm-kia xong.
+    /// Cách làm đúng ý anh mà không mở cửa đó: đổi cái THƯỚC, giữ nguyên cái BAR — ca của anh giờ
+    /// đạt 0.727 nên tự khớp được, mà ca sai vẫn 0.00. Dưới 0.7 thì đã có picker để anh tự chọn
+    /// (`resolveTaskDone`), không có gì bị nuốt mất.
+    ///
+    /// Một thước duy nhất cho cả hai chỗ gọi (enum `Similarity` cũ đã xoá): nhánh "lỏng" ngày xưa
+    /// tồn tại để bắt ca "nói ngắn lại việc đã có", mà containment dưới đây làm việc đó tốt hơn hẳn
+    /// và không kèm tác dụng phụ. Khác biệt giữa hai chỗ gọi nay nằm ở BAR, đúng chỗ nó nên nằm.
+    ///
+    /// Trả về mọi ứng viên có điểm > 0, sắp giảm dần; `Array.sorted` ổn định (Swift 5+) nên các
+    /// ứng viên bằng điểm giữ nguyên thứ tự trong `candidates` — giữ đúng hành vi "ứng viên đầu
+    /// tiên đạt điểm cao nhất thắng" mà `bestFuzzyMatch` vẫn dựa vào.
     private static func scoredMatches(
         for query: String,
-        candidates: [(id: UUID, title: String)],
-        similarity: Similarity = .strict
+        candidates: [(id: UUID, title: String)]
     ) -> [FuzzyMatch] {
-        let queryTokens = tokenize(query)
-        guard !queryTokens.isEmpty else { return [] }
-        var scored: [FuzzyMatch] = []
-        for candidate in candidates {
-            let titleTokens = tokenize(candidate.title)
-            guard !titleTokens.isEmpty else { continue }
-            let union = queryTokens.union(titleTokens).count
-            guard union > 0 else { continue }
-            let shared = queryTokens.intersection(titleTokens).count
-            let jaccard = Double(shared) / Double(union)
-            var score = jaccard
-            if similarity == .lenient {
-                let smaller = min(queryTokens.count, titleTokens.count)
-                // `smaller >= 2` guard: with a one-token side, overlap is 1.0 the moment that single
-                // token appears anywhere in the other title — "html" would score a perfect match
-                // against every task mentioning html, burying the real candidates. Two shared tokens
-                // is the cheapest thing that means more than coincidence here.
-                if smaller >= 2 {
-                    score = max(jaccard, Double(shared) / Double(smaller))
-                }
-            }
-            scored.append(FuzzyMatch(id: candidate.id, score: score))
-        }
-        return scored.sorted { $0.score > $1.score }
+        candidates
+            .map { FuzzyMatch(id: $0.id, score: fuzzyMatchScore(query: query, candidate: $0.title)) }
+            .filter { $0.score > 0 }
+            .sorted { $0.score > $1.score }
     }
 
-    /// Việc 3.1 (2026-07-28): up to 3 already-persisted tasks that look like they might BE `title`
-    /// — a glance-and-decide HINT for the confirm card, never auto-applied (see
-    /// `ConfirmDraft.duplicateResolution`'s doc comment: it always starts at `.addNew`). Threshold
-    /// (0.45) is DELIBERATELY LOWER than `preResolveConditions`'s 0.7 auto-resolve bar — that's not
-    /// a bug, it's the opposite risk profile: an auto-resolved `.taskDone` that's wrong silently
-    /// commits a real, wrong dependency edge, so it needs a high bar. This is just a suggestion a
-    /// human glances at and can ignore — a false positive here costs one glance; a false negative
-    /// costs a full duplicate task silently created (exactly the gap this whole feature closes).
-    /// Bounded to 3 so the card never has to render an unbounded list (same defensive-cap
-    /// philosophy as `VoiceDoneConfirm`'s candidate list elsewhere in this file).
+    /// Điểm khớp mờ giữa hai chuỗi, 0…1. KHÔNG `private` đúng một lý do: đây là hạt nhân mà cả hai
+    /// bar (0.7 tự-gắn-phụ-thuộc và `duplicateHintBar` gợi ý) đều dựa vào, nên nó phải test được
+    /// trực tiếp thay vì test gián tiếp qua cả đường confirm — xem `FuzzyMatchScoreTests`.
+    ///
+    /// Cố ý tự tính lại trigram của `query` ở mỗi cặp thay vì nâng ra ngoài vòng lặp của
+    /// `scoredMatches`: `openTasks` là danh sách task cá nhân (hàng chục tới hàng trăm), mỗi lượt
+    /// tính là vài micro-giây, và đổi lại là CHỈ CÓ MỘT nơi định nghĩa công thức. Nếu hồ sơ đo cho
+    /// thấy chỗ này thành điểm nóng thật thì mới nâng ra — đừng tối ưu trước khi có số.
+    static func fuzzyMatchScore(query: String, candidate: String) -> Double {
+        let queryGrams = trigrams(query)
+        let candidateGrams = trigrams(candidate)
+        guard !queryGrams.isEmpty, !candidateGrams.isEmpty else { return 0 }
+        let shared = queryGrams.intersection(candidateGrams).count
+        guard shared > 0 else { return 0 }
+
+        let dice = 2 * Double(shared) / Double(queryGrams.count + candidateGrams.count)
+        // Chốt chặn quan trọng nhất của cả hàm: containment = "cụm hỏi nằm trọn trong tiêu đề",
+        // nên một query rác ngắn như "task" hay "search" đạt containment 1.00 với MỌI tiêu đề có
+        // chứa chữ đó — ở bar 0.7 là tự động gắn phụ thuộc bậy. Query ngắn rơi về Dice (đối xứng,
+        // phạt chênh lệch độ dài): "task" -> 0.333, "search" -> 0.462, dưới cả 0.7 lẫn 0.35.
+        // Ngưỡng 8 ký tự ≈ hai từ thật; cùng tinh thần với guard `smaller >= 2` của bản Jaccard cũ.
+        guard normalizedForMatching(query).count >= 8 else { return dice }
+        return max(dice, Double(shared) / Double(queryGrams.count))
+    }
+
+    /// Chuẩn hoá trước khi cắt trigram: thường hoá, bỏ dấu tiếng Việt, **bỏ dấu câu** (bản token cũ
+    /// chỉ cắt theo khoảng trắng nên "search," và "search" là hai thứ khác nhau), gộp khoảng trắng.
+    private static func normalizedForMatching(_ text: String) -> String {
+        let folded = text.lowercased().folding(options: .diacriticInsensitive, locale: nil)
+        let cleaned = folded.map { character -> Character in
+            character.isLetter || character.isNumber ? character : " "
+        }
+        return String(cleaned).split(separator: " ").joined(separator: " ")
+    }
+
+    /// Tập 3-gram ký tự, có đệm một khoảng trắng ở hai đầu để biên từ cũng mang thông tin (" de"
+    /// khác "ade") — chuẩn của mọi bộ so chuỗi mờ, và là thứ khiến "Dem"/"Dems" vẫn gần nhau.
+    private static func trigrams(_ text: String) -> Set<String> {
+        let padded = " " + Self.normalizedForMatching(text) + " "
+        guard padded.count >= 3 else { return [] }
+        let characters = Array(padded)
+        var grams: Set<String> = []
+        for i in 0...(characters.count - 3) {
+            grams.insert(String(characters[i..<(i + 3)]))
+        }
+        return grams
+    }
+
+    /// Bar cho GỢI Ý trùng. Thấp hơn hẳn bar 0.7 tự-gắn-phụ-thuộc, và đó là chủ ý: anh Khôi chốt
+    /// 2026-08-20 "thà tìm ra task trùng còn hơn không tìm ra cái nào". Sai ở đây tốn một cái liếc
+    /// mắt; sót ở đây đẻ ra một task trùng thật, im lặng. Hạ 0.45 -> 0.35 vì thước đã đổi sang
+    /// trigram: cái false positive mà bar 0.45 cũ để lọt ("Làm task Dem Search" vs "Làm task Custom
+    /// Metadata Autotest", 0.50 theo công thức cũ) nay là 0.00, nên hạ bar không mang nó quay lại.
+    private static let duplicateHintBar = 0.35
+    /// 3 -> 5 ứng viên, cùng lý do trên. Vẫn có trần để thẻ confirm không bao giờ phải vẽ một danh
+    /// sách không giới hạn.
+    private static let duplicateHintLimit = 5
+
+    /// Việc 3.1 (2026-07-28): tối đa `duplicateHintLimit` task đã lưu trông như CÓ THỂ chính là
+    /// `title` — một GỢI Ý để liếc rồi quyết, không bao giờ tự áp (xem
+    /// `ConfirmDraft.duplicateResolution`: luôn khởi đầu ở `.addNew`).
     private static func duplicateCandidates(for title: String, in openTasks: [TaskItem]) -> [FuzzyMatch] {
         Array(
-            scoredMatches(for: title, candidates: openTasks.map { ($0.id, $0.title) }, similarity: .lenient)
-                .filter { $0.score >= 0.45 }
-                .prefix(3)
+            scoredMatches(for: title, candidates: openTasks.map { ($0.id, $0.title) })
+                .filter { $0.score >= duplicateHintBar }
+                .prefix(duplicateHintLimit)
         )
     }
 
-    /// O(n) over `openTasks` per condition — at most ~10 conditions in a confirm batch, so this
-    /// stays cheap even at hundreds of tasks (self-review "performance"; no picker-side O(n²) —
-    /// the picker itself just lists titles). Single best match; `scoredMatches`'s stable sort
-    /// means a tie keeps whichever candidate appeared first in `openTasks`, matching this
-    /// function's pre-refactor "first max-scoring entry wins" behavior exactly.
+    /// O(n) trên `openTasks` cho mỗi condition — nhiều nhất ~10 condition một lượt confirm, nên
+    /// vẫn rẻ ở quy mô hàng trăm task. Một kết quả tốt nhất; `scoredMatches` sắp ổn định nên khi
+    /// bằng điểm thì ứng viên xuất hiện trước trong `openTasks` thắng, đúng như hành vi cũ.
     private static func bestFuzzyMatch(for query: String, in openTasks: [TaskItem]) -> FuzzyMatch? {
         scoredMatches(for: query, candidates: openTasks.map { ($0.id, $0.title) }).first
-    }
-
-    private static func tokenize(_ text: String) -> Set<String> {
-        Set(
-            text.lowercased()
-                .folding(options: .diacriticInsensitive, locale: nil)
-                .components(separatedBy: .whitespacesAndNewlines)
-                .filter { !$0.isEmpty }
-        )
     }
 
     // MARK: - Confirm-card chip interactions (T024)
