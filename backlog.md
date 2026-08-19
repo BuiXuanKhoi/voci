@@ -1,5 +1,11 @@
 # Backlog - voci
 
+> **★ ACCENT MINT + MÀU HẠN THEO TỈ LỆ (anh Khôi chốt 2026-08-20).**
+> - Accent: `#0C817B` light / `#66D4CF` dark (systemMint tăng tương phản). Xanh duy nhất vượt 4.5:1 trên nền trắng (4.73), lệch 42° sắc độ khỏi `done` nên `done` giữ nguyên. Artifact so sánh 6 ứng viên: https://claude.ai/code/artifact/16b529ba-b8f5-4b1a-83b3-ffcca0de342e
+> - [ ] **★ MỐC KIỂM PHÉP ĐO TỈ LỆ (đặt 2026-08-20, kiểm khoảng 2026-09-10).** `DeadlineUrgency` đo `còn lại / (deadline − createdAt)` — đúng nguyên văn luật anh Khôi, và anh đã chốt sau khi em nêu hai chỗ nó lệch cảm nhận: task tạo 9:00 hạn 9:10 là `calm` suốt 5 phút đầu; task tạo tháng 3 hạn tháng sau là `tight` dù còn cả tháng. **Nếu dùng thật thấy màu báo sai lúc cần nhất thì đổi sang mốc tuyệt đối (giờ/ngày còn lại)** — sửa đúng một hàm trong `Shared/Model/DeadlineUrgency.swift`, call site không đổi.
+> - [ ] **Verify Mac:** (a) header có liền màu ở cả hai chế độ sau khi thêm `.toolbarBackground(.hidden, for: .windowToolbar)` chưa; (b) Settings ▸ Appearance sau khi đổi `Picker(.menu)` → `Segmented`; (c) mint trên nền trắng có "chìm" như tím từng bị không.
+> - [ ] **Windows + iOS chưa có màu hạn lẫn mint** — cả hai port dùng bảng màu riêng. Đồng bộ là pass riêng.
+
 > **★ SIDEBAR PEEK (anh Khôi chốt 2026-08-20, commit sau `d43ee09`).** Ba task đầu của Upcoming + Inbox hiện lồng dưới nav row, kiểu sidebar Notion. Today cố ý KHÔNG có (main column đã hiện đúng mấy task đó).
 > - [ ] **Verify bằng mắt trên Mac:** tên task bị cắt sớm cỡ nào trong 172pt; ba dòng lồng có làm sidebar chật khi Pro row + footer cùng hiện không; nếu chật thì nới sidebar lên ~210pt (anh Khôi đã cân nhắc và chọn giữ 172pt trước).
 > - [ ] **Windows + iOS chưa có** — `Sidebar.swift` là file macOS-only; bản Windows là `SidebarControl.xaml`, iOS chưa có sidebar. Đồng bộ là pass riêng, chờ macOS chốt bằng mắt.
