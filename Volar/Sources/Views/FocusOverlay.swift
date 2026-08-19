@@ -429,7 +429,7 @@ struct FocusOverlay: View {
     /// The 76pt countdown digits, on the scrim — `.high`/`.med` pinned via `FocusInk` (see its doc
     /// comment) since the dynamic `VolarColor` versions swing toward near-black in light mode.
     /// `accent.solid` (the calm-state branch) is deliberately left DYNAMIC, not pinned: it's a
-    /// saturated purple in both appearances (`#8944AB` light / `#BF5AF2` dark, `Theme.swift`), so
+    /// saturated mint in both appearances (`#0C817B` light / `#66D4CF` dark, `Theme.swift`), so
     /// it never approaches the near-black-on-near-black failure this file is guarding against —
     /// only its vividness shifts slightly with system appearance, which is a minor, out-of-scope
     /// polish item, not a legibility bug.

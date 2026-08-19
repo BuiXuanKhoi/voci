@@ -13,14 +13,23 @@
 //    tints / chip fills / progress tracks out of `veil(x)` still read correctly on a white page.
 //    Previously this file was dark-only ("no light variant exists" — that claim is now false).
 //
-// 2. THE ACCENT IS PURPLE, NOT MINT. `VolarAccent.indigo` (the default; name is a persisted
-//    misnomer, unchanged) now resolves to Apple's `systemPurple` family (accessible light variant
-//    `#8944AB` / dark `#BF5AF2`) instead of ice blue. Mint (`nowAccent` family) keeps its token
-//    names but ALSO now resolves to the same purple — mint the hue is retired from UI entirely and
-//    lives on only in the logo mark (untouched, tracked separately in backlog.md per design.md §9).
-//    The rule "one saturated color on screen at a time" still holds, it's just purple now: a 3px
-//    bar + a small chip, never a large fill (see `nowSurface`, new token, §3.4). `instrument`
-//    (ice-blue readout accent) is retired too — it now equals `textSec` (no color).
+// 2. THE ACCENT IS MINT (anh Khôi chốt 2026-08-20, sau khi review sáu ứng viên xanh dựng thành
+//    mẫu UI thật). `VolarAccent.indigo` (the default; the name is a persisted misnomer, unchanged
+//    for wire/settings compatibility) resolves to Apple's `systemMint` INCREASED-CONTRAST family:
+//    `#0C817B` light / `#66D4CF` dark. Nó thắng vì hai lý do đo được, không phải vì đẹp hơn:
+//      - Đây là màu xanh DUY NHẤT vượt 4.5:1 trên nền trắng (4.73:1). Mọi xanh tươi khác —
+//        systemGreen #34C759 (2.22), systemMint thường #00C7BE (2.12), systemTeal #30B0C7 (2.57),
+//        accent green của macOS #62BA46 (2.43) — đều chết ở light mode. Dark mode không phải chỗ
+//        khó: cả sáu đều 7–11:1 trên `#1C1C1E`.
+//      - Nó lệch 42° sắc độ khỏi `done` (#248A3D, 135°). Hai ứng viên systemGreen lệch 0°, tức
+//        "đang mời bấm" và "đã xong" thành cùng một hue — với bản tăng tương phản thì trùng khít
+//        cả mã màu. Chọn mint là `done` được giữ nguyên, không phải dời đi đâu.
+//    Purple (RETHEME 4, `#8944AB`/`#BF5AF2`) chưa từng được build trên Mac lần nào nên không có gì
+//    để tiếc. Mint quay lại đúng hệ màu của logo Volar — câu hỏi "vẽ lại logo theo tím hay giữ mint
+//    tách khỏi UI" treo trong backlog 009 tự trả lời.
+//    Luật "one saturated color on screen at a time" không đổi: một thanh 3px + một chip nhỏ, không
+//    bao giờ là mảng đặc lớn (xem `nowSurface`). `instrument` (ice-blue readout accent) vẫn retired
+//    — nó bằng `textSec` (no color).
 import SwiftUI
 #if canImport(AppKit)
 import AppKit
@@ -163,26 +172,25 @@ enum VolarColor {
 
     // MARK: - NOW / spotlight tokens (design.md §3.4)
 
-    /// The NOW row's 3px accent bar + "NOW" chip fill. Same purple as `VolarAccent.indigo.solid`
+    /// The NOW row's 3px accent bar + "NOW" chip fill. Same mint as `VolarAccent.indigo.solid`
     /// on purpose — the app has exactly ONE saturated hue (design.md §1), and NOW is the one place
     /// that hue is allowed to be a small, dense mark. Never a large fill — see `nowSurface`.
-    static let nowAccent = Color(volarLight: 0x8944AB, dark: 0xBF5AF2)
+    static let nowAccent = Color(volarLight: 0x0C817B, dark: 0x66D4CF)
     /// Hover state of the NOW chip.
-    static let nowAccentSoft = Color(volarLight: 0xA855C9, dark: 0xDA8FFF)
+    static let nowAccentSoft = Color(volarLight: 0x12A199, dark: 0x8FE3DF)
     /// Pressed/deep state.
-    static let nowAccentDeep = Color(volarLight: 0x6E3589, dark: 0x9A3FD0)
+    static let nowAccentDeep = Color(volarLight: 0x0A6B66, dark: 0x3FB8B2)
     /// NEW token (design.md §3.4/§5.3) — the NOW row's background. NOT `nowAccent` at full
-    /// strength: white text on `#BF5AF2` is only 3.1:1, and a large saturated fill would break the
-    /// "one saturated point on screen" rule. This is `nowAccent` pha (mixed) ~8% into `bg`, so the
-    /// row reads as "marked" while `textPri` stays fully legible on top of it and all the
-    /// saturation stays in the 3px bar + chip.
-    static let nowSurface = Color(volarLight: 0xF5EAFA, dark: 0x2E2036)
+    /// strength: a large saturated fill would break the "one saturated point on screen" rule, and
+    /// `textPri` has to stay fully legible on top of it. This is `nowAccent` pha (mixed) ~8% into
+    /// `bg`, so the row reads as "marked" while all the saturation stays in the 3px bar + chip.
+    static let nowSurface = Color(volarLight: 0xE9F6F5, dark: 0x16302E)
     /// The spotlight pool's inner glow (`SpotlightBackground` below).
-    static let nowGlow = Color(volarLight: 0x8944AB, lightOpacity: 0.08, dark: 0xBF5AF2, darkOpacity: 0.20)
+    static let nowGlow = Color(volarLight: 0x0C817B, lightOpacity: 0.08, dark: 0x66D4CF, darkOpacity: 0.20)
     /// The spotlight pool's outer falloff.
-    static let nowGlowSoft = Color(volarLight: 0x8944AB, lightOpacity: 0.04, dark: 0xBF5AF2, darkOpacity: 0.10)
+    static let nowGlowSoft = Color(volarLight: 0x0C817B, lightOpacity: 0.04, dark: 0x66D4CF, darkOpacity: 0.10)
     /// NOW-specific focus ring / hairline accent (e.g. chip border).
-    static let nowRing = Color(volarLight: 0x8944AB, lightOpacity: 0.45, dark: 0xBF5AF2, darkOpacity: 0.55)
+    static let nowRing = Color(volarLight: 0x0C817B, lightOpacity: 0.45, dark: 0x66D4CF, darkOpacity: 0.55)
 
     // MARK: - Instrument tokens (design.md §1: "ice blue `instrument` bỏ")
 
@@ -226,13 +234,14 @@ enum VolarAccent: String, CaseIterable, Identifiable, Sendable, Equatable, Hasha
     var accent: Accent {
         switch self {
         case .indigo:
-            // Apple systemPurple, accessible variant. #8944AB light is chosen specifically because
-            // #AF52DE (systemPurple's ordinary light value) only hits 3.6:1 on white — #8944AB
-            // hits 6.0:1, which also makes white-on-it 6.0:1 (design.md §3.3).
-            let solid = Color(volarLight: 0x8944AB, dark: 0xBF5AF2)
-            let hover = Color(volarLight: 0x6E3589, dark: 0xDA8FFF)
-            let surface = Color(volarLight: 0x8944AB, lightOpacity: 0.10, dark: 0xBF5AF2, darkOpacity: 0.16)
-            let glow = Color(volarLight: 0x8944AB, lightOpacity: 0.30, dark: 0xBF5AF2, darkOpacity: 0.40)
+            // Apple systemMint, INCREASED-CONTRAST variant (anh Khôi chốt 2026-08-20 — xem ghi chú
+            // §2 đầu file). #00C7BE (systemMint thường) chỉ đạt 2.12:1 trên trắng, không dùng làm
+            // chữ/icon được ở light mode; #0C817B đạt 4.73:1, và nhãn TRẮNG trên nền nó cũng 4.73:1
+            // nên nút đặc không cần luật riêng cho từng chế độ.
+            let solid = Color(volarLight: 0x0C817B, dark: 0x66D4CF)
+            let hover = Color(volarLight: 0x0A6B66, dark: 0x8FE3DF)
+            let surface = Color(volarLight: 0x0C817B, lightOpacity: 0.10, dark: 0x66D4CF, darkOpacity: 0.16)
+            let glow = Color(volarLight: 0x0C817B, lightOpacity: 0.30, dark: 0x66D4CF, darkOpacity: 0.40)
             return Accent(solid: solid, hover: hover, surface: surface, glow: glow)
         case .teal:
             // Dark hue unchanged (#3DBFAF / #63D6C7); light pair = same hue/sat, L × 0.75.

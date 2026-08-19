@@ -644,7 +644,7 @@ struct TodayView: View {
             // stacking order, not rendered on this machine (Windows, no Xcode).
             .volarSpotlight(isActive: true)
             // List v2 (design.md §5.3/§3.4): `nowSurface` (accent pha ~8% into `bg`), not a solid
-            // `nowAccent` fill — white text on `#BF5AF2` is only 3.1:1, and a large saturated
+            // `nowAccent` fill — a large saturated
             // block would break the "one saturated point on screen" rule the chip above already
             // spends. The 3px leading bar is the row's ONLY other saturated pixel. Put inside this
             // same `.background` (not a separate `.overlay`) so it gets clipped to the rounded
