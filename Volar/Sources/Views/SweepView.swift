@@ -279,7 +279,7 @@ private struct SweepRow: View {
             TaskItem(title: "Update onboarding flowchart", priority: .medium, when: .later, durationMinutes: 30),
             TaskItem(title: "Reply to design feedback thread", priority: .low, when: .later),
             TaskItem(title: "Renew SSL certificate", priority: .high, when: .later, durationMinutes: 15),
-            TaskItem(title: "File Q3 VAT return", priority: .high, when: .later, deadline: Date().addingTimeInterval(3600), deadlineKind: .hard),
+            TaskItem(title: "File Q3 VAT return", priority: .high, deadline: Date().addingTimeInterval(3600), deadlineKind: .hard, when: .later),
         ]
     )
     .environment(AppState(tasks: SampleData.tasks))
