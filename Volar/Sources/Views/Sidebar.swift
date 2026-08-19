@@ -141,31 +141,41 @@ struct Sidebar: View {
     private struct PeekEntry: Identifiable {
         let task: TaskItem
         let trailing: String
+        /// `DeadlineUrgency.tint` — `nil` giữ nguyên `textMut` như mọi nhãn phụ khác.
+        let tint: Color?
         var id: UUID { task.id }
     }
 
     private var upcomingPeek: [PeekEntry] {
         // `startOfTomorrow` trong `AppState` là `private`, nên gọi lại chính hàm thuần mà nó gọi,
         // thay vì tự dựng một định nghĩa "sau hôm nay" thứ hai (một nguồn luật, khác chỗ gọi).
-        let cutoff = TaskSections.startOfTomorrow(now: Date(), timeZone: .current)
+        let now = Date()
+        let cutoff = TaskSections.startOfTomorrow(now: now, timeZone: .current)
         return appState.upcomingGroups.flatMap(\.tasks).prefix(Self.peekLimit).map { task in
             PeekEntry(
                 task: task,
-                trailing: Self.upcomingLabel(TaskSections.upcomingDate(task, startOfTomorrow: cutoff))
+                trailing: Self.upcomingLabel(TaskSections.upcomingDate(task, startOfTomorrow: cutoff)),
+                tint: DeadlineUrgency.tint(for: task, now: now)
             )
         }
     }
 
     private var inboxPeek: [PeekEntry] {
+        // Inbox theo định nghĩa không có hạn, nên `tint` luôn `nil` ở đây — vẫn đi qua cùng một
+        // hàm thay vì hardcode, để nếu định nghĩa Inbox có đổi thì màu tự đúng theo.
         appState.inboxTasks.prefix(Self.peekLimit).map {
-            PeekEntry(task: $0, trailing: Self.ageLabel($0.createdAt))
+            PeekEntry(
+                task: $0,
+                trailing: Self.ageLabel($0.createdAt),
+                tint: DeadlineUrgency.tint(for: $0, now: Date())
+            )
         }
     }
 
     @ViewBuilder
     private func peekRows(_ rows: [PeekEntry]) -> some View {
         ForEach(rows) { row in
-            SectionPeekRow(task: row.task, trailing: row.trailing) {
+            SectionPeekRow(task: row.task, trailing: row.trailing, tint: row.tint) {
                 appState.openDetail(row.task.id)
             }
         }
@@ -412,6 +422,8 @@ private struct SidebarItem: View {
 private struct SectionPeekRow: View {
     let task: TaskItem
     let trailing: String
+    /// Màu nhãn ngày theo `DeadlineUrgency`; `nil` = `textMut` như cũ.
+    let tint: Color?
     let action: () -> Void
 
     @State private var isHovering = false
@@ -429,7 +441,7 @@ private struct SectionPeekRow: View {
                     Text(trailing)
                         .font(Font.volarMono(size: 10.5))
                         .monospacedDigit()
-                        .foregroundStyle(VolarColor.textMut)
+                        .foregroundStyle(tint ?? VolarColor.textMut)
                         // Cột ngày/tuổi không bao giờ bị ép co lại: tít task dài thì cắt đuôi
                         // chính nó, không phải cắt con số bên phải.
                         .layoutPriority(1)

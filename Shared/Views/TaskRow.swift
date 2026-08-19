@@ -45,6 +45,14 @@ struct TaskRow: View {
         }
     }
 
+    /// Màu hạn theo `DeadlineUrgency` (anh Khôi chốt 2026-08-20) — `nil` khi còn ≥ nửa quãng
+    /// đường, khi task không có hạn, khi đã xong, hoặc khi đã quá hạn (quá hạn có luật riêng, xem
+    /// `DeadlineUrgency`'s header). `Date()` đọc tại chỗ, cùng lý do `volarRankReason` trong
+    /// `TodayView` đã ghi: `AppState.clock` là `private` và đây không phải vòng lặp nóng.
+    private var deadlineTint: Color? {
+        DeadlineUrgency.tint(for: task, now: Date())
+    }
+
     /// Mirrors the prototype's `task.time` — the raw formatted deadline time shown (muted) once a
     /// task is done, independent of `timeBadge` (which is only ever populated for open tasks).
     private var rawTimeLabel: String? {
@@ -267,9 +275,9 @@ struct TaskRow: View {
     private var trailing: some View {
         if let timeBadge = task.timeBadge, !task.done {
             if task.deadlineKind == .hard {
-                hardDeadlineBadge(timeBadge)
+                hardDeadlineBadge(timeBadge, tint: deadlineTint)
             } else {
-                TimeBadge(timeBadge, filled: isActive)
+                TimeBadge(timeBadge, filled: isActive, tint: deadlineTint)
             }
         } else if task.done, let rawTimeLabel {
             Text(rawTimeLabel)
@@ -286,7 +294,7 @@ struct TaskRow: View {
     /// trailing column doesn't jump around switching between the two, but filled with
     /// `veil(0.10)` instead of the accent color and prefixed with a short "due" label instead of
     /// relying on color/fill to say "this one's different".
-    private func hardDeadlineBadge(_ text: String) -> some View {
+    private func hardDeadlineBadge(_ text: String, tint: Color?) -> some View {
         HStack(spacing: 4) {
             Text("due")
                 .font(Font.volarMono(size: 9, weight: .semibold))
@@ -295,7 +303,12 @@ struct TaskRow: View {
                 .font(Font.volarMono(size: 11.5, weight: .medium))
                 .monospacedDigit()
         }
-        .foregroundStyle(VolarColor.textPri)
+        // `tint` (DeadlineUrgency) KHÔNG mâu thuẫn với luật "shape/weight, never color" ở doc
+        // comment ngay trên: luật đó nói màu không được là thứ phân biệt hạn CỨNG với hạn MỀM —
+        // và nó vẫn không phải, cái phân biệt hai loại vẫn là chữ "due" + nền `veil`. Màu ở đây
+        // mang một nghĩa khác hẳn (còn bao nhiêu thời gian), và nó nói đúng nghĩa đó trên cả hai
+        // loại badge như nhau.
+        .foregroundStyle(tint ?? VolarColor.textPri)
         .padding(.horizontal, 9)
         .frame(height: 22)
         .background(VolarColor.veil(0.10))

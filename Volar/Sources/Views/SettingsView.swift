@@ -929,18 +929,25 @@ struct SettingsView: View {
             // `Picker`/`Binding(get:set:)`/rawValue convention as "Speech engine"/"Task parsing"
             // in the General tab.
             SettingsRow(label: "Appearance", hint: "System follows your Mac's Light/Dark setting. Light and Dark pin Volar regardless of it.") {
-                Picker("", selection: Binding(
-                    get: { appState.appearance.rawValue },
-                    set: { if let pref = AppearancePreference(rawValue: $0) { appState.setAppearance(pref) } }
-                )) {
-                    ForEach(AppearancePreference.allCases) { pref in
-                        Text(pref.label).tag(pref.rawValue)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .tint(accentColors.solid)
-                .frame(width: 200)
+                // 2026-08-20, anh Khôi báo: "chữ dark và light đang trùng với màu nền — lúc đen
+                // thì chữ Dark nên trắng, lúc chọn light thì chữ Light nên đen". Đây từng là một
+                // `Picker(.menu)` của AppKit, và màu chữ của nó KHÔNG do file này quyết: pop-up
+                // button + menu popup tự vẽ theo `NSApp.appearance`, tức là theo đúng cái pref mà
+                // hàng này đang sửa. Mọi khoảnh khắc hai thứ đó lệch nhau (đang đổi, hoặc pref là
+                // `.system` mà máy vừa tự chuyển) là một khoảnh khắc chữ trùng nền, và không có
+                // cách nào ép màu chữ của một AppKit popup từ SwiftUI.
+                //
+                // `Segmented` (ngay dưới đây, hàng Background đã dùng) vẽ chữ bằng chính token của
+                // Volar (`accentColors.solid` khi chọn, `textSec` khi không) trên nền token của
+                // Volar — nên nó đọc được ở cả hai chế độ theo đúng định nghĩa, không phụ thuộc
+                // AppKit. Ba lựa chọn cũng vừa đủ để nằm ngang, không cần menu thả xuống.
+                Segmented(
+                    value: Binding(
+                        get: { appState.appearance },
+                        set: { appState.setAppearance($0) }
+                    ),
+                    options: AppearancePreference.allCases.map { SegmentOption(id: $0, label: $0.label) }
+                )
             }
             SettingsRow(label: "Background", hint: "A live scene or your own image behind the glass. Task list and panels stay readable on top.") {
                 Segmented(

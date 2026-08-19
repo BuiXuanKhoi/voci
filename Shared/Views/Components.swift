@@ -156,24 +156,34 @@ struct PriorityBadge: View {
 struct TimeBadge: View {
     let text: String
     var filled: Bool
+    /// `DeadlineUrgency.tint` — màu đè lên badge khi hạn đã đi quá nửa quãng đường (anh Khôi chốt
+    /// 2026-08-20). `nil` (mặc định) giữ nguyên accent như trước, tức là "còn nhiều thời gian"
+    /// không có dấu hiệu riêng nào cả: badge cứ là mint như mọi badge khác.
+    var tint: Color? = nil
 
     @Environment(AppState.self) private var appState: AppState
 
-    init(_ text: String, filled: Bool = false) {
+    init(_ text: String, filled: Bool = false, tint: Color? = nil) {
         self.text = text
         self.filled = filled
+        self.tint = tint
     }
 
     private var accentColors: Accent { appState.accent.accent }
+
+    /// Một hue duy nhất cho cả chữ và nền của badge, nên chỉ có ĐÚNG MỘT chỗ quyết định màu.
+    private var hue: Color { tint ?? accentColors.solid }
 
     var body: some View {
         Text(text)
             .font(Font.volarMono(size: 11.5, weight: .medium))
             .monospacedDigit()
-            .foregroundStyle(filled ? Color.white : accentColors.solid)
+            .foregroundStyle(filled ? Color.white : hue)
             .padding(.horizontal, 9)
             .frame(height: 22)
-            .background(filled ? accentColors.solid : accentColors.surface)
+            // `accentColors.surface` là token pha sẵn của accent; với màu urgency thì không có
+            // token tương ứng nên pha tại chỗ ở cùng độ mờ.
+            .background(filled ? hue : (tint == nil ? accentColors.surface : hue.opacity(0.15)))
             .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
     }
 }

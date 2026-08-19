@@ -160,6 +160,13 @@ struct TodayView: View {
                 SettingsToolButton()
             }
         }
+        // 2026-08-20, anh Khôi: "header phải cùng màu — dark thì đen, light thì trắng".
+        // `WindowChrome` đã sơn `NSWindow.backgroundColor` và bật `titlebarAppearsTransparent`,
+        // nhưng cái đó CHỈ lộ nền window ở phần titlebar TRỐNG. Cửa sổ này có `.toolbar` (ngay
+        // trên), và toolbar tự vẽ nền vật liệu riêng của nó đè lên — đó là dải sáng còn sót lại
+        // trong ảnh anh gửi. `.hidden` bỏ hẳn nền đó để lộ `VolarColor.bg` bên dưới, tức là
+        // titlebar + toolbar + thân app thành đúng một màu ở cả hai chế độ.
+        .toolbarBackground(.hidden, for: .windowToolbar)
         .sheet(isPresented: $showSignInSheet) {
             SignInSheet()
         }
