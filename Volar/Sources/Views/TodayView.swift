@@ -710,23 +710,38 @@ struct TodayView: View {
     /// All derived from existing `TaskItem` fields (`durationLabel`/`timeBadge`/`frog`/`conditions`)
     /// already used elsewhere (`TaskRow`) — no new data/logic, just a different presentation.
     private func nowChips(for task: TaskItem) -> some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                if let durationLabel = task.durationLabel {
-                    SpotlightChip(key: "left", value: durationLabel)
-                }
-                if let timeBadge = task.timeBadge {
-                    SpotlightChip(key: "due", value: timeBadge)
-                }
-                if task.frog {
-                    SpotlightChip(value: "Hardest task today", style: .frog)
-                }
-                if !task.conditions.isEmpty {
-                    SpotlightChip(key: "waiting", value: "on other work", style: .dependency)
-                }
+        // BUG 2026-08-20 (anh Khôi gửi ảnh): đây từng là `ScrollView(.horizontal)`. `ScrollView`
+        // chiếm trọn bề ngang được cấp, và nội dung bên trong nó căn theo cạnh TRÁI — nên trong
+        // một hero card mà mọi thứ khác (chip NOW, tiêu đề, dòng lý do, hàng nút) đều căn giữa,
+        // riêng hàng chip rơi tọt về mép trái, trông như một mảnh lạc chỗ. Nhiều nhất là 4 chip
+        // ngắn trong một card rộng 520pt+ nên chẳng bao giờ cần cuộn: một `HStack` thường là đủ,
+        // và nó tự căn giữa theo `VStack` cha.
+        HStack(spacing: 8) {
+            if let durationLabel = task.durationLabel {
+                SpotlightChip(key: "left", value: durationLabel)
             }
-            .padding(.horizontal, 2)
+            // Chỉ hiện chip "due" khi dòng lý do NGAY TRÊN chưa nói đúng câu đó. Với task đến hạn
+            // hôm nay, `rankReasonLabel(.dueToday)` trả về "due 09:00" — trùng từng ký tự với chip
+            // này, tức là cùng một sự thật in hai lần cách nhau 16pt (thấy rõ trong ảnh anh Khôi
+            // gửi). Cùng lý lẽ mà `rankReasonLabel` đã dùng để trả `nil` cho `.priority`: dòng lý
+            // do tồn tại để THÊM thông tin, không phải để nhắc lại thứ đã nằm trên màn hình.
+            if let timeBadge = task.timeBadge, !showsDueInReasonLine(task) {
+                SpotlightChip(key: "due", value: timeBadge)
+            }
+            if task.frog {
+                SpotlightChip(value: "Hardest task today", style: .frog)
+            }
+            if !task.conditions.isEmpty {
+                SpotlightChip(key: "waiting", value: "on other work", style: .dependency)
+            }
         }
+        .padding(.horizontal, 2)
+    }
+
+    /// `true` khi dòng lý do của task này chính là "due …" — xem `nowChips`.
+    private func showsDueInReasonLine(_ task: TaskItem) -> Bool {
+        if case .dueToday = volarRankReason(for: task) { return true }
+        return false
     }
 
     // MARK: - Greeting header
@@ -900,9 +915,18 @@ struct TodayView: View {
                 .frame(width: 5, height: 5)
                 .shadow(color: VolarColor.high.opacity(0.5), radius: 3)
 
-            HStack(spacing: 4) {
-                Text("Frog").fontWeight(.medium).foregroundStyle(VolarColor.textPri)
-                Text("· \(appState.frogTask?.title ?? "Ship the auth fix")")
+            // BUG 2026-08-20 (anh Khôi gửi ảnh): chỗ này từng là
+            // `appState.frogTask?.title ?? "Ship the auth fix"` — khi chưa có frog nào, app BỊA ra
+            // một task không tồn tại và hiện nó như thật. Trong ảnh anh gửi, hai task thật đều là
+            // tiếng Việt còn cái pill vẫn nói "Ship the auth fix". Chuỗi đó là dữ liệu mẫu của
+            // `SampleData`, lọt vào đường hiển thị thật.
+            if let frog = appState.frogTask {
+                HStack(spacing: 4) {
+                    Text("Frog").fontWeight(.medium).foregroundStyle(VolarColor.textPri)
+                    Text("· \(frog.title)").lineLimit(1).truncationMode(.tail)
+                }
+            } else {
+                Text("No frog today").foregroundStyle(VolarColor.textSec)
             }
 
             Button {
@@ -1174,6 +1198,13 @@ private struct NextPeekRow: View {
 
     @Environment(AppState.self) private var appState: AppState
 
+    /// `true` khi dòng lý do sẽ chỉ nhắc lại cái hạn mà cột phải đã hiện — xem `body`.
+    private var reasonRepeatsTrailing: Bool {
+        guard task.durationLabel == nil, task.timeBadge != nil else { return false }
+        if case .dueToday = volarRankReason(for: task) { return true }
+        return false
+    }
+
     var body: some View {
         HStack(spacing: 14) {
             checkbox
@@ -1194,7 +1225,12 @@ private struct NextPeekRow: View {
                 // List v2 (design.md §5.6.1, coordinator follow-up 2026-08-19): NEXT is the
                 // other bespoke (non-`TaskRow`) row, same reasoning as `nowSpotlight`'s reason
                 // line above — reuses `rankReasonLabel`, no second formatter.
-                if !task.done, let label = rankReasonLabel(volarRankReason(for: task)) {
+                // BUG 2026-08-20 (anh Khôi gửi ảnh): row NEXT hiện "due 09:00" dưới tiêu đề và
+                // "09:00" ở cột phải — cùng một cái hạn, hai chỗ, cách nhau một dòng. Cột phải chỉ
+                // hiện hạn khi task KHÔNG có ước lượng thời lượng (`durationLabel ?? timeBadge`),
+                // nên điều kiện phải kiểm đúng chuyện đó, không phải cứ thấy `.dueToday` là bỏ:
+                // task có "45 min" ở cột phải thì dòng "due 09:00" vẫn là nơi duy nhất nói ra hạn.
+                if !task.done, !reasonRepeatsTrailing, let label = rankReasonLabel(volarRankReason(for: task)) {
                     Text(label)
                         .font(.system(size: 11.5))
                         .foregroundStyle(VolarColor.textSec)
