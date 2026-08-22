@@ -1,9 +1,10 @@
-// Sources/Views/TaskDetailView.swift — task detail INSPECTOR PANEL: edit-in-place + read-aloud +
-// actions. Panel-refactor (2026-08-07, specs/005-cursor-retheme/panel-refactor.md) moved this from
-// a modal `.sheet` (the `.sheet` used to live in `VolarApp.swift`, gated on
-// `appState.detailTaskID != nil`) to a 300pt column docked in `TodayView.body`'s own `HStack`,
-// alongside `Sidebar`/`mainColumn` — see that file's `detailPanel`. Nothing about the commit
-// mechanism below changed for that move; only the presentation container did.
+// Sources/Views/TaskDetailView.swift — TRANG task detail: edit-in-place + read-aloud + actions.
+// Hai lần đổi vỏ, không lần nào đụng tới cơ chế commit bên dưới — chỉ cái khung chứa đổi:
+//   2026-08-07 panel-refactor (specs/005-cursor-retheme/panel-refactor.md): từ modal `.sheet`
+//     (`.sheet` từng sống ở `VolarApp.swift`, gate bằng `appState.detailTaskID != nil`) thành một
+//     cột 340pt dock cạnh `Sidebar`/`mainColumn` trong `TodayView.body`.
+//   2026-08-22 (anh Khôi: "lấy như cái trang của Linear luôn"): từ cột đó thành TRANG hai cột
+//     THAY CHỖ `mainColumn` — nội dung bên trái, rail thuộc tính 240pt bên phải. Xem `body`.
 // Phase 1 originally shipped this read-only. T-manual-edit (2026-07-29, anh Khôi — see
 // specs/002-workflow-command-center/contracts/manual-edit-contract.md §4) turns it into an
 // edit-in-place surface for all 7 manually-editable fields (title, description, priority, start
@@ -108,22 +109,23 @@ private struct TaskDetailEditor: View {
         _remindPeriodBuffer = State(initialValue: task.reminderOverride?.remindPeriod)
     }
 
+    // 2026-08-22 (anh Khôi: "lấy như cái trang của Linear luôn"): panel dọc 340pt — title, danh
+    // sách field, mô tả, actions xếp chồng một cột — đổi thành TRANG hai cột như Linear dựng issue:
+    // nội dung (title + mô tả + waiting on) chiếm phần rộng, thuộc tính dồn hết sang rail 240pt bên
+    // phải. Đây cũng là lý do `TodayView` không còn dock view này cạnh `mainColumn` nữa mà cho nó
+    // THAY CHỖ `mainColumn` — 340pt panel không đủ chỗ cho hai cột, mà bóp `mainColumn` xuống
+    // dưới 400pt thì hỏng luôn cột chính.
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                header
-                metaRow
-                // design.md §3.1 — meaningless without a deadline to tag, so it only appears once
-                // there is one (same guard `TaskItem.deadlineKind`'s own doc comment calls for).
-                if deadlineBuffer != nil {
-                    deadlineKindSection
-                }
-                descriptionSection
-                dependencySection
-                actions
-            }
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
+        HStack(spacing: 0) {
+            contentColumn
+            Rectangle().fill(VolarColor.border).frame(width: 0.5)
+            propertiesRail
+        }
+        // Esc = quay lại, đường thoát bằng bàn phím cho thứ giờ chiếm trọn cửa sổ thay vì là một
+        // panel bấm ra ngoài là xong. Commit trước, đúng branch (c) như nút Back.
+        .onExitCommand {
+            commitIfChanged()
+            appState.closeDetail()
         }
         .onChange(of: focusedField) { oldValue, _ in
             // Mechanism branch (b): fires on every focus transition; only commit when LEAVING a
@@ -135,7 +137,7 @@ private struct TaskDetailEditor: View {
         }
         .onDisappear {
             // Mechanism branch (d): safety net for Esc / click-outside, neither of which runs the
-            // Close button's own commit (branch (c), below in `actions`) — STILL load-bearing now
+            // Back button's own commit (branch (c), in `topBar` above) — STILL load-bearing now
             // that this is a panel, not a sheet (panel-refactor.md §3). This view disappears twice:
             // when `detailTask` goes back to `nil` (panel closes), and when `TaskDetailView`'s
             // `.id(task.id)` changes because the user clicked a DIFFERENT row while this panel was
@@ -146,6 +148,96 @@ private struct TaskDetailEditor: View {
             // protects against. Do not delete this modifier on the theory that "the panel never
             // disappears" — it does, and this is the safety net for both times it does.
             commitIfChanged()
+        }
+    }
+
+    // MARK: - Cột nội dung
+
+    /// `topBar` nằm NGOÀI `ScrollView` (Linear cũng vậy): nút quay lại và hai action chính phải
+    /// đứng yên khi cuộn một mô tả dài, không trôi mất lên trên.
+    ///
+    /// Nội dung bị kẹp `maxWidth: 680` rồi canh giữa thay vì kéo hết chiều ngang: dòng chữ 14pt
+    /// dài quá 90 ký tự là mắt bắt đầu lạc dòng, mà cửa sổ Volar trừ sidebar và rail vẫn có thể
+    /// rộng hơn thế nhiều trên màn lớn.
+    private var contentColumn: some View {
+        VStack(spacing: 0) {
+            topBar
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    header
+                    descriptionSection
+                    dependencySection
+                }
+                .frame(maxWidth: 680, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .center)
+                .padding(.horizontal, 32)
+                .padding(.top, 24)
+                .padding(.bottom, 48)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 8) {
+            Button {
+                // Mechanism branch (c) như nút Close cũ: commit TRƯỚC khi rời trang, vì một cú bấm
+                // vào đây có thể không đi qua `.onChange(of: focusedField)`.
+                commitIfChanged()
+                appState.closeDetail()
+            } label: {
+                HStack(spacing: 5) {
+                    VolarIcon(.back, size: 11, color: VolarColor.textSec, weight: .semibold)
+                    Text("Back")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(VolarColor.textSec)
+                }
+                .padding(.horizontal, 9)
+                .frame(height: 26)
+                // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09).
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            Spacer(minLength: 0)
+
+            Button {
+                appState.toggleDone(task.id)
+            } label: {
+                Text(task.done ? "Mark not done" : "Mark done")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 14)
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(accentColors.solid)
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+
+            Button(role: .destructive) {
+                appState.deleteTask(task.id)
+                appState.closeDetail()
+            } label: {
+                // `destruct` (not `high`) — token cho hành động không thể hoàn tác.
+                Text("Delete")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(VolarColor.destruct)
+                    .padding(.horizontal, 12)
+                    .frame(height: 28)
+                    // Nút XOÁ: mở rộng vùng bấm làm nó dễ bấm NHẦM đúng bằng mức dễ bấm TRÚNG.
+                    // Chấp nhận được vì nó nằm ở mép phải thanh trên, cách xa mọi thứ hay bấm —
+                    // nhưng nếu bố cục đổi và có nút nào dịch lại sát thì phải xem lại chỗ này.
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(VolarColor.destruct.opacity(0.12))
+            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(VolarColor.border).frame(height: 0.5)
         }
     }
 
@@ -190,28 +282,41 @@ private struct TaskDetailEditor: View {
     // MARK: - Header
 
     private var header: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             if task.frog && !task.done {
                 Circle()
                     .fill(VolarColor.high)
-                    .frame(width: 6, height: 6)
+                    .frame(width: 7, height: 7)
                     .shadow(color: VolarColor.high.opacity(0.5), radius: 3)
+                    // `Circle` không có baseline chữ nào để `firstTextBaseline` bám vào, nên tự
+                    // căn: dịch xuống cho nó nằm ngang thân chữ hoa của tít 26pt.
+                    .alignmentGuide(.firstTextBaseline) { _ in 1 }
             }
-            TextField("Title", text: $titleBuffer)
+            // `axis: .vertical` + `lineLimit(1...3)` thay cho `.lineLimit(2)` cũ: trang rộng hơn
+            // panel 340pt nên tít dài giờ xuống dòng được thay vì cụt đuôi. Cùng API mà
+            // `descriptionSection` bên dưới vốn đã dùng trong chính file này.
+            TextField("Title", text: $titleBuffer, axis: .vertical)
                 .textFieldStyle(.plain)
-                .font(.system(size: 24, weight: .medium))
+                .font(.system(size: 26, weight: .semibold))
+                .tracking(-0.4)
                 .foregroundStyle(VolarColor.textPri)
-                .lineLimit(2)
+                .lineLimit(1...3)
                 .focused($focusedField, equals: .title)
             Spacer(minLength: 0)
         }
     }
 
-    // MARK: - Meta row — vertical inspector field list (priority / deadline / duration /
-    // start time / remind period / status), one label+value row per field. See `metaRow`'s own
-    // doc comment for why this is a `VStack` of rows rather than the single `HStack` it used to
-    // be. Field labels mirror `TaskRow` where a field also appears there.
-
+    // MARK: - Properties rail — cột phải kiểu Linear
+    //
+    // Mỗi field là một hàng `icon + GIÁ TRỊ`, KHÔNG có nhãn "PRIORITY"/"DEADLINE"… nữa: Linear bỏ
+    // nhãn vì icon đã nói field là gì, và sáu dòng nhãn in hoa 10pt xếp dọc chính là thứ làm panel
+    // cũ trông như inspector Windows Forms.
+    //
+    // Chỗ Volar khác Linear và suýt gãy vì bỏ nhãn: Linear chỉ có MỘT trường ngày, còn ở đây
+    // deadline / start / remind đều là mốc thời gian — ba icon đồng hồ giống nhau thì không ai
+    // đoán ra hàng nào là hàng nào. Nên ba field đó cố ý lấy ba icon khác họ (cờ hạn chót, nút
+    // play cho giờ bắt đầu, chuông cho nhắc), và mỗi hàng mang `.help(...)` để rê chuột là hiện
+    // tên field.
     private var priorityColor: Color {
         switch priorityBuffer {
         case .high: return VolarColor.high
@@ -228,51 +333,62 @@ private struct TaskDetailEditor: View {
         }
     }
 
-    /// Vertical inspector field list — one label/value row per field, the standard inspector
-    /// idiom (Xcode's and Cursor's inspectors both lay out this way). The original `metaRow` was
-    /// a single `HStack` of six controls plus five `·` separators, sized for the old 480pt
-    /// `.sheet` presentation; that needs roughly 450pt and does not fit this view's current
-    /// 340pt panel / ~300pt content width, and `HStack` doesn't wrap, so trailing controls got
-    /// clipped. A vertical list has no width ceiling of its own — each row only needs to fit
-    /// label + value on one line, which it does at any panel width this app uses.
-    ///
-    /// The label style (10pt medium, 0.7 tracking, uppercase, `textMut`) matches
-    /// `SectionHeader` (`Components.swift`) and `DiffRow` (`DiffRow.swift`), the two other places
-    /// this app already renders an uppercase field label — not invented fresh here. The row VALUE
-    /// font/color (12pt medium `textSec`) is `metaRow`'s original styling, applied to the
-    /// container so each control still renders exactly as it did before; each label's own
-    /// explicit `.font`/`.foregroundStyle` below is more specific and wins over that container
-    /// styling, so labels render at 10pt `textMut`, not the 12pt `textSec` value style.
-    private var metaRow: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            metaFieldRow("PRIORITY") { priorityMenu }
-            metaFieldRow("DEADLINE") { deadlineControl }
-            metaFieldRow("DURATION") { durationMenu }
-            metaFieldRow("START") { startTimeControl }
-            metaFieldRow("REMIND") { remindPeriodMenu }
-            metaFieldRow("STATUS") { Text(task.done ? "Done" : "Open") }
+    private var propertiesRail: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Properties")
+                    .font(.system(size: 11, weight: .semibold))
+                    .tracking(0.3)
+                    .foregroundStyle(VolarColor.textMut)
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 6)
+
+                railRow(.flag, "Priority") { priorityMenu }
+                railRow(.today, "Deadline") { deadlineControl }
+                // design.md §3.1 — vô nghĩa khi chưa có deadline để gắn nhãn, nên chỉ hiện khi đã
+                // có một cái (đúng guard mà doc comment của `TaskItem.deadlineKind` đòi).
+                if deadlineBuffer != nil {
+                    deadlineKindSection
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 6)
+                }
+                railRow(.play, "Start time") { startTimeControl }
+                railRow(.clock, "Duration") { durationMenu }
+                railRow(.bell, "Remind") { remindPeriodMenu }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .font(.system(size: 12, weight: .medium))
-        .foregroundStyle(VolarColor.textSec)
+        .frame(width: 240)
+        // Rail có nền riêng (mainColumn/`contentColumn` để trong suốt cho ambient hiện qua) — đúng
+        // cách Linear tách cột thuộc tính khỏi thân issue mà không cần thêm đường kẻ nào.
+        .background(VolarColor.surface.opacity(0.5))
     }
 
-    /// One `metaRow` line: uppercase muted label at the leading edge, the field's existing
-    /// control at the trailing edge, a flexible `Spacer` between them doing the right-alignment
-    /// work so a control's own `.fixedSize()` (kept as-is on every menu below) never has to
-    /// fight the row for space.
-    private func metaFieldRow<Value: View>(
+    /// Một hàng trong rail: icon (đóng vai nhãn) + control sẵn có của field.
+    ///
+    /// `label` KHÔNG vẽ ra chữ nào — nó đi vào `.help` (tooltip cho người dùng chuột) và vào
+    /// `.accessibilityLabel` của riêng cái ICON. Đặt nhãn lên icon chứ không lên cả hàng là có chủ
+    /// đích: gộp cả hàng thành một phần tử rồi đặt nhãn "Deadline" sẽ NUỐT MẤT giá trị mà control
+    /// con đang đọc ra. Tách đôi thì VoiceOver đọc "Deadline" rồi tới control đọc giá trị của nó —
+    /// đúng bằng lượng thông tin cặp nhãn+giá trị cũ có.
+    private func railRow<Value: View>(
+        _ icon: VolarIconName,
         _ label: String,
         @ViewBuilder value: () -> Value
     ) -> some View {
-        HStack(spacing: 0) {
-            Text(label)
-                .font(.system(size: 10, weight: .medium))
-                .tracking(0.7) // 0.07em at 10pt — matches `SectionHeader`/`DiffRow`'s field label
-                .textCase(.uppercase)
-                .foregroundStyle(VolarColor.textMut)
-            Spacer(minLength: 12)
+        HStack(spacing: 9) {
+            VolarIcon(icon, size: 12, color: VolarColor.textMut)
+                .frame(width: 14, alignment: .leading)
+                .accessibilityLabel(label)
             value()
+            Spacer(minLength: 0)
         }
+        .font(.system(size: 13))
+        .foregroundStyle(VolarColor.textSec)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 5)
+        .help(label)
     }
 
     /// Mechanism branch (a): a `Menu` selection commits in the same step it mutates the buffer —
@@ -425,31 +541,24 @@ private struct TaskDetailEditor: View {
 
     // MARK: - Description
 
+    /// Mô tả giờ là chữ TRẦN, không nhãn "DESCRIPTION", không khung card viền — cách Linear để
+    /// phần mô tả của issue: chữ chạy thẳng dưới tít, cái ô chỉ hiện ra khi con trỏ vào.
+    ///
+    /// Bỏ luôn `ScrollView` bọc ngoài `TextField`: trước đây nó cần thiết vì cả panel cao cố định
+    /// nên mô tả dài phải tự cuộn trong ô của mình; giờ `contentColumn` đã là một `ScrollView` rồi,
+    /// lồng thêm một cái nữa chỉ tạo ra hai thanh cuộn tranh nhau cùng một cử chỉ.
     private var descriptionSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("DESCRIPTION")
-                .font(.system(size: 11, weight: .medium))
-                .tracking(0.77)
-                .foregroundStyle(VolarColor.textMut)
-
-            ScrollView {
-                TextField("No description", text: $detailsBuffer, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 14))
-                    .lineSpacing(5)
-                    .foregroundStyle(VolarColor.textSec)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(12)
-                    .focused($focusedField, equals: .details)
-            }
-            .frame(maxHeight: .infinity)
-            .background(VolarColor.card)
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .volarHairline(cornerRadius: 8)
+        VStack(alignment: .leading, spacing: 12) {
+            TextField("Add description…", text: $detailsBuffer, axis: .vertical)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14))
+                .lineSpacing(5)
+                .foregroundStyle(VolarColor.textSec)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .focused($focusedField, equals: .details)
 
             readButton
         }
-        .frame(maxHeight: .infinity)
     }
 
     /// Reads the PERSISTED `task.details` (not `detailsBuffer`) — same as before this change:
@@ -490,9 +599,8 @@ private struct TaskDetailEditor: View {
 
     private var dependencySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("WAITING ON")
-                .font(.system(size: 11, weight: .medium))
-                .tracking(0.77)
+            Text("Waiting on")
+                .font(.system(size: 12, weight: .semibold))
                 .foregroundStyle(VolarColor.textMut)
 
             if task.conditions.isEmpty {
@@ -595,91 +703,10 @@ private struct TaskDetailEditor: View {
     }
 
     // MARK: - Actions
-
-    /// Two rows, not the single `HStack` this used to be. The original row packed Close, Delete,
-    /// a `Spacer`, and the Mark done/not done toggle side by side, sized for the old 480pt
-    /// `.sheet` presentation; "Mark not done" (the longer of the two toggle labels) alone needs
-    /// roughly 304pt next to Close and Delete, which does not fit this view's current 340pt panel
-    /// / ~300pt content width — the row would clip or spill. Splitting into a primary row (the
-    /// toggle, full width) over a secondary row (Close/Delete, spread) is both the inspector idiom
-    /// and gives the primary action — the one anh Khôi reaches for most, done/not-done — its own
-    /// full-width weight instead of competing for space with two secondary buttons.
-    private var actions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Button {
-                appState.toggleDone(task.id)
-            } label: {
-                Text(task.done ? "Mark not done" : "Mark done")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 34)
-                    // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09). Đây là nút chính của cả
-                    // panel — full-width đúng để nó DỄ bấm, mà thiếu dòng này thì cả dải rộng ấy
-                    // chỉ ăn click ở đúng chỗ chữ, tức phản tác dụng hoàn toàn với ý đồ thiết kế.
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(accentColors.solid)
-            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-            .shadow(color: accentColors.glow, radius: 12, y: 4)
-
-            HStack(spacing: 8) {
-                Button {
-                    // Mechanism branch (c): commit before dismissing, so a click on Close itself
-                    // (which does not trigger `.onChange(of: focusedField)` if the click lands
-                    // somewhere that never took focus) never drops a pending edit. `.onDisappear`
-                    // below would also catch it, but this avoids relying on dismiss-animation
-                    // timing.
-                    commitIfChanged()
-                    appState.closeDetail()
-                } label: {
-                    Text("Close")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(VolarColor.textPri)
-                        .padding(.horizontal, 14)
-                        .frame(height: 34)
-                        // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09).
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(VolarColor.veil(0.06))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .volarHairline(cornerRadius: 6)
-
-                Spacer(minLength: 0)
-
-                Button(role: .destructive) {
-                    appState.deleteTask(task.id)
-                    appState.closeDetail()
-                } label: {
-                    // `destruct` (not `high`) — this is the token for irreversible actions; `high`
-                    // is priority-only and reads almost identically to `destruct` on the graphite
-                    // ground.
-                    Text("Delete")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundStyle(VolarColor.destruct)
-                        .padding(.horizontal, 14)
-                        .frame(height: 34)
-                        // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09). Nút XOÁ, nên đáng nói
-                        // thêm: mở rộng vùng bấm ở đây làm nút dễ bấm NHẦM hơn đúng bằng mức nó dễ
-                        // bấm TRÚNG hơn. Chấp nhận được vì `Spacer(minLength: 0)` ngay trên đã đẩy
-                        // nút này về sát mép phải, cách "Close" một khoảng rộng — không có chuyện
-                        // hai vùng bấm chạm nhau. Nếu sau này bố cục đổi và hai nút sát lại thì phải
-                        // xem lại chỗ này, đừng chỉ giữ nguyên vì nó đang chạy.
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(VolarColor.destruct.opacity(0.12))
-                .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        .stroke(VolarColor.destruct.opacity(0.25), lineWidth: 0.5)
-                )
-            }
-        }
-    }
+    //
+    // Nút "Mark done" / "Delete" / quay lại đã dời hết lên `topBar` (2026-08-22). Trước đây chúng
+    // nằm cuối một cột dọc 340pt, tức là phải CUỘN XUỐNG HẾT mô tả mới bấm được nút chính của cả
+    // panel — chuyện chỉ không lộ ra vì panel cũ hẹp và thường ngắn.
 }
 
 /// Shared `.popover` + `DatePicker` control for the `deadline`/`startTime` buffers (both

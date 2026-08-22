@@ -50,17 +50,26 @@ struct TodayView: View {
                     .ignoresSafeArea()
             }
 
-            // Panel-refactor (specs/005-cursor-retheme/panel-refactor.md §5 item 3): `detailPanel`
-            // is a third CHILD of this `HStack`, not an overlay — it does not participate in, and
-            // must not disturb, the tour-overlay-must-be-last ordering the big comment below (on
-            // `.overlayPreferenceValue`) locks in. `FocusOverlay()` below is a sibling of this whole
-            // `HStack` inside the outer `ZStack`, so it already paints over all three columns
-            // (Sidebar/mainColumn/detailPanel) when focus mode is active — the panel never sits
-            // beside it.
+            // Panel-refactor (specs/005-cursor-retheme/panel-refactor.md §5 item 3): task detail
+            // là một CHILD của `HStack` này, không phải overlay — nó không tham gia, và không được
+            // phá, thứ tự "tour overlay phải nằm cuối" mà comment dài bên dưới (chỗ
+            // `.overlayPreferenceValue`) khoá lại. `FocusOverlay()` bên dưới là anh em của cả
+            // `HStack` này trong `ZStack` ngoài cùng, nên nó vốn đã phủ lên mọi cột khi focus mode
+            // bật — detail không bao giờ đứng cạnh nó.
             HStack(spacing: 0) {
                 Sidebar()
-                mainColumn
-                detailPanel
+                // 2026-08-22 (anh Khôi: "lấy như cái trang của Linear luôn"): detail THAY CHỖ
+                // `mainColumn` chứ không còn dock cạnh nó. Nó nay là một trang hai cột (nội dung +
+                // rail thuộc tính 240pt); cửa sổ rộng tối thiểu 920pt trừ sidebar 220 và rail 240
+                // chỉ còn 460 cho phần nội dung, nên giữ cả `mainColumn` bên cạnh là bóp cả hai
+                // cột xuống dưới ngưỡng đọc được.
+                if appState.detailTask != nil {
+                    TaskDetailView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .transition(.opacity)
+                } else {
+                    mainColumn
+                }
             }
             .animation(VolarMotion.state, value: appState.detailTaskID)
 
@@ -182,28 +191,6 @@ struct TodayView: View {
     /// `HStack` above actually has an insertion/removal edge to animate.
     ///
     /// Fixed 340pt width, `VolarColor.surface` background, 0.5pt `VolarColor.border` hairline on the
-    /// LEADING edge — same "`Rectangle().fill(VolarColor.border).frame(width: 0.5)` via
-    /// `.overlay(alignment:)`" idiom `Sidebar.swift` already uses for its own trailing hairline
-    /// against `mainColumn`, just mirrored to the opposite edge since this column sits on the other
-    /// side of the window.
-    ///
-    /// `TaskDetailView` itself renders `EmptyView()` when `appState.detailTask` is `nil` (its own
-    /// `body` already guards that) — the `if` here is what makes the outer 340pt frame disappear
-    /// too, not just its content.
-    @ViewBuilder
-    private var detailPanel: some View {
-        if appState.detailTask != nil {
-            TaskDetailView()
-                .frame(width: 340)
-                .frame(maxHeight: .infinity)
-                .background(VolarColor.surface)
-                .overlay(alignment: .leading) {
-                    Rectangle().fill(VolarColor.border).frame(width: 0.5)
-                }
-                .transition(.move(edge: .trailing).combined(with: .opacity))
-        }
-    }
-
     // MARK: - Main column
 
     private var mainColumn: some View {

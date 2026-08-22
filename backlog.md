@@ -1182,6 +1182,25 @@ gập), 3 task con nổi lên (13pt `textPri` + chấm màu urgency bên trái, 
 - [ ] `design/volar-mac.jsx` (prototype, sửa lần cuối 2026-07-16) vẫn là bản sidebar phẳng cũ,
       count hardcode 12/3. Đang lệch hẳn với code Swift — port ngược hoặc khai tử prototype.
 
+### Task detail thành trang Linear — 2026-08-22, CHƯA BUILD
+
+`TaskDetailView` từ panel 340pt dock cạnh `mainColumn` → TRANG hai cột THAY CHỖ `mainColumn`:
+nội dung (title 26pt + mô tả trần + waiting on, kẹp `maxWidth 680` canh giữa) bên trái, rail
+thuộc tính 240pt bên phải. Bỏ hết nhãn in hoa (`PRIORITY`/`DEADLINE`/`DESCRIPTION`/`WAITING ON`)
+— icon thay nhãn, `.help()` cho chuột, `.accessibilityLabel` đặt lên icon để VoiceOver vẫn đọc
+"tên field + giá trị". Nút Mark done / Delete / Back dời từ cuối cột lên `topBar` cố định.
+
+- [ ] Build + nhìn mắt trên Mac. Bốn chỗ dễ sai vì viết mù:
+      (a) `TextField(axis: .vertical)` + `.lineLimit(1...3)` cho title;
+      (b) `.alignmentGuide(.firstTextBaseline)` của chấm frog cạnh tít 26pt;
+      (c) `deadlineKindSection` (Toggle switch + 2 dòng chữ) nhét trong rail 240pt còn ~208pt;
+      (d) `.help()` trên `railRow` — chưa xác minh tooltip có hiện khi con trỏ nằm trên Menu con.
+- [ ] Mất cột Today khi mở task (đúng như Linear rời list để vào issue). Nếu anh Khôi thấy vướng
+      thì đường lùi rẻ nhất là cho rail ẩn đi và trả detail về dạng panel hẹp, KHÔNG phải dựng
+      lại hai cột.
+- [ ] Esc để quay lại: đã nối bằng `.onExitCommand`, CHƯA verify — nếu focus đang nằm trong
+      `TextField` thì chưa chắc nó tới được view này.
+
 ## Build Mac lần đầu 2026-08-18 — lỗi Swift 6 strict concurrency
 
 Anh Khôi build trên Mac, hai lỗi ĐẦU TIÊN nằm ở `Shared/Sync/` (plan 008), **không phải** từ
