@@ -468,7 +468,7 @@ private struct TaskDetailEditor: View {
             .padding(.horizontal, 12)
             .frame(height: 30)
             // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09) — xem
-            // `Sidebar.swift`'s `SidebarItem` cho giải thích đầy đủ về họ bug này.
+            // `Sidebar.swift`'s `SectionHeaderRow` cho giải thích đầy đủ về họ bug này.
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)

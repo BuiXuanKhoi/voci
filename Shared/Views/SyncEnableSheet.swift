@@ -79,7 +79,7 @@ struct SyncEnableSheet: View {
                     // `.background`/`.clipShape` ở trên nằm trong label nên thực ra label ĐÃ vẽ đầy
                     // hình tròn; `.contentShape` vẫn đặt tường minh ở đây để không phụ thuộc vào
                     // việc label có luôn vẽ đầy vùng nó chiếm hay không (xem `Sidebar.swift`'s
-                    // `SidebarItem` cho lý do đầy đủ của luật này).
+                    // `SectionHeaderRow` cho lý do đầy đủ của luật này).
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)

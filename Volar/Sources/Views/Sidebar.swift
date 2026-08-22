@@ -45,35 +45,23 @@ struct Sidebar: View {
             // Membership/counts come from `AppState.upcomingNavCount`/`inboxNavCount`
             // (`Sources/Model/TaskSections.swift`); `active` now reflects `appState.selectedSection`
             // instead of the old `true`/`false` literals.
-            VStack(spacing: 1) {
-                SidebarItem(
-                    icon: .today,
-                    label: "Today",
-                    count: appState.openTasks.count,
-                    active: appState.selectedSection == .today
-                ) { appState.selectedSection = .today }
-                peekRows(todayPeek)
-                SidebarItem(
-                    icon: .upcoming,
-                    label: "Upcoming",
-                    count: appState.upcomingNavCount,
-                    active: appState.selectedSection == .upcoming
-                ) { appState.selectedSection = .upcoming }
-                peekRows(upcomingPeek)
-                SidebarItem(
-                    icon: .inbox,
-                    label: "Inbox",
-                    count: appState.inboxNavCount,
-                    active: appState.selectedSection == .inbox
-                ) { appState.selectedSection = .inbox }
-                peekRows(inboxPeek)
+            // 2026-08-22 (anh Khôi, so với sidebar Linear): ba section giờ là HEADER của nhóm
+            // task chứ không còn là nav row nặng. Cụ thể bỏ icon, bỏ count, bỏ thanh accent 2px —
+            // chúng làm header hút mắt hơn chính mấy task nằm dưới, tức ngược đúng cái phân cấp
+            // Linear dựng ("Workspace ▾" mờ, item con mới là thứ đọc được). Count không mất khỏi
+            // app: `TodayView` vẫn đọc `upcomingNavCount`/`inboxNavCount` cho dòng mô tả section.
+            VStack(spacing: 8) {
+                sectionGroup(.today, "Today", todayPeek)
+                sectionGroup(.upcoming, "Upcoming", upcomingPeek)
+                sectionGroup(.inbox, "Inbox", inboxPeek)
             }
             .padding(.horizontal, 8)
+            .animation(VolarMotion.list, value: collapsed)
 
             Spacer(minLength: 0)
 
             // "Pro" sits between the Spacer and the footer, per anh Khôi's ask — its own row, NOT
-            // another `SidebarItem` (those are flat nav rows; this one has to visually shout, or
+            // another `SectionHeaderRow` (those switch section; this one has to visually shout, or
             // stay quiet, depending on `accountTier`). `ProSidebarRow` reads `accountTier` itself and
             // picks between a bright upsell CTA and a silent "already Pro" badge — see its doc
             // comment for why those two states must never blend into one.
@@ -85,7 +73,7 @@ struct Sidebar: View {
                 .padding(.horizontal, 10)
         }
         .padding(.bottom, 12)
-        .frame(width: 172)
+        .frame(width: 220)
         .frame(maxHeight: .infinity)
         .background(sidebarBackground)
         .overlay(alignment: .trailing) {
@@ -133,6 +121,35 @@ struct Sidebar: View {
     //   - Inbox: mới capture nhất trước. Inbox theo định nghĩa là task KHÔNG có ngày, nên không có
     //     deadline lẫn rank engine để xếp; `appState.inboxTasks` vốn đã sắp `createdAt` giảm dần.
     //     Cột phải là TUỔI ("3d"), không phải hạn — thứ vừa nói ra không nên chìm mất.
+
+    /// Section nào đang gập. `@State` chứ không `@AppStorage`: gập là thao tác tức thời trong
+    /// một phiên làm việc, không phải cấu hình — nhớ qua lần mở app sau chỉ thêm một khoá settings
+    /// cho thứ chưa ai đòi.
+    @State private var collapsed: Set<NavSection> = []
+
+    /// Header + ba task của một section. Bấm section KHÁC thì chuyển sang nó; bấm lại chính section
+    /// đang mở thì gập/mở peek — thay vì tách chevron thành nút riêng 9pt. Một nút phủ trọn hàng
+    /// vừa là đích bấm dễ trúng hơn, vừa khỏi lồng Button-trong-Button (đúng luật vùng bấm phải
+    /// phủ đúng vùng nhìn thấy — họ bug 2026-08-09 chép trong `SectionHeaderRow`).
+    @ViewBuilder
+    private func sectionGroup(_ section: NavSection, _ label: String, _ rows: [PeekEntry]) -> some View {
+        let isActive = appState.selectedSection == section
+        let isCollapsed = collapsed.contains(section)
+        VStack(alignment: .leading, spacing: 1) {
+            SectionHeaderRow(label: label, active: isActive, collapsed: isCollapsed) {
+                if isActive {
+                    if isCollapsed { collapsed.remove(section) } else { collapsed.insert(section) }
+                } else {
+                    appState.selectedSection = section
+                    // Chuyển tới một section đang gập mà nó vẫn gập thì cú bấm trông như không ăn.
+                    collapsed.remove(section)
+                }
+            }
+            if !isCollapsed {
+                peekRows(rows)
+            }
+        }
+    }
 
     private static let peekLimit = 3
 
@@ -202,7 +219,7 @@ struct Sidebar: View {
         }
     }
 
-    /// Cột phải của một row Upcoming, đủ ngắn để sống trong sidebar 172pt: giờ nếu là ngày mai,
+    /// Cột phải của một row Upcoming, đủ ngắn để sống trong sidebar 220pt: giờ nếu là ngày mai,
     /// thứ trong tuần nếu còn trong tuần này, ngày-tháng nếu xa hơn (lúc đó "Thu" đã mơ hồ).
     private static func upcomingLabel(_ date: Date?, now: Date = Date()) -> String {
         guard let date else { return "" }
@@ -361,84 +378,63 @@ private struct CaptureButtonStyle: ButtonStyle {
     }
 }
 
-/// Single sidebar nav row (icon + label + trailing count). Ported from `volar-mac.jsx`'s
-/// `SidebarItem`. Private to `Sidebar` — not part of the frozen component surface.
-private struct SidebarItem: View {
-    let icon: VolarIconName
+/// Header của một nhóm trong sidebar — tên section + chevron gập. Thay cho `SidebarItem` cũ
+/// (icon + count + thanh accent 2px): xem chú thích ở `Sidebar.body` cho lý do bỏ cả ba.
+/// Vẫn giữ nền `surfaceHi` khi active, vì khác Linear thì ba mục này CHÍNH LÀ điều hướng của app —
+/// bỏ nốt dấu hiệu section đang mở là bỏ luôn thứ duy nhất nói cho người dùng biết họ đang ở đâu.
+private struct SectionHeaderRow: View {
     let label: String
-    let count: Int?
     let active: Bool
+    let collapsed: Bool
     let action: () -> Void
 
-    @Environment(AppState.self) private var appState: AppState
     @State private var isHovering = false
-
-    private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 9) {
-                VolarIcon(icon, size: 14, color: active ? accentColors.solid : VolarColor.textSec)
+            HStack(spacing: 5) {
                 Text(label)
-                    .font(.system(size: 13, weight: active ? .semibold : .regular))
-                    .tracking(-0.065)
-                    // §5.3: active label reads `textPri` (not accent-colored — the accent budget
-                    // goes to the icon + the left bar below, not the whole row). Inactive is
-                    // `textSec`, not `textPri`: it was backwards before this pass (inactive rows
-                    // were reading as bright as the header, active rows as dim as body text).
+                    .font(.system(size: 12.5, weight: active ? .semibold : .medium))
+                    .tracking(-0.02)
                     .foregroundStyle(active ? VolarColor.textPri : VolarColor.textSec)
                     .lineLimit(1)
+                VolarIcon(.chevronDown, size: 9, color: VolarColor.textMut, weight: .semibold)
+                    .rotationEffect(.degrees(collapsed ? -90 : 0))
+                    // Chevron chỉ mờ đi chứ không biến mất khi không hover: sidebar này không có
+                    // chỗ nào khác nói cho người dùng biết nhóm gập được.
+                    .opacity(isHovering || collapsed ? 1 : 0.5)
                 Spacer(minLength: 0)
-                if let count {
-                    Text("\(count)")
-                        .font(Font.volarMono(size: 11))
-                        .monospacedDigit()
-                        .foregroundStyle(active ? accentColors.solid : VolarColor.textMut)
-                }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
             // BUG FIX 2026-08-09 (anh Khôi báo khi chạy thật: "Upcoming/Inbox bấm hoài mà nó không
-            // vào"): với `.buttonStyle(.plain)`, SwiftUI chỉ hit-test phần label THỰC SỰ VẼ RA.
-            // `Spacer(minLength: 0)` ở trên và hai `.padding` này không vẽ gì cả, nên vùng bấm thật
-            // của hàng không phải cả hàng mà là mấy mảnh rời rạc — icon, chữ, và con số — với lỗ
-            // thủng ở giữa. Chuyện này khó phát hiện đúng vì cái nền highlight (`.background` ngay
-            // dưới đây) được vẽ ở lớp NGOÀI `Button`, nên hàng TRÔNG như bấm được cả dải trong khi
-            // thực tế không. `.contentShape` đặt SAU padding để hình chữ nhật hit-test trùm luôn cả
-            // padding, tức đúng bằng vùng nền mà mắt nhìn thấy. Cùng idiom `TodayView.swift:1152`
-            // (`.contentShape(Rectangle())` + `.onTapGesture`) và `:616` đã dùng — chỗ này chỉ là
-            // sót, không phải một quy ước khác.
+            // vào") — giữ nguyên từ `SidebarItem`, cái type mà hàng này thay thế; nhiều file khác
+            // trong app trỏ về đây cho lời giải thích đầy đủ. Với `.buttonStyle(.plain)`, SwiftUI
+            // chỉ hit-test phần label THỰC SỰ VẼ RA. `Spacer(minLength: 0)` ở trên và hai `.padding`
+            // này không vẽ gì cả, nên vùng bấm thật của hàng không phải cả hàng mà là mấy mảnh rời
+            // rạc — chữ và chevron — với lỗ thủng ở giữa. Chuyện này khó phát hiện đúng vì cái nền
+            // highlight (`.background` ngay dưới) được vẽ ở lớp NGOÀI `Button`, nên hàng TRÔNG như
+            // bấm được cả dải trong khi thực tế không. `.contentShape` đặt SAU padding để hình chữ
+            // nhật hit-test trùm luôn cả padding, tức đúng bằng vùng nền mà mắt nhìn thấy.
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        // §5.3: active = solid `surfaceHi` fill (was `accentColors.surface`, an accent wash at
-        // .15 alpha — anh Khôi's "chìm vào giao diện" report). Inactive hover = `cardHover`, the
-        // one hover surface (§5.2), replacing the near-invisible ad hoc `veil(0.04)`.
         .background(active ? VolarColor.surfaceHi : (isHovering ? VolarColor.cardHover : .clear))
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-        .overlay(alignment: .leading) {
-            if active {
-                // §5.3 left bar, 2px, `accentColors.solid` — this row's only saturated pixels.
-                // Bo tròn nhẹ (radius 1) + inset dọc 3pt thay vì cao sát mép trên/dưới: mép trên/
-                // dưới của row đã bo góc 5pt bởi `.clipShape` ở trên (mà bar này vẽ SAU, không bị
-                // clip theo), một thanh vuông góc cao đúng bằng chiều cao row sẽ tràn nhẹ ra ngoài
-                // đường bo đó ở hai đầu. Inset + bo nhẹ tránh phần tràn mà không cần tự vẽ lại toàn
-                // bộ shape của row.
-                RoundedRectangle(cornerRadius: 1, style: .continuous)
-                    .fill(accentColors.solid)
-                    .frame(width: 2)
-                    .padding(.vertical, 3)
-            }
-        }
+        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
+        .accessibilityLabel(label)
+        .accessibilityHint(active
+            ? (collapsed ? "Expand section" : "Collapse section")
+            : "Show \(label)")
     }
 }
 
-/// Một task lồng dưới nav row Upcoming/Inbox — tên (cắt đuôi) + một cột mono ngắn bên phải.
+/// Một task lồng dưới header Today/Upcoming/Inbox — tên (cắt đuôi) + một cột mono ngắn bên phải.
 /// Không phải `TaskRow`: `TaskRow` mang checkbox, chip blocked, context menu, số thứ tự… trong
-/// 172pt trừ thụt lề thì không còn chỗ cho bất cứ thứ nào trong số đó. Cũng không phải
-/// `SidebarItem`: row này không đổi section, nó mở detail panel — bấm vào một task ở đâu trong app
+/// 220pt trừ thụt lề thì không còn chỗ cho bất cứ thứ nào trong số đó. Cũng không phải
+/// `SectionHeaderRow`: row này không đổi section, nó mở detail panel — bấm vào một task ở đâu
+/// trong app
 /// cũng ra cùng một chỗ (`AppState.openDetail`, đúng quy ước `TaskRow`/`NextPeekRow` đang theo).
 private struct SectionPeekRow: View {
     let task: TaskItem
@@ -451,10 +447,20 @@ private struct SectionPeekRow: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
+            HStack(spacing: 7) {
+                // Màu urgency chuyển từ cột chữ bên phải sang cái chấm bên TRÁI: ở bên phải nó là
+                // màu của một nhãn ngày (đọc ra "cái nhãn này đỏ"), ở bên trái nó là màu của cả
+                // hàng (đọc ra "việc này gấp") — đúng chỗ Linear đặt màu trong Favorites.
+                // `tint` nil (Inbox không có hạn) không đổi thành trong suốt: một hàng thiếu chấm
+                // sẽ lệch lề so với hàng bên cạnh. Xám = "không có hạn", vẫn là một trạng thái.
+                Circle()
+                    .fill(tint ?? VolarColor.textMut)
+                    .frame(width: 6, height: 6)
                 Text(task.title)
-                    .font(.system(size: 12))
-                    .foregroundStyle(VolarColor.textSec)
+                    .font(.system(size: 13))
+                    // `textPri` chứ không `textSec`: mấy hàng này giờ là nội dung chính của
+                    // sidebar, header mới là thứ được phép mờ.
+                    .foregroundStyle(VolarColor.textPri)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Spacer(minLength: 4)
@@ -462,18 +468,19 @@ private struct SectionPeekRow: View {
                     Text(trailing)
                         .font(Font.volarMono(size: 10.5))
                         .monospacedDigit()
-                        .foregroundStyle(tint ?? VolarColor.textMut)
+                        .foregroundStyle(VolarColor.textMut)
                         // Cột ngày/tuổi không bao giờ bị ép co lại: tít task dài thì cắt đuôi
                         // chính nó, không phải cắt con số bên phải.
                         .layoutPriority(1)
                 }
             }
-            // Thụt lề 33pt để tên task thẳng hàng với chữ của nav row bên trên (padding 10 + icon
-            // 14 + spacing 9), giữ nguyên padding ngang 10 của `SidebarItem` ở cạnh phải.
-            .padding(.leading, 33)
+            // Thụt 16pt: chấm lùi 8pt so với chữ của header bên trên (header padding ngang 8) —
+            // đủ để đọc ra quan hệ cha/con, không sâu như 33pt cũ (thụt để né cái icon nay đã bỏ)
+            // vốn đẩy tít task vào giữa cột rồi cắt đuôi gần hết.
+            .padding(.leading, 16)
             .padding(.trailing, 10)
-            .padding(.vertical, 4)
-            // Cùng lý do đã ghi trong `SidebarItem`: `Spacer` và `padding` không vẽ gì, thiếu dòng
+            .padding(.vertical, 4.5)
+            // Cùng lý do đã ghi trong `SectionHeaderRow`: `Spacer` và `padding` không vẽ gì, thiếu dòng
             // này thì vùng bấm thủng lỗ chỗ trong khi nền hover trông như cả dải.
             .contentShape(Rectangle())
         }
@@ -486,13 +493,13 @@ private struct SectionPeekRow: View {
     }
 }
 
-/// The sidebar's "Pro" row — deliberately NOT a `SidebarItem` (those are flat nav rows for
+/// The sidebar's "Pro" row — deliberately NOT a `SectionHeaderRow` (those are flat nav rows for
 /// switching sections; this doesn't navigate anywhere, it sells or confirms a subscription).
-/// Private to `Sidebar`, same convention as `SidebarItem`/`CaptureButtonStyle` above.
+/// Private to `Sidebar`, same convention as `SectionHeaderRow`/`CaptureButtonStyle` above.
 ///
 /// Two states that must never blend into one:
 ///  - `isPro == false` — a bright accent-filled CTA (gradient fill, accent stroke, hover feedback
-///    exactly like `SidebarItem`'s own `@State private var isHovering`) that calls `onTapUpsell`.
+///    exactly like `SectionHeaderRow`'s own `@State private var isHovering`) that calls `onTapUpsell`.
 ///    This is the ONE thing in the sidebar allowed to look like a sales pitch.
 ///  - `isPro == true` — a quiet, unclickable status row: no accent fill, no hover animation, no
 ///    action at all. Re-pitching Pro to someone who already paid for it is a product bug, not a
@@ -531,7 +538,7 @@ private struct ProSidebarRow: View {
                 .padding(.horizontal, 10)
                 .frame(height: 32)
                 .frame(maxWidth: .infinity)
-                // Cùng lỗi, cùng cách sửa như `SidebarItem` ở trên (xem comment dài ở đó): hàng này
+                // Cùng lỗi, cùng cách sửa như `SectionHeaderRow` ở trên (xem comment dài ở đó): hàng này
                 // cũng là `Button` + `.buttonStyle(.plain)` với `Spacer` + padding không vẽ gì, và
                 // gradient fill của nó cũng nằm NGOÀI `Button` — nên nó cũng trông như bấm được cả
                 // dải trong khi chỉ có icon và chữ "Pro" là ăn click. Sửa luôn ở đây thay vì đợi ai
@@ -540,7 +547,7 @@ private struct ProSidebarRow: View {
             }
             .buttonStyle(.plain)
             // Gradient fill (accentColors.solid -> .hover) rather than the flat `.surface` tint
-            // `SidebarItem`'s `active` state uses — this row needs to read as visibly brighter than
+            // `SectionHeaderRow`'s `active` state uses — this row needs to read as visibly brighter than
             // an active nav row, not just "selected".
             .background(
                 LinearGradient(

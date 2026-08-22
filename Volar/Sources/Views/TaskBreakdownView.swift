@@ -239,7 +239,7 @@ struct TaskBreakdownView: View {
                         .padding(.horizontal, 14)
                         .frame(height: 34)
                         // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09) — xem
-                        // `Sidebar.swift`'s `SidebarItem` cho giải thích đầy đủ về họ bug này.
+                        // `Sidebar.swift`'s `SectionHeaderRow` cho giải thích đầy đủ về họ bug này.
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)

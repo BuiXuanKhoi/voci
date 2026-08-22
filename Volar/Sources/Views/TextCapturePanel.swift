@@ -203,7 +203,7 @@ struct TextCaptureView: View {
             .frame(maxWidth: .infinity)
             .frame(height: 34)
             // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09, xem `Sidebar.swift`'s
-            // `SidebarItem`). `.frame(maxWidth: .infinity)` kéo nút rộng hết panel nhưng KHÔNG vẽ
+            // `SectionHeaderRow`). `.frame(maxWidth: .infinity)` kéo nút rộng hết panel nhưng KHÔNG vẽ
             // gì, còn `.background` thì nằm ngoài `Button` — nên nếu thiếu dòng này, cả dải màu
             // rộng đó chỉ ăn click ở đúng chỗ chữ "Add task".
             .contentShape(Rectangle())

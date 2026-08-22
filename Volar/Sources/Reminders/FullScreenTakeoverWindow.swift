@@ -223,7 +223,7 @@ private struct TakeoverContentView: View {
                             .padding(.horizontal, 28)
                             .padding(.vertical, 14)
                             // Vùng bấm phủ đúng vùng nhìn thấy (luật 2026-08-09, xem
-                            // `Sidebar.swift`'s `SidebarItem`). Ở màn nhắc chiếm TOÀN BỘ màn hình
+                            // `Sidebar.swift`'s `SectionHeaderRow`). Ở màn nhắc chiếm TOÀN BỘ màn hình
                             // thì lỗi này nặng nhất trong cả app: 28pt padding ngang + 14pt dọc là
                             // vùng chết, nên nút to đùng mà bấm trượt — người đang bị nhắc mà không
                             // tắt được sẽ đọc thành "app treo", không phải "mình bấm chưa trúng".

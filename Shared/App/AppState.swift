@@ -723,7 +723,8 @@ struct VoiceDoneConfirm: Identifiable, Equatable {
 // them navigation rather than decoration. Membership rules live in `Sources/Model/TaskSections.swift`
 // — deliberately NOT here, same separation the Windows original draws between `NavSection.cs` and
 // `TaskSections.cs`.
-enum NavSection: Sendable, Equatable {
+// `Hashable` (2026-08-22): sidebar giữ tập section đang gập trong một `Set<NavSection>`.
+enum NavSection: Sendable, Equatable, Hashable {
     case today, upcoming, inbox
 }
 

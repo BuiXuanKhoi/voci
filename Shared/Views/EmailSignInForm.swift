@@ -106,7 +106,7 @@ struct EmailSignInForm: View {
                 .padding(.horizontal, 14)
                 .frame(height: 30)
                 // Vùng bấm phải phủ đúng vùng NHÌN THẤY (luật anh Khôi chốt 2026-08-09) — xem
-                // `Sidebar.swift`'s `SidebarItem` cho giải thích đầy đủ. Ở đây `.background` nằm
+                // `Sidebar.swift`'s `SectionHeaderRow` cho giải thích đầy đủ. Ở đây `.background` nằm
                 // sau `.buttonStyle(.plain)` nên viên pill mà mắt thấy không thuộc label; nếu
                 // không có dòng này thì chỉ mỗi chữ ăn click, còn 14pt padding hai bên là vùng
                 // chết.
