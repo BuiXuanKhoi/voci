@@ -40,13 +40,13 @@ actor AccountService {
     /// per-instance dependency threaded through every one of those call sites.
     nonisolated static let shared = AccountService()
 
-    private static let baseURL = URL(string: "https://nuzrpipwacravfgsiacv.supabase.co")!
+    private static let baseURL = URL(string: "https://cjaamylayaylbuuhwlnz.supabase.co")!
     /// Publishable key, contract §2 — NOT a secret (same reasoning as
     /// `ConfigParseCredentialProvider.defaultBaseURL`'s doc comment: every client of a Supabase
     /// project embeds its project's public anon/publishable key; only the service-role key is
     /// secret, and that never leaves the server). Required as the `apikey` header on every GoTrue
     /// call (contract §2: "mọi request kèm header apikey").
-    private static let apiKey = "sb_publishable_pz2_mJTispHtuvcYWTpE6g_SDHmpRUI"
+    private static let apiKey = "sb_publishable_WkBa-2lGcl10NBf8JrCfJA__FPNjjf0"
 
     private let session: URLSession
     private var cachedSession: AccountSession?

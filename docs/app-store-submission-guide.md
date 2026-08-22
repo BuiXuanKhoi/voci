@@ -59,7 +59,7 @@ xcodebuild test -scheme Volar                 # test app-side
 Hiện tại backend còn ở thời device-auth, lệch hẳn với client (backlog mục 🔴🔴 đầu file).
 
 ```bash
-supabase link --project-ref nuzrpipwacravfgsiacv
+supabase link --project-ref cjaamylayaylbuuhwlnz
 supabase db push                                    # apply 0002 (hoặc 0003 nếu đã chốt schema MoR)
 supabase functions deploy parse
 supabase functions deploy groq

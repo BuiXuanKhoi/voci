@@ -17,7 +17,7 @@ KHÔNG có nghĩa "được tiêu tiền của anh Khôi mà không hỏi". Vi�
 sự cho phép. Cùng nguyên tắc đó áp cho mọi thao tác tốn tiền thật hoặc khó đảo ngược, không riêng
 probe.
 
-Bốn script này (`probe-time-parsing`, `probe-breakdown`, `probe-cues`, `probe-task-refs`) gọi
+Bốn script này (`probe-time-parsing`, `probe-breakdown`, `probe-cues`, `probe-followup`) gọi
 Gemini **thật** bằng **đúng prompt production**. Vì 98,8% input token là prompt cố định
 (systemInstruction + date rules), câu test ngắn KHÔNG làm nó rẻ đi: mỗi case ≈ $0.0018 ≈ 47đ, một
 lượt quét đủ 4 script ≈ 65 call ≈ 3.000đ. Tự chạy sau mỗi lần sửa đã đốt **55.000đ trong 3 ngày

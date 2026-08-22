@@ -28,8 +28,8 @@ actor SyncAccountClient {
     /// inheriting isolation; writing `nonisolated` here removes any doubt for a reader).
     nonisolated static let shared = SyncAccountClient()
 
-    private static let baseURL = URL(string: "https://nuzrpipwacravfgsiacv.supabase.co")!
-    private static let apiKey = "sb_publishable_pz2_mJTispHtuvcYWTpE6g_SDHmpRUI"
+    private static let baseURL = URL(string: "https://cjaamylayaylbuuhwlnz.supabase.co")!
+    private static let apiKey = "sb_publishable_WkBa-2lGcl10NBf8JrCfJA__FPNjjf0"
 
     private let session: URLSession
 

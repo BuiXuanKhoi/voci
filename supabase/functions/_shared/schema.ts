@@ -91,6 +91,23 @@ export const MAX_UPDATES = 10;
  *  accepted at face value. */
 export const MAX_CONDITION_OFFSET_MINUTES = 525600;
 
+/** `indexTerms` (anh Khôi, 2026-08-21): per-task keyword list the model extracts so
+ *  `Shared/Model/TaskSearchIndex.swift` can find a task again when the user later refers to it in
+ *  different words. Two caps, both enforced HERE and nowhere else — deliberately NOT expressed as
+ *  `maxItems`/`maxLength` on the wire schema in `gemini.ts`: `maxItems` on an array inside the
+ *  parse response schema is the exact construct that made Gemini return `400 INVALID_ARGUMENT` for
+ *  six days in production (see `buildParseResponseSchema`'s doc comment, and the `taskRefs`/
+ *  `updates` arrays which carry the same "NO maxItems" warning). Over-cap input is TRUNCATED, not
+ *  rejected — fail-open like every other model-output cap in this file: an over-eager term list
+ *  must never cost the user the task it belongs to.
+ *
+ *  8 terms is a ceiling, not a target: the local index already tokenizes title + notes +
+ *  sourceTranscript, so these terms are a supplement to a corpus that already exists, never its
+ *  only source. 32 chars accommodates a multi-word proper noun ("custom metadata autotest") while
+ *  staying far below anything that could be a smuggled sentence. */
+export const MAX_INDEX_TERMS = 8;
+export const MAX_INDEX_TERM_CHARS = 32;
+
 // ---------------------------------------------------------------------------------------------
 // Request (client -> us)
 // ---------------------------------------------------------------------------------------------
@@ -667,6 +684,14 @@ export interface ParsedTaskOut {
   subtasks?: ParsedSubtaskOut[];
   followUpReview?: ConfidenceValue<boolean>;
   cue?: CueOut;
+  /** `indexTerms` (anh Khôi, 2026-08-21): lowercased, de-duplicated keywords for the client's
+   *  reverse index (`TaskSearchIndex`). A BARE `string[]`, not `ConfidenceValue<string>[]` unlike
+   *  most optional fields here — same reasoning as `cue` above: these are words COPIED from the
+   *  user's own sentence, not an attribute inferred with variable certainty, and a per-term
+   *  confidence would be a number nothing downstream could act on (the index scores terms by IDF,
+   *  which is computed from the user's own corpus, not from anything the model claims). Absent and
+   *  empty are the SAME state to every consumer — the local tokenizer supplies terms either way. */
+  indexTerms?: string[];
 }
 
 export interface BreakdownStepOut {
@@ -1061,6 +1086,26 @@ function validateParsedTask(v: unknown, ctx?: ParseEnvelopeCtx, cuesEnabled?: bo
   if (cuesEnabled && v.cue !== undefined) {
     const cue = validateCue(v.cue);
     if (cue) out.cue = cue;
+  }
+
+  // `indexTerms` is an ARRAY field: same per-element fail-open as `conditions`/`subtasks` above —
+  // one unusable term is dropped on its own, never taking the good terms (or the task) with it.
+  // Normalized here rather than trusted from the model, because this list feeds a lookup index
+  // where "Solr" and "solr" must be the same key: lowercased + trimmed + de-duplicated, then
+  // TRUNCATED to `MAX_INDEX_TERMS`. Not gated on a capability flag (unlike `cue`): no
+  // `index_terms_v1` cap exists — the field is purely additive, a client that doesn't know it
+  // ignores an unknown JSON key, and gating it would have doubled this function's caller matrix
+  // (see `parse/index.ts`'s four-branch cap fork) to protect zero shipped clients.
+  if (v.indexTerms !== undefined && Array.isArray(v.indexTerms)) {
+    const seen = new Set<string>();
+    for (const t of v.indexTerms) {
+      if (seen.size >= MAX_INDEX_TERMS) break;
+      if (typeof t !== "string") continue;
+      const term = t.trim().toLowerCase();
+      if (term.length === 0 || term.length > MAX_INDEX_TERM_CHARS) continue;
+      seen.add(term);
+    }
+    if (seen.size > 0) out.indexTerms = [...seen];
   }
 
   return out;

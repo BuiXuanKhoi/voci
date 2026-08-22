@@ -31,8 +31,8 @@ Hệ quả: App Attest bị **xoá hoàn toàn**; `PARSE_DEV_TOKEN` bypass bị 
 
 ## 2. Auth endpoints (gọi thẳng Supabase GoTrue, KHÔNG qua edge function)
 
-Base `https://nuzrpipwacravfgsiacv.supabase.co`, mọi request kèm header
-`apikey: sb_publishable_pz2_mJTispHtuvcYWTpE6g_SDHmpRUI`.
+Base `https://cjaamylayaylbuuhwlnz.supabase.co`, mọi request kèm header
+`apikey: sb_publishable_WkBa-2lGcl10NBf8JrCfJA__FPNjjf0`.
 
 | Mục đích | Request |
 |---|---|

@@ -19,7 +19,7 @@
 // (`Authorization: Bearer <value>`) is exactly right, and renaming it would require editing a file
 // out of this task's scope. Flagged here for whoever next has authority over `CloudParser.swift`.
 //
-// Base URL (unchanged): the Supabase project ref (`nuzrpipwacravfgsiacv`) is fixed and checked
+// Base URL (unchanged): the Supabase project ref (`cjaamylayaylbuuhwlnz`) is fixed and checked
 // into this file as `defaultBaseURL` — NOT a secret (every client of a Supabase project embeds its
 // project ref/URL). `volar.parseProxyBaseURL` in UserDefaults still overrides it, useful for
 // pointing at a local `supabase functions serve` during development.
@@ -33,7 +33,7 @@ struct ConfigParseCredentialProvider: ParseCredentialProvider {
 
     /// Default parse-proxy base URL — the project's Supabase project ref, not a secret (see file
     /// doc comment). Force-unwrap is safe: this is a fixed, hand-verified literal, never user input.
-    static let defaultBaseURL = URL(string: "https://nuzrpipwacravfgsiacv.supabase.co")!
+    static let defaultBaseURL = URL(string: "https://cjaamylayaylbuuhwlnz.supabase.co")!
 
     /// `true` iff a Keychain-backed account session exists — i.e. the user is signed in. Cloud
     /// parsing is available to ANY signed-in tier now (free = 20/day, pro = 500/day — contract

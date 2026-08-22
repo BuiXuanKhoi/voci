@@ -189,7 +189,7 @@ protocol SyncTaskStoring: AnyObject {
 ## 3. Chữ ký RPC — khớp `0005_sync_schema.sql`, không được đoán
 
 Base URL và apikey đã có sẵn trong `Shared/Account/AccountService.swift`
-(`https://nuzrpipwacravfgsiacv.supabase.co`, `sb_publishable_...`). Token lấy qua
+(`https://cjaamylayaylbuuhwlnz.supabase.co`, `sb_publishable_...`). Token lấy qua
 `AccountService.shared.validAccessToken()`.
 
 Mọi RPC: `POST /rest/v1/rpc/<tên>`, headers `apikey: <publishable>`,

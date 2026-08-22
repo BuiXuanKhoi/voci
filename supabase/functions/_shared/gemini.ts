@@ -24,6 +24,7 @@ import {
   MAX_OPEN_TASK_TITLE_CHARS,
   MAX_STEP_MINUTES,
   MAX_TASKS,
+  MAX_INDEX_TERM_CHARS,
   MAX_TASK_TITLE_CHARS,
   MIN_BREAKDOWN_STEPS,
   MIN_STEP_MINUTES,
@@ -182,6 +183,23 @@ const cueSchema = {
   required: ["kind", "verbatim"],
 };
 
+/** `indexTerms` wire shape (anh Khôi, 2026-08-21) — paired with `INDEX_TERMS_SECTION` and with
+ *  `MAX_INDEX_TERMS`/`validateParsedTask` in schema.ts. A bare `string[]`, NOT
+ *  `confidenceValueSchema(...)`: same reasoning as `cueSchema` above (copied words, not an
+ *  inferred attribute), plus a practical one — a confidence wrapper per term triples the output
+ *  tokens of the single cheapest field in this schema.
+ *
+ *  NO `maxItems` HERE, DO NOT ADD ONE. The count cap lives in `validateParsedTask` and only there.
+ *  `maxItems` inside this response schema is the construct that returned `400 INVALID_ARGUMENT`
+ *  from Gemini for every envelope request between 2026-08-02 and 2026-08-08 — see
+ *  `buildParseResponseSchema`'s doc comment for the bisection, and the `taskRefs`/`updates` arrays
+ *  further below, which carry this same warning for the same reason. `maxLength` on a STRING item
+ *  is a different construct and has never been implicated. */
+const indexTermsSchema = {
+  type: "array",
+  items: { type: "string", maxLength: MAX_INDEX_TERM_CHARS },
+};
+
 /** Shared builder behind BOTH `parsedTaskSchema` (bare-array `parse` mode) and the per-task schema
  *  used inside `buildParseEnvelopeResponseSchema`'s `tasks` array (`task_refs_v1`, anh Khôi,
  *  2026-08-02 task-refs design) — extracted so the two dialects' task shape can never silently
@@ -204,6 +222,7 @@ function buildParsedTaskSchema(
   conditionSchemaArg: Record<string, unknown>,
   reminderOverrideSchemaArg: Record<string, unknown>,
   cueSchemaArg?: Record<string, unknown>,
+  indexTermsSchemaArg?: Record<string, unknown>,
 ): Record<string, unknown> {
   return {
     type: "object",
@@ -221,6 +240,14 @@ function buildParsedTaskSchema(
       subtasks: { type: "array", items: subtaskSchema },
       followUpReview: confidenceValueSchema({ type: "boolean" }),
       ...(cueSchemaArg ? { cue: cueSchemaArg } : {}),
+      // `indexTermsSchemaArg` (anh Khôi, 2026-08-21) is OPTIONAL and OMITTED by default for the
+      // same byte-identical-schema reason `cueSchemaArg` above documents: every pre-existing call
+      // site gets a `properties` object with no `indexTerms` key at all. Only the COMBO builder
+      // (`buildParseEnvelopeResponseSchemaWithCues`) passes it, because only the combo preamble
+      // carries `INDEX_TERMS_SECTION` — schema and prose must be unlocked as ONE pair, never one
+      // without the other (a schema field the prompt never explains is a field the model fills with
+      // whatever it feels like).
+      ...(indexTermsSchemaArg ? { indexTerms: indexTermsSchemaArg } : {}),
     },
     required: ["title"],
   };
@@ -312,13 +339,21 @@ export function buildParseResponseSchemaWithCues(): Record<string, unknown> {
  *  function's doc comment): every call site that doesn't pass it gets a `tasks` item schema with no
  *  `cue` key at all — `buildParseEnvelopeResponseSchema()` below is therefore trivially provably
  *  unchanged from before this combined-schema addition existed. */
-function buildParseEnvelopeResponseSchemaImpl(cueSchemaArg?: Record<string, unknown>): Record<string, unknown> {
+function buildParseEnvelopeResponseSchemaImpl(
+  cueSchemaArg?: Record<string, unknown>,
+  indexTermsSchemaArg?: Record<string, unknown>,
+): Record<string, unknown> {
   return {
     type: "object",
     properties: {
       tasks: {
         type: "array",
-        items: buildParsedTaskSchema(envelopeConditionSchema, envelopeReminderOverrideSchema, cueSchemaArg),
+        items: buildParsedTaskSchema(
+          envelopeConditionSchema,
+          envelopeReminderOverrideSchema,
+          cueSchemaArg,
+          indexTermsSchemaArg,
+        ),
       },
       taskRefs: {
         type: "array",
@@ -405,7 +440,14 @@ export function buildParseEnvelopeResponseSchema(): Record<string, unknown> {
  *  the schema `parse/index.ts` actually uses when a request declares both caps, which — per
  *  `CloudParser.swift`'s unconditional `client_caps` — is every real request. */
 export function buildParseEnvelopeResponseSchemaWithCues(): Record<string, unknown> {
-  return buildParseEnvelopeResponseSchemaImpl(cueSchema);
+  // `indexTermsSchema` (anh Khôi, 2026-08-21) rides ONLY on this combo builder, never on
+  // `buildParseEnvelopeResponseSchema()` (refs-only) above. Reason: its prose half lives in
+  // `SYSTEM_PREAMBLE_TASK_REFS_CUES`, and `SYSTEM_PREAMBLE_TASK_REFS` (refs-only) is under a
+  // sha256 byte-identity guard in `supabase/tests/gemini_test.ts` — that preamble was tuned across
+  // two probe rounds and is deliberately frozen. Since `CloudParser.swift` sends both caps on
+  // every request, the combo pair IS the production path; the refs-only pair stays a frozen
+  // compatibility shim nothing shipped actually takes.
+  return buildParseEnvelopeResponseSchemaImpl(cueSchema, indexTermsSchema);
 }
 
 export function buildBreakdownResponseSchema(): Record<string, unknown> {
@@ -853,9 +895,65 @@ export const SYSTEM_PREAMBLE_TASK_CUES =
  *  same as `task_refs_v1` alone) with `cue` added onto each task inside `tasks` — see
  *  `buildParseEnvelopeResponseSchemaWithCues()` above, which this preamble is paired ONE-TO-ONE
  *  with, mirroring every other preamble/schema pairing rule in this file. */
+/** `indexTerms` prose rules (anh Khôi, 2026-08-21) — paired ONE-TO-ONE with `indexTermsSchema`
+ *  above and with `MAX_INDEX_TERMS`/`validateParsedTask` in schema.ts.
+ *
+ *  WHAT IT IS FOR: `Shared/Model/TaskSearchIndex.swift` builds a reverse index so the user can
+ *  find a task again by describing it differently later. That index ALREADY tokenizes title +
+ *  notes + sourceTranscript locally and weights terms by IDF, so this field is a SUPPLEMENT to a
+ *  corpus that already exists, never its only source — which is exactly why every rule below
+ *  pushes toward "fewer, sharper terms" and why an empty array is an explicitly good answer. A
+ *  model that pads this list makes the index WORSE, not better: a padded term is a false match
+ *  waiting to surface the wrong task.
+ *
+ *  WHY IT IS IN THE COMBO PREAMBLE ONLY: `SYSTEM_PREAMBLE_TASK_REFS` (refs-only) is frozen under a
+ *  sha256 byte-identity guard in `supabase/tests/gemini_test.ts`, and `CloudParser.swift` declares
+ *  both caps on every request, so the combo preamble is the only one production ever sends. See
+ *  `buildParseEnvelopeResponseSchemaWithCues`'s comment for the schema half of the same decision.
+ *
+ *  NO CAPABILITY GATE (unlike `task_refs_v1`/`task_cues_v1`): a third cap would have taken
+ *  `parse/index.ts`'s fork from four branches to eight, seven of which protect clients that do not
+ *  exist — the app has not shipped. The field is purely additive; a client that does not know it
+ *  ignores an unknown JSON key.
+ *
+ *  THE TWO RULES THAT CARRY THE WEIGHT, and why each exists:
+ *  (1) NEVER put dates/times in this list. `deadline`/`startTime` are already structured fields on
+ *      the same task; a time indexed as a WORD is a second copy that nothing keeps in sync — anh
+ *      Khôi's own worked example exposed it ("bỏ 9h30, thêm 11h": reschedule the task and the
+ *      index still answers to "9h30" forever).
+ *  (2) COPY, never invent. Terms must be words the user actually said. A model-invented synonym
+ *      ("Solr" -> "search engine") indexes a task under words the user has no memory of using, and
+ *      the failure is silent: a wrong task surfaces with no error anywhere. Character-level
+ *      variation ("dem"/"dems") is NOT this prompt's problem — the client matches terms by trigram
+ *      and already absorbs it.
+ *
+ *  UNMEASURED (2026-08-21): adding a section to this preamble has degraded UNRELATED rules before —
+ *  see `TASK_CUES_SECTION`'s doc comment, where the cue section alone dropped the Momo case's
+ *  `taskDone` dependency to ~2/3 until a compensating sentence was found by bisection. This section
+ *  has NOT been probed yet. Treat the numbers in `probe-followup.ts` as the regression baseline to
+ *  re-measure, not as something this section is known to preserve. */
+const INDEX_TERMS_SECTION =
+  "INDEXTERMS: for each task in \"tasks\", you may add \"indexTerms\": an array of up to " +
+  "8 short lowercase keywords that would let this user find this task again later by describing " +
+  "it in different words. Include ONLY distinctive words: proper nouns, product/system/project " +
+  "names, jargon, client or person names, file or error identifiers — the words that belong to " +
+  "THIS task and few others. EXCLUDE generic words (làm, task, sửa, xong, cần, do, fix, check, " +
+  "update, meeting) — the client already down-weights those on its own and they only add noise. " +
+  "EXCLUDE every date, time, weekday and relative time expression (9h30, sáng mai, thứ 6, " +
+  "tomorrow, next week) with no exception: the task's timing already lives in the deadline and " +
+  "startTime fields, and duplicating it here creates a second copy that goes stale the moment the " +
+  "task is rescheduled. Every term MUST be words the user actually said in this transcript, " +
+  "copied (lowercased) rather than paraphrased — do NOT add synonyms, translations, category " +
+  "labels or related concepts the user did not say, because a term the user never used will match " +
+  "the wrong task later and nothing will report the mistake. Keep a multi-word proper noun as ONE " +
+  "term (\"dem search\", not \"dem\" + \"search\"). Do not worry about spelling variants of a " +
+  "term; the client handles those itself. When the transcript has no distinctive words at all, " +
+  "output [] or omit the field — an empty list is a correct and common answer, and padding it " +
+  "with generic words actively degrades the user's search results. "
+
 export const SYSTEM_PREAMBLE_TASK_REFS_CUES =
   SYSTEM_PREAMBLE_CORE + " " + TASK_REFS_SECTION + " " + TASK_CUES_SECTION + " " +
-  SYSTEM_PREAMBLE_FEWSHOT_EXAMPLES;
+  INDEX_TERMS_SECTION + " " + SYSTEM_PREAMBLE_FEWSHOT_EXAMPLES;
 
 /** System instruction for resolve_completion mode ONLY — deliberately separate from
  *  `SYSTEM_PREAMBLE` above, which is framed entirely around extracting/counting NEW tasks

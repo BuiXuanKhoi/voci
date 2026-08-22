@@ -1,6 +1,6 @@
 # Supabase project config for the Volar `parse` cloud-parse proxy (feature 002).
-# Project: https://nuzrpipwacravfgsiacv.supabase.co
-project_id = "nuzrpipwacravfgsiacv"
+# Project: https://cjaamylayaylbuuhwlnz.supabase.co
+project_id = "cjaamylayaylbuuhwlnz"
 
 # Every function below does its OWN auth: `Authorization: Bearer <supabase access_token>`,
 # verified in-function by `_shared/auth.ts`'s `verifyAccount` (calls `auth.getUser()`, then loads

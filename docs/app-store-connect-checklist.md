@@ -55,10 +55,10 @@ press "Submit for Review"; the app builds and runs fine without it in the meanti
    different from the App ID above; it's what represents "Sign in with Apple" to web-facing
    OAuth flows like Supabase's).
 2. Enable "Sign in with Apple" on that Services ID, and configure it with:
-   - **Return URL**: the Supabase Auth callback, `https://nuzrpipwacravfgsiacv.supabase.co/auth/v1/callback`
+   - **Return URL**: the Supabase Auth callback, `https://cjaamylayaylbuuhwlnz.supabase.co/auth/v1/callback`
      (per `contracts/account-auth.md` §2's base URL — confirm this project ref is still current
      before pasting it in).
-   - **Domain**: your Supabase project's domain (`nuzrpipwacravfgsiacv.supabase.co`) or your own
+   - **Domain**: your Supabase project's domain (`cjaamylayaylbuuhwlnz.supabase.co`) or your own
      domain if you've set up a custom Supabase domain.
 3. Create a **Sign in with Apple private key** (Keys → **+** → enable "Sign in with Apple",
    associate it with the App ID from step 2) and download the `.p8` file **once** — Apple will

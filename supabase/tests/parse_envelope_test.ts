@@ -12,6 +12,8 @@
 import { assertEquals, assertExists } from "jsr:@std/assert@1";
 import {
   MAX_CONDITION_OFFSET_MINUTES,
+  MAX_INDEX_TERM_CHARS,
+  MAX_INDEX_TERMS,
   MAX_NOTES_CHARS,
   MAX_TASK_REFS,
   MAX_TASK_TITLE_CHARS,
@@ -637,4 +639,67 @@ Deno.test("bare-array mode: reminderOverride.anchor is never emitted, even if th
   assertExists(result);
   assertEquals(result!.tasks[0].reminderOverride!.value.anchor, undefined);
   assertEquals(result!.tasks[0].reminderOverride!.value.offsetsMinutes, [15]);
+});
+
+// ---------------------------------------------------------------------------------------------
+// `indexTerms` (anh Khôi, 2026-08-21). Everything below is about the NORMALIZE-then-TRUNCATE
+// contract in `validateParsedTask`: this list feeds a lookup index where "Solr" and "solr" have to
+// be the same key, so the server normalizes rather than trusting the model, and — like every other
+// model-output cap in schema.ts — an over-eager list is TRUNCATED, never a reason to drop the task.
+// ---------------------------------------------------------------------------------------------
+
+function taskWithIndexTerms(indexTerms: unknown) {
+  return [{ title: { value: "Fix Solr query", confidence: 0.9 }, indexTerms }];
+}
+
+Deno.test("indexTerms: well-formed list survives, lowercased and trimmed", () => {
+  const result = validateParsedTaskArray(taskWithIndexTerms(["  Solr ", "DEM Search", "tokenize"]));
+  assertExists(result);
+  assertEquals(result!.tasks[0].indexTerms, ["solr", "dem search", "tokenize"]);
+});
+
+Deno.test("indexTerms: duplicates that differ only by case/whitespace collapse to one key", () => {
+  const result = validateParsedTaskArray(taskWithIndexTerms(["Solr", "solr", " SOLR "]));
+  assertExists(result);
+  assertEquals(result!.tasks[0].indexTerms, ["solr"]);
+});
+
+Deno.test("indexTerms: over-cap list is TRUNCATED to MAX_INDEX_TERMS, task survives", () => {
+  const many = Array.from({ length: MAX_INDEX_TERMS + 5 }, (_, i) => `term${i}`);
+  const result = validateParsedTaskArray(taskWithIndexTerms(many));
+  assertExists(result);
+  assertEquals(result!.tasks[0].indexTerms!.length, MAX_INDEX_TERMS);
+  assertEquals(result!.tasks[0].title.value, "Fix Solr query");
+});
+
+Deno.test("indexTerms: per-element fail-open — one bad term never costs the good ones", () => {
+  const result = validateParsedTaskArray(taskWithIndexTerms([
+    "solr",
+    42,
+    null,
+    { nope: true },
+    "",
+    "   ",
+    "x".repeat(MAX_INDEX_TERM_CHARS + 1),
+    "tokenize",
+  ]));
+  assertExists(result);
+  assertEquals(result!.tasks[0].indexTerms, ["solr", "tokenize"]);
+});
+
+Deno.test("indexTerms: a term of exactly MAX_INDEX_TERM_CHARS is kept", () => {
+  const result = validateParsedTaskArray(taskWithIndexTerms(["y".repeat(MAX_INDEX_TERM_CHARS)]));
+  assertExists(result);
+  assertEquals(result!.tasks[0].indexTerms, ["y".repeat(MAX_INDEX_TERM_CHARS)]);
+});
+
+Deno.test("indexTerms: absent, empty, or all-garbage lists leave the field off entirely", () => {
+  // Absent and empty must be the SAME state downstream — the local tokenizer supplies terms either
+  // way, so `[]` on the wire carries no information worth a key on the task.
+  for (const input of [undefined, [], ["", "  ", 7], "not an array", null]) {
+    const result = validateParsedTaskArray(taskWithIndexTerms(input));
+    assertExists(result);
+    assertEquals(result!.tasks[0].indexTerms, undefined);
+    assertEquals(result!.tasks[0].title.value, "Fix Solr query");
+  }
 });
