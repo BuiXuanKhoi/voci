@@ -144,87 +144,6 @@ final class FoundationModelParser: IntentParser {
         return []
         #endif
     }
-
-    /// Same server-side cap `_shared/schema.ts`'s `MAX_DREAD_MESSAGE_CHARS` enforces, mirrored
-    /// here so the on-device tier re-validates its own output exactly as strictly as the cloud
-    /// response is re-validated (`CloudParser.maxDreadMessageChars`) — never trust either
-    /// producer's own restraint blindly, same posture the rest of this file already follows.
-    static let maxDreadMessageChars = 400
-
-    /// Same server-side cap `_shared/schema.ts`'s `MAX_NEXT_ACTION_CHARS` enforces — deliberately
-    /// SHORTER than `maxDreadMessageChars` above, see that constant's doc comment server-side for
-    /// why (a next-action is one clause, dread is two).
-    static let maxNextActionChars = 160
-
-    /// "Stuck?" feature, "dread" reason ONLY (anh Khôi, 2026-07-29) — NOT part of the frozen
-    /// `IntentParser` protocol (same reasoning `CloudParser.dreadDetailed`'s header comment gives:
-    /// `HeuristicNLParser`, which also conforms to `IntentParser`, has nothing honest to contribute
-    /// here — a fixed template would be exactly the generic "you can do it" copy this feature
-    /// forbids — so this stays a concrete, router-called method rather than a protocol
-    /// requirement every conformer would need to implement). Names the specific dreaded part of
-    /// `title`/`notes`/`sourceTranscript` and proposes a <=2-minute physical action touching it;
-    /// returns `nil` on any FM failure or an out-of-contract response (empty/over-cap message),
-    /// exactly like `breakdown(title:notes:)` above returns `[]` on failure — never a crash, never
-    /// a partially-trusted guess. `sourceTranscript`/`deadline`/`existingSubtasks` (anh Khôi,
-    /// 2026-07-29 "richer context" addendum) are OPTIONAL, defaulting to `nil` so every pre-
-    /// addendum call site (`IntentRouter.stuckDread`'s own default-less-but-defaulted-caller
-    /// pattern) keeps compiling unchanged.
-    func dread(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async -> String? {
-        #if canImport(FoundationModels)
-        guard #available(macOS 26, *) else { return nil }
-        do {
-            let generated = try await Self.runDreadSession(
-                title: title, notes: notes, sourceTranscript: sourceTranscript,
-                deadline: deadline, existingSubtasks: existingSubtasks
-            )
-            let trimmed = generated.message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, trimmed.utf16.count <= Self.maxDreadMessageChars else { return nil }
-            return trimmed
-        } catch {
-            return nil
-        }
-        #else
-        return nil
-        #endif
-    }
-
-    /// "Stuck?" feature, "too_big" reason (anh Khôi, 2026-07-29 REDESIGN — see
-    /// `NEXT_ACTION_SYSTEM_PREAMBLE`'s doc comment server-side for the full "one action, not a
-    /// plan" reasoning). NOT part of the frozen `IntentParser` protocol, same rationale as `dread`
-    /// above. Names exactly ONE next physical action — never a multi-step plan — grounding it in
-    /// `sourceTranscript`/`existingSubtasks` when given (the next action must be the NEXT undone
-    /// step, never a repeat of one already marked done). Returns `nil` on any FM failure or an
-    /// out-of-contract response (empty/over-cap message).
-    func nextAction(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async -> String? {
-        #if canImport(FoundationModels)
-        guard #available(macOS 26, *) else { return nil }
-        do {
-            let generated = try await Self.runNextActionSession(
-                title: title, notes: notes, sourceTranscript: sourceTranscript,
-                deadline: deadline, existingSubtasks: existingSubtasks
-            )
-            let trimmed = generated.message.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmed.isEmpty, trimmed.utf16.count <= Self.maxNextActionChars else { return nil }
-            return trimmed
-        } catch {
-            return nil
-        }
-        #else
-        return nil
-        #endif
-    }
 }
 
 // MARK: - @Generable guided-generation schema + session plumbing
@@ -297,8 +216,8 @@ extension FoundationModelParser {
     /// `sourceTranscript`/`deadline`/`existingSubtasks` (when given) as clearly-labeled DATA lines
     /// after the base prompt, exactly like `buildParsePrompt`'s own `openTaskTitles` line below —
     /// never woven into the main instruction sentence, so it reads as extra context to consult,
-    /// not a new instruction to follow. Used by `runBreakdownSession`/`runDreadSession`/
-    /// `runNextActionSession` alike so the three sessions can never drift onto three different
+    /// not a new instruction to follow. Dùng bởi `runBreakdownSession` (trước đây có hai session
+    /// "Stuck?" nữa, đã bỏ 2026-08-22) — một luật cắt ngữ cảnh, không phải ba bản
     /// formats for the same three fields. All three inputs are the user's own words/state —
     /// UNTRUSTED, but this file has no separate "prompt vs data" concatenation boundary the way the
     /// cloud tier's JSON envelope does (there is no structured request format for a raw text
@@ -364,86 +283,6 @@ extension FoundationModelParser {
         // throwing-async signature and that `.content` is the right accessor for the generated
         // value on the returned response.
         let response = try await session.respond(to: prompt, generating: GeneratedBreakdown.self)
-        return response.content
-    }
-
-    /// "Stuck?"/"dread" reason (2026-07-29) — mirrors `runBreakdownSession` right above exactly
-    /// (same session construction, same reuse of the shared `systemInstructions`, all mode-
-    /// specific tone/safety rules carried in the per-call prompt string instead, same precedent
-    /// `runBreakdownSession` already establishes for this file). Kept in loose sync with the cloud
-    /// tier's `DREAD_SYSTEM_PREAMBLE`/`buildDreadContents` (`supabase/functions/_shared/gemini.ts`)
-    /// — not byte-for-byte (different providers), same target rules: name the specific dreaded
-    /// part of THIS task, then one <=2-minute physical action touching it; no encouragement, no
-    /// coaching, no questions, no diagnosis, no exclamation marks, hard character cap.
-    static func runDreadSession(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async throws -> GeneratedDread {
-        // UNVERIFIED: FoundationModels API — confirm `LanguageModelSession(instructions:)`'s
-        // exact initializer signature on macOS 26 SDK.
-        let session = LanguageModelSession(instructions: systemInstructions)
-        var prompt =
-            "Name the specific part of this task that is most likely to feel uncomfortable or " +
-            "dreaded, in the SAME language as the task title below, then propose ONE concrete " +
-            "physical action, doable in 2 minutes or less, that touches exactly that part -- open " +
-            "the file, dial the number, write the first line -- never a vague step like \"think " +
-            "about it\" or \"plan\". Never say the person is lazy, avoidant, capable, or brave. " +
-            "Never coach or motivate (\"you can do this\", \"just start\"). Never ask a question. " +
-            "Never diagnose feelings or mental state. Never use an exclamation mark. If " +
-            "\"Original words\" below are given, they often name the dreaded detail more " +
-            "concretely than the title alone -- use them. Keep the whole message under " +
-            "\(maxDreadMessageChars) characters. Task: \(title)"
-        if let notes, !notes.isEmpty { prompt += "\nNotes: \(notes)" }
-        Self.appendContextLines(
-            to: &prompt, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
-        )
-        // UNVERIFIED: FoundationModels API — confirm `respond(to:generating:)`'s exact
-        // throwing-async signature and that `.content` is the right accessor for the generated
-        // value on the returned response.
-        let response = try await session.respond(to: prompt, generating: GeneratedDread.self)
-        return response.content
-    }
-
-    /// "Stuck?"/"too_big" reason (anh Khôi, 2026-07-29 REDESIGN — replaces this reason's original
-    /// "reuse breakdown verbatim" on-device path). Mirrors `runBreakdownSession`/`runDreadSession`
-    /// exactly in construction. Kept in loose sync with the cloud tier's
-    /// `NEXT_ACTION_SYSTEM_PREAMBLE`/`buildNextActionContents` (`supabase/functions/_shared/
-    /// gemini.ts`) — same target rule: exactly ONE next physical action, never a plan, grounded in
-    /// `sourceTranscript`/`existingSubtasks` when given, never repeating a step already done.
-    static func runNextActionSession(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async throws -> GeneratedNextAction {
-        // UNVERIFIED: FoundationModels API — confirm `LanguageModelSession(instructions:)`'s
-        // exact initializer signature on macOS 26 SDK.
-        let session = LanguageModelSession(instructions: systemInstructions)
-        var prompt =
-            "Name ONE concrete physical action, doable in 2 minutes or less, that is the very " +
-            "next thing to physically do on this task -- not a plan, not several steps, exactly " +
-            "one -- in the SAME language as the task title below. Never a vague step like " +
-            "\"think about it\" or \"plan\". Never say the person is lazy, avoidant, capable, or " +
-            "brave. Never coach or motivate (\"you can do this\", \"just start\"). Never ask a " +
-            "question. Never diagnose feelings or mental state. Never use an exclamation mark. " +
-            "If \"Original words\" below are given, ground the action in their concrete detail " +
-            "(names/files/numbers/places) rather than restating the title. If \"Steps already " +
-            "produced\" below lists any marked [done], the action must be the NEXT undone step, " +
-            "never a repeat of a done one; if every listed step is already done, name the next " +
-            "action beyond them. Keep the whole message under \(maxNextActionChars) characters. " +
-            "Task: \(title)"
-        if let notes, !notes.isEmpty { prompt += "\nNotes: \(notes)" }
-        Self.appendContextLines(
-            to: &prompt, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
-        )
-        // UNVERIFIED: FoundationModels API — confirm `respond(to:generating:)`'s exact
-        // throwing-async signature and that `.content` is the right accessor for the generated
-        // value on the returned response.
-        let response = try await session.respond(to: prompt, generating: GeneratedNextAction.self)
         return response.content
     }
 
@@ -667,35 +506,5 @@ struct GeneratedStep {
     var title: String
     @Guide(description: "5 to 15 minutes.")
     var estimateMinutes: Int
-}
-
-/// "Stuck?"/"dread" reason output (2026-07-29) — mirrors `GeneratedBreakdown`/`GeneratedStep`
-/// right above in shape (one flat `@Generable` struct, no nesting). See `FoundationModelParser
-/// .dread(title:notes:)` and `runDreadSession` for the full tone contract this single field must
-/// satisfy.
-@available(macOS 26, *)
-@Generable
-struct GeneratedDread {
-    @Guide(description: """
-        One short message: name the specific dreaded part of this task, then propose one physical \
-        action of 2 minutes or less that touches it. No encouragement, no questions, no diagnosis, \
-        no exclamation marks. Under 400 characters.
-        """)
-    var message: String
-}
-
-/// "Stuck?"/"too_big" reason output (anh Khôi, 2026-07-29 REDESIGN) — mirrors `GeneratedDread`
-/// right above in shape (one flat `@Generable` struct, one `message` field). See
-/// `FoundationModelParser.nextAction(title:notes:...)` and `runNextActionSession` for the full
-/// "exactly one action, not a plan" contract this single field must satisfy.
-@available(macOS 26, *)
-@Generable
-struct GeneratedNextAction {
-    @Guide(description: """
-        One short message: exactly ONE next physical action for this task, never a plan or several \
-        steps. No encouragement, no questions, no diagnosis, no exclamation marks. Under 160 \
-        characters.
-        """)
-    var message: String
 }
 #endif

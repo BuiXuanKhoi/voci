@@ -155,26 +155,6 @@ enum BreakdownFetchState: Equatable, Sendable {
     case failed
 }
 
-/// "Stuck?" feature (anh Khôi, 2026-07-29): the three reasons a task can fail to get started, each
-/// with its own deliberately different fix — see `AppState.chooseStuckReason(_:for:)`. Plain
-/// English UI copy for each (never these raw case names) lives in `Sources/Views/FocusOverlay
-/// .swift`'s `StuckReasonPicker`, shared by both places "Stuck?" appears.
-enum StuckReason: Equatable, Sendable {
-    /// "This feels like more than one task" — the ONLY reason "chia nhỏ"/breakdown actually fixes.
-    /// REDESIGNED 2026-07-29: no longer opens the full breakdown plan directly — fetches exactly
-    /// ONE next physical action first (`AppState.StuckNextActionState`/`fetchStuckNextAction`),
-    /// with the full plan still one tap away via that banner's own secondary button. See
-    /// `AppState.chooseStuckReason`'s doc comment for the full reasoning.
-    case tooBig
-    /// "This one feels heavy to even look at" — breakdown does NOT help here (splitting one scary
-    /// task into several scary pieces doesn't reduce the dread); needs naming the specific dreaded
-    /// part instead (`AppState.stuckDreadState` / `IntentRouter.stuckDread`).
-    case dread
-    /// "I can't get myself moving at all" — the problem isn't the task's size or content at all,
-    /// so no model call is ever made for this reason; see `AppState.startStuckCantStartTimer`.
-    case cantStart
-}
-
 /// One attribute a confirm-card chip governs (T024). Deliberately narrower than `ParsedTask`'s
 /// full field list — `title`/`notes`/`subtasks` have no chip (title is the always-shown headline,
 /// notes/subtasks aren't part of the v2 chip set per the contract's "Confirm + materialize"
@@ -696,12 +676,6 @@ struct ConfirmUpdateDraft: Identifiable, Equatable {
 enum VoiceDoneAction: Sendable, Equatable {
     case complete
     case clearExternal
-    /// T042 (phase6-contract.md §C, US4): "giao cho Claude rồi" / "handed to Claude" — routes
-    /// through `AppState.delegateTask` via `confirmVoiceDone`, reusing the SAME one-tap confirm
-    /// card `VoiceDoneConfirm` already provides rather than inventing a parallel UI surface.
-    /// `checkBackMinutes` is whatever `AppState.classifyDelegationIntent` parsed out of the
-    /// utterance (e.g. "check sau 10 phút"), defaulting to `DelegationTracker`'s own 10'.
-    case delegate(checkBackMinutes: Int)
 }
 
 /// The pending glance-and-dismiss confirm for a `.complete`/`.clearExternal` voice-done match
@@ -725,7 +699,10 @@ struct VoiceDoneConfirm: Identifiable, Equatable {
 // `TaskSections.cs`.
 // `Hashable` (2026-08-22): sidebar giữ tập section đang gập trong một `Set<NavSection>`.
 enum NavSection: Sendable, Equatable, Hashable {
-    case today, upcoming, inbox
+    /// 2026-08-24 (anh Khôi): còn ba. `upcoming` bỏ hẳn; `inbox` (việc chưa có ngày) đổi thành
+    /// `archived` (việc đã cất đi). `completed` vào từ 2026-08-22, thay cho ngăn "Completed" gập
+    /// sẵn ở cuối Today — Today nay chỉ trả lời đúng một câu, việc đang phải làm.
+    case today, archived, completed
 }
 
 /// One day's worth of Upcoming rows. `header` is pre-formatted ("Tomorrow" / "Wed, Mar 18") so
@@ -991,66 +968,6 @@ final class AppState {
     /// (`focusIndex`-based) is completely independent of this and is unaffected.
     private var dashboardSwitchOverrideID: UUID?
 
-    // MARK: - "Stuck?" state (anh Khôi, 2026-07-29) — read/written by both `FocusOverlay`'s and
-    // `TodayView`'s hero-card "Stuck?" button, same "one definition, two call sites, never allowed
-    // to drift" convention as the Switch/breakdown-invite state directly above. Three DIFFERENT
-    // reasons a task doesn't get started, three DIFFERENT responses — "chia nhỏ" (breakdown) only
-    // ever fixed the "this is too big" reason; this state machine adds the other two.
-    //
-    // Deliberately no counting/scoring anywhere in this section: how many times "Stuck?" (or any
-    // one reason under it) gets tapped is never recorded, never shown, never persisted — this
-    // whole feature is a way to get UNSTUCK, not a metric about the user.
-
-    /// Which task the "Stuck?" reason picker is open for right now — `nil` means the picker is
-    /// closed. Mirrors `breakdownTask`'s "one point of entry" shape: both Stuck buttons call
-    /// `openStuckPicker(for:)` and nothing else, neither view owns any Stuck-specific state itself.
-    var stuckPickerTask: TaskItem?
-
-    /// State machine for the "dread" reason's async message fetch ONLY. The "too_big" reason never
-    /// touches this at all — it routes straight into the existing `openBreakdown(for:)` flow (see
-    /// `chooseStuckReason` below) — and "cant_start" never touches this either (no model call, see
-    /// `startStuckCantStartTimer`).
-    enum StuckDreadState: Equatable, Sendable {
-        case idle
-        case loading
-        /// A real, model-produced message (on-device FM or Cloud — see `IntentRouter.stuckDread`).
-        case loaded(String)
-        /// No model reachable right now (no FM, not opted into Cloud, offline, quota exhausted, or
-        /// a response that failed decode/cap validation) — `Self.stuckDreadFallbackMessage` is
-        /// shown instead: a STATIC, pre-written sentence (the app's own honest words about itself
-        /// having nothing to say right now) rather than silence or an invented claim about the
-        /// task's content. Mirrors `BreakdownFetchState.failed`'s "tell the truth, never fabricate"
-        /// rule for the exact same reason.
-        case fallback
-    }
-    var stuckDreadState: StuckDreadState = .idle
-    /// Whichever task `stuckDreadState` currently describes — `nil` while idle. Kept distinct from
-    /// `stuckPickerTask`: the picker is already dismissed (`chooseStuckReason` clears it
-    /// synchronously) by the time a dread fetch is even in flight.
-    var stuckDreadTask: TaskItem?
-    /// Monotonic guard token, exact same shape as `breakdownSession`/`captureSession` — a fetch
-    /// still in flight when the user dismisses the banner (or reopens Stuck on a different task)
-    /// can never land on/populate a state that's moved on.
-    private var stuckDreadSession = 0
-
-    /// Static fallback copy for the "dread" reason when no model is reachable. This is the APP's
-    /// own pre-written sentence — never a guess about the specific task's content — so showing it
-    /// never violates the "never fabricate details about the task" rule the real (model-produced)
-    /// path follows; it only ever describes the app's own present inability to say something more
-    /// specific. Tone: no exclamation mark, no coaching, no diagnosis — matches `SweepView.swift`'s
-    /// established no-shame copy. Still points at a concrete, bounded, physical action (not "just
-    /// try harder") so tapping "Stuck?" with no network is never a dead end.
-    static let stuckDreadFallbackMessage =
-        "Nothing specific to suggest right now. Two minutes on any small physical piece of it still counts."
-
-    // "cant_start" reason: a plain 2-minute countdown, permission to do absolutely anything — NOT
-    // bound to any specific task. See `startStuckCantStartTimer`'s doc comment (further down, next
-    // to `startFocus()`) for why this is a small dedicated timer rather than reusing
-    // `startFocus()`/`focusSecondsLeft`/`focusTick()`.
-    var stuckTimerActive = false
-    var stuckTimerSecondsLeft = 0
-    private var stuckTimer: Timer?
-
     // MARK: - Guided tour (coach-mark walkthrough shown right after onboarding; `TourOverlay`,
     // `TourModel`, `TourAnchor` — `Sources/Views/Tour/*`). Same "additive, not part of the frozen
     // §4 surface" category as the modal/banner state directly above.
@@ -1229,43 +1146,15 @@ final class AppState {
     let reminderGate: ReminderContextGate
     let scheduler: ReminderScheduler?
 
-    // MARK: - Phase 6 (US4): AI-delegation orchestrator subsystem (phase6-contract.md §A/§B,
-    // Volar/Sources/Orchestrator/*.swift, sibling-owned/landed). `delegation`/`appLinkHandler`
-    // degrade to `nil` in the no-store fallback (mirrors `scheduler` above), since
-    // `DelegationTracker.init(store:)` requires a real `TaskStore` — delegation state has nowhere
-    // durable to live without one. `claudeConnector` is self-contained (file I/O only, no store
-    // dependency per its own doc comment), so it's always constructed.
-    let delegation: DelegationTracker?
+    /// Route `volar://capture` (`AppLinkHandler`) — `nil` trong nhánh no-store. Tính năng
+    /// delegation (route `ai-done`, `DelegationTracker`, `ClaudeCodeConnector`) đã bỏ 2026-08-22,
+    /// nhưng app-link vẫn sống vì `volar://capture` không dính gì tới nó.
     let appLinkHandler: AppLinkHandler?
-    // `ClaudeCodeConnector` is desktop-only (delegation to a locally-running Claude Code process
-    // is a desktop concept per plan.md §0/§1.1) and its source stays in `Volar/Sources/
-    // Orchestrator/` — never copied into `Shared/` — so this property must not exist on iOS.
-    #if os(macOS)
-    let claudeConnector = ClaudeCodeConnector()
-    #endif
 
-    /// T043: tasks whose delegated check-back came due — THE ambient menu-bar queue (constitution
-    /// I: never a system notification). Refreshed by `refreshDelegationQueue()` off a minute-scale
-    /// timer (`startDelegationTimer()`, started from `activateServices()`) and after any mutation
-    /// that could change due-ness. `TodayView` renders this as an ordinary, dismissible in-app card.
-    var dueDelegationRechecks: [UUID] = []
-    /// Mirrors `AppLinkHandler.pendingDisambiguation` into an `@Observable`-tracked property —
-    /// `AppLinkHandler` itself is a plain (non-`@Observable`) class per its frozen contract seam, so
-    /// SwiftUI can't react to its internal mutations directly. `onAppLinkHandled()` (called from
-    /// `VolarApp.swift`'s `.onOpenURL`) and `resolveAppLinkDisambiguation`/
-    /// `dismissAppLinkDisambiguation` below keep this in lockstep — same bridging idiom this file
-    /// already uses for `ReminderScheduler`'s out-of-band mutations (`refreshFromStore()`/
-    /// `.volarTasksDidChange`).
-    var pendingDisambiguationTaskIDs: [UUID] = []
-    /// Bumped whenever `.onOpenURL` routes an inbound `volar://` link, purely so Settings' "Connect
-    /// Claude Code" test-signal round trip (T044) can observe a real receipt instead of a fake
-    /// timed flash.
-    private(set) var lastAppLinkAt: Date?
-    private var delegationTimer: Timer?
     /// FIX B: owns the focus-session 1s countdown — moved here from `FocusOverlay`'s own
     /// `Timer.publish`, which stopped firing the instant the overlay window closed (the menu bar's
     /// `focusSecondsLeft` readout froze and the session never auto-ended). Mirrors
-    /// `delegationTimer`'s exact construction pattern (`startDelegationTimer()`) so this survives
+    /// một `Timer` sống ở `AppState` (không phải ở view) so this survives
     /// the same way regardless of which window/view is on screen. See `startFocus()`/`endFocus()`/
     /// `focusTick()`.
     private var focusTimer: Timer?
@@ -1505,7 +1394,7 @@ final class AppState {
         // initialized" and therefore safe to read early. That's wrong — Swift's two-phase init
         // rule (the compiler's "safety check 4") forbids reading ANY `self.` stored property, no
         // matter how it's initialized, until EVERY stored property of the class has been assigned;
-        // at this point `voiceChannel`/`reminderGate`/`scheduler`/`delegation`/`appLinkHandler`
+        // at this point `voiceChannel`/`reminderGate`/`scheduler`/`appLinkHandler`
         // (all assigned further down this same init) are still unset, so the read was illegal and
         // would fail to compile the first time this file was ever built on a Mac (it never had
         // been — see backlog.md). Fixed by building `calendarAccess` into a LOCAL constant first
@@ -1520,7 +1409,7 @@ final class AppState {
         // `voiceChannel`, and `reminderGate` are all built into LOCAL constants and passed as
         // locals (never as `self.voice` / `self.voiceChannel` / `self.reminderGate`) into whatever
         // needs them, because at this point in `init` the class's stored properties are still only
-        // partially assigned (`delegation`/`appLinkHandler` come later), so no `self.` property
+        // partially assigned (`appLinkHandler` comes later), so no `self.` property
         // read is legal yet regardless of whether that particular property already holds a value.
         let voice = VoicePlayback()
         self.voice = voice
@@ -1534,16 +1423,9 @@ final class AppState {
         } else {
             self.scheduler = nil
         }
-        // Phase 6 (US4): construct the delegation subsystem once `store` is settled, same
-        // conditional-construction convention as `scheduler` immediately above.
-        if let store {
-            let tracker = DelegationTracker(store: store)
-            self.delegation = tracker
-            self.appLinkHandler = AppLinkHandler(store: store, delegation: tracker)
-        } else {
-            self.delegation = nil
-            self.appLinkHandler = nil
-        }
+        // `volar://capture` cần một `TaskStore` để đẩy text vào; không có store thì không có
+        // handler, cùng quy ước dựng-có-điều-kiện như `scheduler` ngay trên.
+        self.appLinkHandler = store.map { AppLinkHandler(store: $0) }
         // M-1 (constitution I): wire the one cheaply-detectable, no-extra-entitlement signal this
         // file has direct access to — our own `AmbientSound` instance's public `isPlaying` flag —
         // so a voice reminder never talks over ambient sound already playing. Assigned HERE, after
@@ -1994,7 +1876,7 @@ final class AppState {
     }
 
     /// `TodayView`'s hero card reads THIS, not `activeTask` directly — everywhere else in the app
-    /// (menu bar title, delegation-confirm targeting, guided tour gating, voice read-day) keeps
+    /// (menu bar title, guided tour gating, voice read-day) keeps
     /// reading the engine's raw, un-overridable `activeTask` exactly as before; this property is
     /// additive, scoped to the one screen that needs a Switch override.
     ///
@@ -2018,7 +1900,7 @@ final class AppState {
     // no push notification, no sound, no full-screen takeover, no badge/count. `TodayView` is the
     // one screen that renders them (see that file's `todayScrollView`), alongside the other
     // "renders nothing when there's nothing to show" ambient banners already living there
-    // (`SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/`DelegationAmbientSection`).
+    // (`SwitchBreakdownSuggestionBanner`).
 
     /// One cue on screen right now, or `nil`. Written ONLY by `recordAppBecameActive`/
     /// `noteNaturalCueTouch` below — never a live computed property, because `CueFiring.firing`'s
@@ -2182,66 +2064,48 @@ final class AppState {
     // the sidebar's live counts + `TodayView`'s Upcoming/Inbox bodies from the same `openTasks`
     // snapshot Today already uses, so the three sections can never disagree about what exists.
 
-    /// Local-midnight-tomorrow cutoff, recomputed from the live clock on every access (same
-    /// no-cached-state convention as `activeTask` above) — `TimeZone.current`, since "after today"
-    /// is inherently a LOCAL calendar concept (mirrors Windows `TodayViewModel`'s own
-    /// `TimeZoneInfo.Local` default, wired at the same call-site layer rather than baked into the
-    /// pure `TaskSections` functions themselves).
-    private var startOfTomorrow: Date {
-        TaskSections.startOfTomorrow(now: clock(), timeZone: .current)
-    }
+    // Upcoming và Inbox bỏ 2026-08-24 (anh Khôi) — `startOfTomorrow`/`upcomingGroups`/
+    // `upcomingNavCount`/`inboxTasks`/`inboxNavCount` xoá theo vì hết chỗ gọi. Luật phân loại
+    // thuần vẫn nằm trong `Shared/Model/TaskSections.swift`, chưa đụng: nó còn chứa `isClosed`
+    // và mấy helper ngày mà chỗ khác dùng, và hai bản Windows/iOS vẫn có Upcoming/Inbox.
 
-    /// Upcoming's rows, grouped by local calendar day and ordered earliest-first — the sidebar
-    /// nav count is `dated.count` (`upcomingNavCount` below), not `upcomingGroups.count` (one per
-    /// GROUP, not per task).
-    var upcomingGroups: [UpcomingDayGroup] {
-        let cutoff = startOfTomorrow
-        var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = .current
-
-        let dated: [(date: Date, task: TaskItem)] = openTasks.compactMap { task in
-            guard let date = TaskSections.upcomingDate(task, startOfTomorrow: cutoff) else { return nil }
-            return (date, task)
-        }
-
-        // Bucket by local calendar day while preserving ascending date order within (and across)
-        // buckets — `order` records first-seen-day order so groups themselves come out earliest-day
-        // first, matching the Windows `OrderBy(...).GroupBy(...)` pipeline this ports.
-        var order: [Date] = []
-        var buckets: [Date: [TaskItem]] = [:]
-        for entry in dated.sorted(by: { $0.date < $1.date }) {
-            let day = calendar.startOfDay(for: entry.date)
-            if buckets[day] == nil {
-                buckets[day] = []
-                order.append(day)
+    /// Cất một việc đi: `TaskStatus.archived`. KHÔNG phải hoàn thành (không `CompletionEvent`,
+    /// không đếm vào "N done") và cũng không phải xoá — đây là "tôi không làm cái này nữa nhưng
+    /// đừng vứt nó". Đi qua `mergeIntoExisting`, cùng đường mọi mutation khác trong file này dùng,
+    /// nên không cần thêm API mới cho `TaskStore`.
+    ///
+    /// `.archived` làm task INELIGIBLE với `VolarCore.nextTask()` (xem `TaskStatus`), nên nếu nó
+    /// đang là NOW thì việc kế tiếp tự lên — cùng cơ chế `delegateTask` từng dùng, không cần logic
+    /// "advance" riêng.
+    func archiveTask(_ id: UUID) {
+        guard let store else {
+            if let index = tasks.firstIndex(where: { $0.id == id }) {
+                tasks[index].status = .archived
             }
-            buckets[day]?.append(entry.task)
+            return
         }
-
-        let tomorrow = calendar.startOfDay(for: cutoff)
-        return order.map { day in
-            let header = day == tomorrow
-                ? "Tomorrow"
-                : day.formatted(.dateTime.weekday(.abbreviated).month(.abbreviated).day())
-            return UpcomingDayGroup(header: header, tasks: buckets[day] ?? [])
+        let before = tasks
+        _ = store.mergeIntoExisting(id) { existing in
+            var updated = existing
+            updated.status = .archived
+            return updated
         }
+        tasks = store.fetchAll()
+        scheduler?.scheduleReminders(taskId: id)
+        notifyEligibilityAndScheduleResurface(before: before, now: clock())
     }
 
-    /// Sidebar nav count for Upcoming — one per TASK, not per day group (a day with 3 tasks counts
-    /// as 3, mirroring Windows `UpcomingNavCount = dated.Count`).
-    var upcomingNavCount: Int {
-        openTasks.filter { TaskSections.isUpcoming($0, startOfTomorrow: startOfTomorrow) }.count
+    /// Số việc đã xong — cùng nguồn `doneTasks` mà section Completed hiển thị, không đếm riêng.
+    var completedNavCount: Int { doneTasks.count }
+
+    /// Việc đã cất đi (`TaskStatus.archived`) — section Archived, thay chỗ Inbox từ 2026-08-24.
+    /// Mới nhất trước: `createdAt` giảm dần, cùng thứ tự Inbox từng dùng, vì một việc đã cất không
+    /// có hạn lẫn thứ hạng nào để xếp theo.
+    var archivedTasks: [TaskItem] {
+        tasks.filter { $0.status == .archived }.sorted { $0.createdAt > $1.createdAt }
     }
 
-    /// Inbox's rows — a flat list, deliberately: the whole definition of Inbox is "has no date and
-    /// no dependency", so there is nothing to group BY. Newest first, because in a voice-first app
-    /// the thing you just said is the thing you are still thinking about (mirrors Windows
-    /// `InboxTasks`'s own `OrderByDescending(CreatedAt)`).
-    var inboxTasks: [TaskItem] {
-        openTasks.filter { TaskSections.isInbox($0) }.sorted { $0.createdAt > $1.createdAt }
-    }
-
-    var inboxNavCount: Int { inboxTasks.count }
+    var archivedNavCount: Int { archivedTasks.count }
 
     // MARK: - Task CRUD
 
@@ -3238,13 +3102,6 @@ final class AppState {
     /// FIRST time this ever runs, per contract R5 ("Cloud ... IF: user opted in").
     func finishRecording(transcript: String) {
         liveTranscript = transcript
-        // T042 (phase6-contract.md §C): classify a delegation-handoff utterance BEFORE the T036
-        // voice-done classification below — "giao cho Claude rồi" is neither a completion nor a
-        // new-task capture, and must never fall through to either.
-        if let minutes = classifyDelegationIntent(transcript) {
-            presentDelegationConfirm(checkBackMinutes: minutes)
-            return
-        }
         // T036 (phase5-contract.md §C): classify BEFORE treating this as new-task capture.
         // `voiceDoneOpenTasks` is rebuilt fresh from the live `tasks` snapshot on every call (never
         // cached) so a completion classified here always reflects the CURRENT open-task list, and
@@ -3477,74 +3334,6 @@ final class AppState {
         return VoiceMatch(taskId: expected.id, title: expected.title, score: confidence)
     }
 
-    // MARK: - T042: voice delegation intent (phase6-contract.md §C, US4)
-
-    /// Trigger phrases for "I handed this off to Claude" (Vietnamese + English), matched via
-    /// `Self.foldForMatch`'s diacritic/case-insensitive folding. Deliberately name-scoped ("...
-    /// claude") rather than a bare "delegated"/"giao việc" to keep the false-positive rate low — an
-    /// unrelated utterance (e.g. "giao hàng", deliver goods) must not be swallowed as a delegation
-    /// intent. // UNVERIFIED: a fixed phrase list, same class of heuristic as `VoiceDone`'s own cue
-    /// words — not exercised against real ASR output on this machine (Windows, no Xcode).
-    private static let delegationTriggerPhrases = [
-        "giao cho claude", "giao viec cho claude", "da giao cho claude", "chuyen cho claude",
-        "gui cho claude", "nho claude lam", "handed to claude", "handed off to claude",
-        "gave it to claude", "gave this to claude", "delegated to claude", "delegated this to claude",
-        "assigned to claude", "assigned this to claude",
-    ]
-
-    /// Detects a delegation-handoff phrase and, if present, the spoken check-back interval ("check
-    /// sau 10 phút" / "check back in 15 minutes") — defaulting to `DelegationTracker`'s own 10'
-    /// when no interval is spoken. `nil` = not a delegation utterance at all (falls through to the
-    /// normal `VoiceDone`/new-task classification in `finishRecording`).
-    private func classifyDelegationIntent(_ transcript: String) -> Int? {
-        let folded = Self.foldForMatch(transcript)
-        guard Self.delegationTriggerPhrases.contains(where: { folded.contains(Self.foldForMatch($0)) }) else {
-            return nil
-        }
-        return Self.extractCheckBackMinutes(from: folded) ?? 10
-    }
-
-    private static func foldForMatch(_ s: String) -> String {
-        s.lowercased().folding(options: .diacriticInsensitive, locale: nil)
-    }
-
-    /// Pulls the first "<N> phut/minutes/min" style interval out of an already-folded transcript.
-    /// Defensive cap (self-review "client-exploit"): clamps to 1...240 minutes so a garbled/
-    /// adversarial ASR result (e.g. a stray huge number) can never schedule a wildly-out-of-range
-    /// check-back — mirrors `presentVoiceDoneConfirm`'s own defensive cap on candidate count.
-    private static func extractCheckBackMinutes(from folded: String) -> Int? {
-        guard let regex = try? NSRegularExpression(pattern: "(\\d{1,4})\\s*(phut|minutes?|mins?|min)\\b") else {
-            return nil
-        }
-        let range = NSRange(folded.startIndex..<folded.endIndex, in: folded)
-        guard let match = regex.firstMatch(in: folded, range: range),
-              let numberRange = Range(match.range(at: 1), in: folded),
-              let value = Int(folded[numberRange]) else { return nil }
-        return min(max(value, 1), 240)
-    }
-
-    /// Routes a detected delegation utterance to the SAME glance-and-dismiss confirm surface
-    /// `presentVoiceDoneConfirm` uses (constitution II applies to every voice action, not only
-    /// completions — never silently act). Always targets the current `activeTask`: a bare "giao
-    /// cho Claude rồi" names no task, and the single NOW slot IS the thing the user is working on
-    /// — same "act on the one active task" convention as `startFocus`/`completeFocusTask` and the
-    /// `TodayView` delegate button (`delegateTask`), rather than fuzzy-matching the utterance
-    /// against every open title the way `VoiceDone` does for actual completion phrasing.
-    private func presentDelegationConfirm(checkBackMinutes: Int) {
-        guard let active = activeTask else {
-            // Nothing to delegate — state it (constitution II: never guess), reusing the same
-            // "no matching task" row `presentVoiceDoneConfirm` already renders.
-            voiceDoneNoMatchTranscript = liveTranscript
-            captureState = .parsed
-            return
-        }
-        voiceDoneConfirm = VoiceDoneConfirm(
-            action: .delegate(checkBackMinutes: checkBackMinutes),
-            candidates: [VoiceMatch(taskId: active.id, title: active.title, score: 1.0)]
-        )
-        captureState = .parsed
-    }
-
     /// User tapped the one-tap confirm, or picked one candidate from the disambiguation list.
     /// `.complete` routes through `toggleDone` — the SAME funnel every other completion source
     /// uses (T037/FR-020: one consolidated completion+advance path, no divergent refresh logic) —
@@ -3565,8 +3354,6 @@ final class AppState {
             toggleDone(taskId)
         case .clearExternal:
             clearExternalCondition(taskId: taskId, now: clock())
-        case .delegate(let minutes):
-            delegateTask(taskId, checkBackMinutes: minutes)
         }
         finishVoiceDoneUI(action: action)
     }
@@ -3633,7 +3420,6 @@ final class AppState {
         switch action {
         case .complete: spoken = "Done."
         case .clearExternal: spoken = "Cleared."
-        case .delegate: spoken = "Handed off."
         }
         voice.speak(spoken)
         captureSession += 1
@@ -5306,7 +5092,7 @@ final class AppState {
         }
         // FIX B: (re)start the countdown owned by this instance — invalidate any timer left over
         // from a previous session first so two overlapping sessions can never double-decrement.
-        // Mirrors `startDelegationTimer()`'s exact construction (`Timer(timeInterval:repeats:
+        // `Timer(timeInterval:repeats:
         // block:)` + `RunLoop.main.add(_:forMode:.common)`) — the `@Sendable` block hops back onto
         // `@MainActor` via `_Concurrency.Task` for the same Swift 6 isolation reason documented
         // there.
@@ -5345,65 +5131,6 @@ final class AppState {
 
     func toggleFocusPause() {
         focusPaused.toggle()
-    }
-
-    // MARK: - "Stuck?" — "cant_start" reason's 2-minute timer (anh Khôi, 2026-07-29)
-    //
-    // Deliberately its OWN small timer, NOT a reuse of `startFocus()`/`focusSecondsLeft`/
-    // `focusTick()` right above, even though the `Timer` construction below is copied from it
-    // verbatim for consistency. Reasons this reuse was rejected (self-review requirement: explain
-    // why, not just do something different):
-    //   1. Different semantics entirely. `startFocus()` is "spend a session ON THIS SPECIFIC TASK";
-    //      "cant_start" is explicitly the OPPOSITE — "the problem isn't which task, it's that I
-    //      can't get moving at all, so do absolutely anything for two minutes." Forcing the second
-    //      concept through the first would either misrepresent a task-agnostic permission slip as
-    //      "focusing on the stuck task" (defeating the whole point) or require a task parameter
-    //      `startFocus()` doesn't take and whose callers (`FocusOverlay`, `TodayView`, existing
-    //      tests) all assume is absent.
-    //   2. `startFocus()` hardcodes `25 * 60` and picks a task out of `openTasks` (frog-first) for
-    //      `FocusOverlay` to display in its title/priority/duration chip row — none of that applies
-    //      here; there is no task to show, no chip row, just a plain countdown + "stop."
-    //   3. `focusActive`/`focusIndex` additionally drive `FocusOverlay`'s full prev/next task-
-    //      navigation chrome. Reusing them would either force this timer to also render/behave
-    //      like the full task-focus overlay (wrong UI for "do anything") or require carving new
-    //      conditionals into `FocusOverlay`'s existing, already-shipped Focus-session rendering —
-    //      out of scope here and a real regression risk to a feature this task must not touch.
-    // So: a second, independent `Timer`, same construction shape as `startFocus()`'s for
-    // consistency, entirely separate state (`stuckTimerActive`/`stuckTimerSecondsLeft`/`stuckTimer`
-    // — never touches `focusActive`/`focusSecondsLeft`/`focusTimer` and vice versa).
-    func startStuckCantStartTimer() {
-        stuckTimerSecondsLeft = 120
-        stuckTimerActive = true
-        stuckTimer?.invalidate()
-        let timer = Timer(timeInterval: 1, repeats: true) { @Sendable [weak self] _ in
-            _Concurrency.Task { @MainActor [weak self] in
-                self?.stuckTimerTick()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        stuckTimer = timer
-    }
-
-    private func stuckTimerTick() {
-        guard stuckTimerActive else { return }
-        guard stuckTimerSecondsLeft > 0 else {
-            endStuckCantStartTimer()
-            return
-        }
-        stuckTimerSecondsLeft -= 1
-        if stuckTimerSecondsLeft <= 0 {
-            endStuckCantStartTimer()
-        }
-    }
-
-    /// Ends the "cant_start" timer early ("Stop") or on its own natural expiry — either way, no
-    /// record of it is kept anywhere (no completion count, no "did you actually do something"
-    /// follow-up question): the permission was the entire point, not a task to grade.
-    func endStuckCantStartTimer() {
-        stuckTimer?.invalidate()
-        stuckTimer = nil
-        stuckTimerActive = false
-        stuckTimerSecondsLeft = 0
     }
 
     /// Completes the given task and advances the focus index, clamping into range — mirrors the
@@ -5535,203 +5262,6 @@ final class AppState {
     func acceptSwitchBreakdownSuggestion() {
         guard let task = switchBreakdownSuggestion else { return }
         switchBreakdownSuggestion = nil
-        openBreakdown(for: task)
-    }
-
-    // MARK: - "Stuck?" (anh Khôi, 2026-07-29) — one button, three plainly-worded reasons, three
-    // deliberately different responses. See the state doc comments above (`stuckPickerTask`
-    // onward) for why "chia nhỏ" (breakdown) alone doesn't cover all three.
-
-    /// Opens the reason picker for `task`. Both Stuck buttons (`FocusOverlay`, `TodayView`'s hero
-    /// card) call this and nothing else — mirrors `openBreakdown(for:)`'s single-entry-point shape.
-    func openStuckPicker(for task: TaskItem) {
-        stuckPickerTask = task
-    }
-
-    /// Declining the picker without choosing a reason (tapping elsewhere / closing the popover).
-    func dismissStuckPicker() {
-        stuckPickerTask = nil
-    }
-
-    /// Routes a chosen reason to its own fix. Closes the picker synchronously in every case (the
-    /// three branches below diverge on what happens NEXT, not on whether the picker stays open).
-    ///
-    /// `.tooBig` REDESIGNED (anh Khôi, 2026-07-29, same day as the first version, after he
-    /// challenged it directly): used to route straight into `openBreakdown(for:)` (a full 3-9 step
-    /// plan). Rejected because Volar has no real context for a task beyond a short spoken title —
-    /// asking for a full plan under that blindness meant steps 3+ were fabrication dressed as
-    /// advice. Now fetches exactly ONE next physical action instead (`fetchStuckNextAction`); the
-    /// full plan is still one tap away via that banner's own "See full plan" button
-    /// (`openFullPlanFromStuck`), which is the ONLY place `openBreakdown(for:)` is still reached
-    /// from this feature.
-    func chooseStuckReason(_ reason: StuckReason, for task: TaskItem) {
-        stuckPickerTask = nil
-        switch reason {
-        case .tooBig:
-            fetchStuckNextAction(for: task)
-        case .dread:
-            fetchStuckDread(for: task)
-        case .cantStart:
-            // No task binding, no model call at all — see `startStuckCantStartTimer`'s doc comment
-            // (next to `startFocus()`) for why "cant_start" needs neither.
-            startStuckCantStartTimer()
-        }
-    }
-
-    /// The async "dread" fetch, split out so `chooseStuckReason` stays synchronous — same
-    /// "synchronous state flip before the async hop" shape `fetchBreakdown` documents.
-    /// `sourceTranscript`/`deadline`/`existingSubtasks` (anh Khôi, 2026-07-29 "richer context"
-    /// addendum) are computed synchronously here, same "read `self.tasks` before the async hop,
-    /// not inside it" reasoning `fetchBreakdown` documents for the identical pattern.
-    private func fetchStuckDread(for task: TaskItem) {
-        stuckDreadSession += 1
-        let session = stuckDreadSession
-        stuckDreadTask = task
-        stuckDreadState = .loading
-        let context = existingSubtaskContext(for: task)
-        _Concurrency.Task { @MainActor [weak self] in
-            guard let self else { return }
-            let message = await self.router.stuckDread(
-                title: task.title,
-                notes: task.notes,
-                sourceTranscript: task.sourceTranscript,
-                deadline: task.deadline,
-                existingSubtasks: context
-            )
-            self.applyStuckDreadResult(message, session: session)
-        }
-    }
-
-    /// The synchronous tail of `fetchStuckDread`, split out for the same direct-unit-testability
-    /// reason `applyBreakdownFetchResult` documents: a test can simulate "the router came back
-    /// with this" (or came back with `nil`) without a real FM/network round trip. Not `private`
-    /// for that reason.
-    func applyStuckDreadResult(_ message: String?, session: Int) {
-        // Stale? The banner was dismissed, or Stuck was reopened for a different task, while this
-        // fetch was in flight — same `captureSession`/`breakdownSession` guard shape.
-        guard stuckDreadSession == session else { return }
-        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            stuckDreadState = .loaded(message)
-        } else {
-            // Neither tier produced anything usable — the STATIC fallback sentence takes over
-            // (`Self.stuckDreadFallbackMessage`), never silence, never an invented claim about the
-            // task.
-            stuckDreadState = .fallback
-        }
-    }
-
-    /// Dismissing the dread message/fallback banner without acting on it.
-    func dismissStuckDread() {
-        stuckDreadSession += 1 // invalidate any fetch still in flight for this task
-        stuckDreadState = .idle
-        stuckDreadTask = nil
-    }
-
-    /// Accepting the dread message's proposed 2-minute action. Deliberately lands on the EXACT
-    /// same task-agnostic timer `chooseStuckReason(.cantStart, for:)` starts — both are, at bottom,
-    /// "do one small physical thing for up to two minutes, no judgment either way," so there is no
-    /// reason for a second timer implementation here.
-    func acceptStuckDreadAction() {
-        stuckDreadState = .idle
-        stuckDreadTask = nil
-        startStuckCantStartTimer()
-    }
-
-    // MARK: - "Stuck?" — "too_big" reason's single next-action fetch (anh Khôi, 2026-07-29
-    // REDESIGN). See `chooseStuckReason`'s doc comment above for why this reason no longer opens
-    // `TaskBreakdownView` directly.
-
-    /// State machine for the "too_big" reason's async single-next-action fetch. Deliberately a
-    /// SEPARATE state machine from `StuckDreadState` above, not a shared/generalized one: the two
-    /// reasons' failure modes are NOT the same shape (see `.unavailable` below), and forcing them
-    /// through one enum would either give `too_big` a fabricated-content fallback case it must
-    /// never have, or strip `dread`'s legitimate static fallback — either way, blurring a
-    /// distinction anh Khôi drew deliberately.
-    enum StuckNextActionState: Equatable, Sendable {
-        case idle
-        case loading
-        /// A real, model-produced single next action (on-device FM or Cloud — see
-        /// `IntentRouter.stuckNextAction`).
-        case loaded(String)
-        /// Neither FM nor Cloud produced anything usable. Deliberately NOT the same shape as
-        /// `StuckDreadState.fallback`: that case carries a STATIC SUGGESTED ACTION, which is safe
-        /// because it is the app's own generic words, not a claim about the task; a next-action
-        /// equivalent would have to claim SOME specific-sounding physical action, which would
-        /// misrepresent a guess as something the app actually determined for THIS task — exactly
-        /// the fabrication this reason's redesign exists to avoid. So this case carries NO
-        /// suggested content at all, only the fact that nothing was found — mirrors
-        /// `BreakdownFetchState.failed`'s "tell the truth, never fabricate" rule.
-        case unavailable
-    }
-    var stuckNextActionState: StuckNextActionState = .idle
-    /// Whichever task `stuckNextActionState` currently describes — `nil` while idle. Same role as
-    /// `stuckDreadTask` for the sibling state machine above.
-    var stuckNextActionTask: TaskItem?
-    /// Monotonic guard token, exact same shape as `stuckDreadSession`/`breakdownSession`.
-    private var stuckNextActionSession = 0
-
-    /// The async "too_big" fetch, split out so `chooseStuckReason` stays synchronous — same shape
-    /// as `fetchStuckDread` right above, including computing `existingSubtaskContext` synchronously
-    /// before the async hop.
-    private func fetchStuckNextAction(for task: TaskItem) {
-        stuckNextActionSession += 1
-        let session = stuckNextActionSession
-        stuckNextActionTask = task
-        stuckNextActionState = .loading
-        let context = existingSubtaskContext(for: task)
-        _Concurrency.Task { @MainActor [weak self] in
-            guard let self else { return }
-            let message = await self.router.stuckNextAction(
-                title: task.title,
-                notes: task.notes,
-                sourceTranscript: task.sourceTranscript,
-                deadline: task.deadline,
-                existingSubtasks: context
-            )
-            self.applyStuckNextActionResult(message, session: session)
-        }
-    }
-
-    /// The synchronous tail of `fetchStuckNextAction`, split out for the same direct-
-    /// unit-testability reason `applyStuckDreadResult`/`applyBreakdownFetchResult` document. Not
-    /// `private` for that reason.
-    func applyStuckNextActionResult(_ message: String?, session: Int) {
-        guard stuckNextActionSession == session else { return }
-        if let message, !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            stuckNextActionState = .loaded(message)
-        } else {
-            // No static fallback here — see `StuckNextActionState.unavailable`'s own doc comment
-            // for why a fabricated-sounding "do something" claim would misrepresent a guess as a
-            // real answer for THIS task, unlike `dread`'s legitimately app-authored fallback text.
-            stuckNextActionState = .unavailable
-        }
-    }
-
-    /// Dismissing the next-action banner without acting on it.
-    func dismissStuckNextAction() {
-        stuckNextActionSession += 1 // invalidate any fetch still in flight for this task
-        stuckNextActionState = .idle
-        stuckNextActionTask = nil
-    }
-
-    /// Accepting the next action's proposed 2-minute action. Lands on the EXACT same task-agnostic
-    /// timer every other "start the small thing" acceptance uses (`acceptStuckDreadAction`,
-    /// `cant_start`) — same reasoning as that method's own doc comment.
-    func acceptStuckNextActionAction() {
-        stuckNextActionState = .idle
-        stuckNextActionTask = nil
-        startStuckCantStartTimer()
-    }
-
-    /// The next-action banner's secondary "See full plan" action (anh Khôi, 2026-07-29 REDESIGN) —
-    /// the ONLY place this feature still reaches the full existing breakdown flow
-    /// (`openBreakdown(for:)`, entirely unchanged) — never a second implementation of it. Available
-    /// regardless of whether the quick single-action fetch succeeded, is still loading, or came
-    /// back `.unavailable`: this is a deliberate escape hatch to the full plan, not conditioned on
-    /// the quick answer's own outcome.
-    func openFullPlanFromStuck(for task: TaskItem) {
-        stuckNextActionState = .idle
-        stuckNextActionTask = nil
         openBreakdown(for: task)
     }
 
@@ -5975,12 +5505,12 @@ final class AppState {
     }
 
     /// title+done snapshot of `task`'s existing children (anh Khôi, 2026-07-29 "richer context"
-    /// addendum) — the extra grounding this app can offer `breakdown`/`stuck` calls beyond a bare
+    /// addendum) — the extra grounding this app can offer `breakdown` calls beyond a bare
     /// title, so a repeat call never regenerates/repeats a step already finished. `nil` when there
     /// are no children yet, matching the wire's own "omit the field entirely" convention for an
     /// absent/empty `existingSubtasks` (see `TaskContextSubtask`'s doc comment,
     /// `Sources/Parsing/IntentParsing.swift`, for the shared type both this and the transport layer
-    /// use). Shared by `fetchBreakdown`, `fetchStuckDread`, and `fetchStuckNextAction` below — one
+    /// use). Dùng bởi `fetchBreakdown` — one
     /// definition, so the three call sites can never compute "which children count" three
     /// different ways.
     private func existingSubtaskContext(for task: TaskItem) -> [TaskContextSubtask]? {
@@ -6425,24 +5955,6 @@ final class AppState {
     /// }
     /// ```
     func maybeShowEveningSweep() {
-        // WG3 (major, reviewer fix): `DelegationTracker.reconcileBatch()` was defined but had zero
-        // call sites — stage-2 (bumped past 30' → batch-only) delegations are deliberately excluded
-        // from `dueForRecheck` (see that method's own backoff-stage cutoff) and were consequently
-        // never resurfaced anywhere. `reconcileBatch()`'s own doc comment names its intended trigger
-        // as "natural touchpoints (popover open / evening)" — this evening-sweep call IS that
-        // touchpoint. Deliberately NOT unioned into the every-60s timer tick
-        // (`refreshDelegationQueue`): `reconcileBatch()` is independent of backoff stage, so
-        // surfacing it every tick would show every in-flight delegation immediately regardless of
-        // its check-back schedule, defeating the whole point of the 10'/30'/batch-only backoff.
-        // Once/evening (this call site) matches the contract's own "evening" touchpoint instead.
-        // Independent of the sweep-day gate below (a `showSweep` throttle for a DIFFERENT feature)
-        // so it still runs even when the sweep card itself was already shown today, or
-        // `sweepItems` is empty — a delegation-only evening still deserves its reconcile pass.
-        if let delegation {
-            let batchIds = delegation.reconcileBatch()
-            let alreadyQueued = Set(dueDelegationRechecks)
-            dueDelegationRechecks += batchIds.filter { !alreadyQueued.contains($0) }
-        }
         let day = Self.isoDayKey(from: clock())
         guard UserDefaults.standard.string(forKey: Self.sweepLastShownDayKey) != day, !sweepItems.isEmpty else { return }
         showSweep = true
@@ -6557,7 +6069,6 @@ final class AppState {
         // own doc comment) — so a repeat call just re-arms the same state, never a duplicate.
         scheduleNextResurface(from: tasks.map { $0.snapshot() }, now: clock())
         // T043 (phase6-contract.md §C): starts the minute-scale ambient recheck timer.
-        startDelegationTimer()
         // FIX 3: a persisted `.whisperKit` engine choice used to only ever call `whisper.prepare()`
         // from `setSpeechEngine` (Settings) — so on relaunch, `speechEngineChoice` restores from
         // `UserDefaults` correctly but the model itself was never (re)loaded, silently falling back
@@ -6601,133 +6112,12 @@ final class AppState {
         }
     }
 
-    // MARK: - Phase 6 (US4): AI-delegation orchestrator (phase6-contract.md §C, T042/T043/T044)
-
-    /// T043: minute-scale ambient recheck timer (constitution I — the resurface queue is an
-    /// in-app ambient card, NEVER a `UNUserNotificationCenter` notification). Idempotent:
-    /// invalidates any previous timer first so a second `activateServices()` call can't leak a
-    /// duplicate `Timer` (self-review "runtime"). No-op when there's no `delegation` tracker
-    /// (no-store fallback) beyond the one immediate `refreshDelegationQueue()` call, which itself
-    /// no-ops the same way.
-    private func startDelegationTimer() {
-        delegationTimer?.invalidate()
-        refreshDelegationQueue()
-        guard delegation != nil else { return }
-        // `Timer(timeInterval:repeats:block:)`'s block is `@Sendable` — capturing `[weak self]`
-        // (a plain reference, not touching actor-isolated state) is safe, but actually CALLING
-        // `refreshDelegationQueue()` must hop back onto `@MainActor` explicitly, exactly like
-        // `AppDelegate.applicationDidFinishLaunching`'s own documented `@Sendable`/MainActor note
-        // (UserNotifications invoking a MainActor-inferred closure off-main traps at runtime under
-        // Swift 6's isolation checking) — this timer callback is the same failure class.
-        let timer = Timer(timeInterval: 60, repeats: true) { @Sendable [weak self] _ in
-            _Concurrency.Task { @MainActor [weak self] in
-                self?.refreshDelegationQueue()
-            }
-        }
-        RunLoop.main.add(timer, forMode: .common)
-        delegationTimer = timer
-    }
-
-    /// Refreshes the ambient "needs review" queue from `DelegationTracker.dueForRecheck` — called
-    /// by the minute-scale timer, once at `activateServices()`, and after any mutation here that
-    /// could change due-ness (`delegateTask`/`resolveDelegation*`/`onAppLinkHandled`). Never a
-    /// system notification (constitution I) — `TodayView` renders `dueDelegationRechecks` as an
-    /// ordinary, dismissible in-app card.
-    func refreshDelegationQueue(now: Date? = nil) {
-        dueDelegationRechecks = delegation?.dueForRecheck(now: now ?? clock()) ?? []
-    }
-
-    /// T042: `TodayView`'s delegate affordance on the NOW spotlight, and `confirmVoiceDone`'s
-    /// `.delegate` action — delegates task `id` (there is only ever one NOW slot at a time, so
-    /// both call sites already know exactly which task). No-op if there's no `delegation` tracker
-    /// (no-store fallback) or `store` — delegation state has nowhere durable to live without one.
-    /// Mirrors `triageDefer`/`clearExternalCondition`'s existing "mutate via store, refresh
-    /// `tasks`, re-derive reminders, run the shared eligibility/resurface tail" pattern: adding the
-    /// unsatisfied `.external` waiting-condition makes this task INELIGIBLE for
-    /// `VolarCore.nextTask()`, which is what actually moves it out of the active slot and lets the
-    /// next eligible task advance in — the SAME `tasks = store.fetchAll()` funnel every other
-    /// mutation here uses, no bespoke advance logic needed.
-    func delegateTask(_ id: UUID, label: String? = nil, checkBackMinutes: Int = 10) {
-        guard let delegation, let store else { return }
-        let before = tasks
-        let resolvedLabel = label ?? tasks.first { $0.id == id }?.title ?? "Claude"
-        delegation.delegate(taskId: id, label: resolvedLabel, checkBackMinutes: checkBackMinutes, cwdHint: nil)
-        tasks = store.fetchAll()
-        let now = clock()
-        // WG-1: this task's condition state just changed — re-derive its reminders, same as every
-        // other condition-adding path.
-        scheduler?.scheduleReminders(taskId: id)
-        notifyEligibilityAndScheduleResurface(before: before, now: now)
-        refreshDelegationQueue(now: now)
-    }
-
-    /// T043 ambient card action: [Done] — routes through the SAME completion funnel as every other
-    /// completion source (T037/FR-020), never a bespoke completion path.
-    func resolveDelegationDone(_ id: UUID) {
-        toggleDone(id)
-        refreshDelegationQueue()
-    }
-
-    /// T043 ambient card action: [Still waiting] — the user looked and it's genuinely still in
-    /// flight; bumps backoff (10' -> 30' -> batch-only) rather than re-asking every minute.
-    func resolveDelegationStillWaiting(_ id: UUID) {
-        delegation?.bumpBackoff(taskId: id)
-        refreshDelegationQueue()
-    }
-
-    /// T043 ambient card action: [Check later] — an explicit user-directed snooze (never a silent
-    /// auto-reschedule): re-delegates the SAME task under its current title and cwd hint with a
-    /// fresh check-back. `DelegationTracker.delegate` is documented idempotent for an
-    /// already-waiting task (updates the schedule in place rather than piling up a second
-    /// condition), so this is safe to call on a task that's already mid-delegation.
-    func resolveDelegationCheckLater(_ id: UUID, minutes: Int = 10) {
-        guard let delegation else { return }
-        let label = tasks.first { $0.id == id }?.title ?? "Claude"
-        delegation.delegate(taskId: id, label: label, checkBackMinutes: minutes, cwdHint: delegation.cwdHint(for: id))
-        refreshDelegationQueue()
-    }
-
-    /// `VolarApp.swift`'s `.onOpenURL` calls this right after `appLinkHandler?.handle(url)` —
-    /// `AppLinkHandler` is a plain (non-`@Observable`) class, so this is what actually makes its
-    /// resulting state changes visible to SwiftUI: mirrors `pendingDisambiguation` into this file's
-    /// own `@Observable` `pendingDisambiguationTaskIDs`, stamps `lastAppLinkAt` (Settings' test-
-    /// signal "✓ received" confirmation, T044), and refreshes the ambient queue (an `ai-done` match
-    /// can clear a delegation, which changes what's due).
+    /// `VolarApp.swift`'s `.onOpenURL` gọi ngay sau `appLinkHandler?.handle(url)`. Trước đây nó
+    /// còn gương `pendingDisambiguation`, đóng dấu `lastAppLinkAt` và làm mới hàng đợi delegation —
+    /// cả ba đã bỏ cùng tính năng delegation (2026-08-22). Còn lại đúng một việc, và nó vẫn cần:
+    /// `handle(_:)` có thể vừa đổi STORE, mà `tasks` ở file này là một bản chụp riêng.
     func onAppLinkHandled() {
-        // WG1 (major, reviewer fix): `AppLinkHandler.handle(_:)` (called just before this, in
-        // `VolarApp.swift`'s `.onOpenURL`) already ran the resolve chain (→ `markNeedsReview` →
-        // `store.clearFirstExternalCondition`) if it matched a task — but that mutates the STORE,
-        // not this file's `tasks` snapshot. Without this refresh, `activeTask`/`MenuBarLabel`
-        // (both derived from `tasks`) stay stale until some unrelated mutation happens to catch
-        // them up. The mutation (if any) already happened by the time this method runs, so
-        // refreshing first is correct here.
         refreshFromStore()
-        lastAppLinkAt = clock()
-        pendingDisambiguationTaskIDs = appLinkHandler?.pendingDisambiguation ?? []
-        refreshDelegationQueue()
-    }
-
-    /// One-tap disambiguation resolve (`TodayView`'s ambient card) — delegates straight to
-    /// `AppLinkHandler.resolveDisambiguation`, which itself routes through
-    /// `DelegationTracker.markNeedsReview` (never completes, per constitution II), then
-    /// re-syncs the mirrored `pendingDisambiguationTaskIDs`/queue exactly like `onAppLinkHandled`.
-    func resolveAppLinkDisambiguation(taskId: UUID) {
-        appLinkHandler?.resolveDisambiguation(taskId: taskId)
-        // WG1 (major, reviewer fix): same staleness gap as `onAppLinkHandled` above, for the
-        // disambiguation-card tap path — `resolveDisambiguation` above mutates the store via
-        // `markNeedsReview`, so the refresh runs AFTER that call (not literally the method's first
-        // statement) so `tasks` actually reflects what this call just changed, still strictly
-        // before `refreshDelegationQueue()`.
-        refreshFromStore()
-        pendingDisambiguationTaskIDs = appLinkHandler?.pendingDisambiguation ?? []
-        refreshDelegationQueue()
-    }
-
-    /// "None of these" — purely local UI state, no task touched (mirrors
-    /// `AppLinkHandler.dismissDisambiguation`'s own doc comment).
-    func dismissAppLinkDisambiguation() {
-        appLinkHandler?.dismissDisambiguation()
-        pendingDisambiguationTaskIDs = []
     }
 
     // MARK: - Guided tour actions (`TourOverlay.swift`)

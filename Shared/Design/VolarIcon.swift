@@ -4,7 +4,7 @@ import SwiftUI
 /// Every icon used by the prototype's `VolarIcon` component (`design/tokens.jsx`). Keeping the
 /// case list stable lets views request icons by role instead of by raw SF Symbol name.
 enum VolarIconName: String, CaseIterable, Sendable {
-    case mic, focus, inbox, upcoming, today, plus, search
+    case mic, focus, inbox, upcoming, today, plus, search, archive
     case chevron, chevronDown, settings, check, clock, bell, sparkle, flag, bolt
     case cmd, project, waveform, home, back, x, eject
     case pause, play, stop, volume, volumeOff
@@ -20,6 +20,7 @@ enum VolarIconName: String, CaseIterable, Sendable {
         case .today: return "calendar"
         case .plus: return "plus"
         case .search: return "magnifyingglass"
+        case .archive: return "archivebox"
         case .chevron: return "chevron.right"
         case .chevronDown: return "chevron.down"
         case .settings: return "gearshape"

@@ -95,9 +95,9 @@ struct VolarApp: App {
                     // F1/F2 fix: ALSO called from `AppDelegate.applicationDidFinishLaunching` below
                     // — the window opens at launch as of 2026-07-26, but the user can still close it
                     // (⌘W) and leave Volar running from the menu bar, so relying solely on this
-                    // `.task` would leave the hotkey/rebuild/overdue-scan/delegation-timer dead for
+                    // `.task` would leave the hotkey/rebuild/overdue-scan dead for
                     // the rest of that session. The double call is intentional and safe: `hotkey.start` tears down any
-                    // existing registration first, `startDelegationTimer` invalidates any existing
+                    // existing registration first, mỗi `start*` invalidates any existing
                     // timer first, and `rebuildFromStorage`/the overdue scan are both idempotent.
                     appState.activateServices()
 
@@ -390,7 +390,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // `Window`'s `.task` above, which never ran while the app launched with that window closed
         // (the normal case back when this was an LSUIElement menu-bar-only app). That
         // left the global ⌃⌥M hotkey, `rebuildFromStorage()`, the FR-016 overdue scan, and the
-        // delegation timer all dead until the user happened to open the window. Calling it here too
+        // dead until the user happened to open the window. Calling it here too
         // — right after `appState` is guaranteed assigned (`VolarApp.init()` sets it before this
         // delegate method can fire) — closes that gap. The double call (here + the `Window`'s
         // `.task`) is intentional and safe; see that call site's own comment for why each half of
@@ -406,9 +406,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         // ⌃⌥N — attached after `activateServices()` above has started the hotkey manager. Weak on
         // self so the retained Carbon callback can't keep the delegate alive.
+        // `up: nil` — ⌃⌥N giờ là phím bấm-bật/bấm-tắt, key-up không còn mang nghĩa gì (bỏ chế độ
+        // giữ-để-xem, anh Khôi 2026-08-24). `HotkeyManager` vẫn gửi key-up như cũ; không ai nhận.
         appState?.hotkey.setGlanceHandlers(
             down: { [weak self] in self?.glance.hotkeyDown() },
-            up: { [weak self] in self?.glance.hotkeyUp() }
+            up: nil
         )
         observeGlanceMode()
 
@@ -625,8 +627,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
-    /// Shows/hides Glance's panel to match `glance.mode`, and promotes it to a key window on the
-    /// peek -> pinned transition.
+    /// Shows/hides Glance's panel to match `glance.mode`. Thẻ hiện lên là lấy key focus luôn —
+    /// nó chỉ mở khi được bấm, và Esc/⌘D/Return trên thẻ cần key window mới chạy.
     private func syncGlancePanel() {
         guard let appState else { return }
         if glancePanelController == nil {
@@ -640,16 +642,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         switch glance.mode {
         case .hidden:
             controller.hide()
-            // Reset for the next summon: the following show must start as a non-activating peek
-            // even if the last one ended pinned.
             controller.setActivates(false)
-        case .peek:
-            controller.setActivates(false)
-            controller.presentOrRefit()
-        case .pinned:
+        case .shown:
             controller.presentOrRefit()
             // Order matters: present first, THEN promote. `setActivates(true)` only takes key on an
-            // already-visible panel, so promoting first would leave a tapped card without Esc.
+            // already-visible panel, so promoting first would leave the card without Esc.
             controller.setActivates(true)
         }
     }

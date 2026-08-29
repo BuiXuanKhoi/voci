@@ -27,7 +27,7 @@ protocol IntentParser: Sendable {
 }
 
 /// title+done ONLY for an existing subtask (anh Khôi, 2026-07-29 "richer context" addendum) —
-/// threaded as extra, OPTIONAL context into `breakdown`/`stuck` calls so a repeat call never
+/// threaded as extra, OPTIONAL context into `breakdown` calls so a repeat call never
 /// regenerates or repeats a step already finished. Mirrors the server's `existing_subtasks` wire
 /// shape (`_shared/schema.ts`'s `TaskContextFields`) field-for-field — NEVER a task id, matching
 /// the same "titles only, no ids" privacy posture `ResolveCompletionRequest.candidates` already
@@ -216,8 +216,8 @@ final class IntentRouter: IntentParser {
     /// `parse` above — same FM -> Cloud -> title-only floor waterfall, same dependency-phrasing
     /// detection, same 10-task cap, same `applyStartTimeDerivation` pass, but also carries
     /// `taskRefs`/`updates` through from the Cloud tier instead of discarding them. Deliberately
-    /// NOT part of the frozen `IntentParser` protocol — mirrors `resolveCompletion`/`stuckDread`/
-    /// `stuckNextAction` above (same rationale, restated here: a new required protocol method would
+    /// NOT part of the frozen `IntentParser` protocol — mirrors `resolveCompletion` above (same
+    /// rationale, restated here: a new required protocol method would
     /// force `HeuristicNLParser`, `Sources/Model/NLParser.swift`, off-limits this round, to grow a
     /// case it has nothing honest to answer `taskRefs`/`updates` with).
     ///
@@ -381,93 +381,6 @@ final class IntentRouter: IntentParser {
         // transport.
         let bounded = Array(candidates.prefix(100))
         return await cloud.resolveCompletion(transcript, now: now, kind: kind, candidates: bounded)
-    }
-
-    // MARK: - "Stuck?" — "dread" and "too_big" reasons (2026-07-29): FM -> Cloud, no floor beneath
-    // Cloud for either. "Stuck?" feature: three different reasons a task doesn't get started need
-    // three different fixes (anh Khôi's task brief). `cant_start` never reaches this file at all
-    // (client-only 2-minute timer, no model call, see `AppState.startStuckCantStartTimer`). The two
-    // methods below cover the other two reasons — each its own prompt/response shape, never sharing
-    // one implementation, per this task's own instruction ("chia nhỏ" fixes only ONE of three
-    // reasons, so the other two need genuinely different answers, not the same one reworded).
-    //
-    // Deliberately NOT part of the frozen `IntentParser` protocol, mirroring `resolveCompletion`
-    // above (same rationale, restated here because it's easy to miss on a fresh read): a new
-    // required protocol method would force `HeuristicNLParser` (`Sources/Model/NLParser.swift`,
-    // off-limits to this change) to implement it too, and it has nothing honest to contribute — a
-    // fixed template naming a "dreaded part" or "next action" for a task it never looked at would
-    // be fabrication, the exact thing constitution II forbids. So both talk to the concrete
-    // `fm`/`cloud` instances directly, same as `resolveCompletion` does, rather than going through
-    // `IntentParser` existential dispatch.
-
-    /// "dread" reason: name the SPECIFIC dreaded part of THIS task, propose a <=2-minute physical
-    /// action touching it. `sourceTranscript`/`deadline`/`existingSubtasks` (anh Khôi, 2026-07-29
-    /// "richer context" addendum) are OPTIONAL extra grounding, forwarded to both tiers unchanged —
-    /// omitting them (as every pre-addendum call site did) degrades gracefully to the exact prior
-    /// behavior, never a crash or a validation failure.
-    func stuckDread(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async -> String? {
-        if let fm, let message = await fm.dread(
-            title: title, notes: notes, sourceTranscript: sourceTranscript,
-            deadline: deadline, existingSubtasks: existingSubtasks
-        ) {
-            return message
-        }
-        if let cloud, let cloudGate, await cloudGate.isOptedIn(), await cloudGate.isOnline() {
-            if let message = await cloud.dreadDetailed(
-                title: title, notes: notes, sourceTranscript: sourceTranscript,
-                deadline: deadline, existingSubtasks: existingSubtasks
-            ) {
-                return message
-            }
-        }
-        // Neither tier produced anything usable — unlike `parse`'s title-only floor or
-        // `breakdown`'s old (now-removed) heuristic floor, there is NO honest floor beneath this:
-        // a fabricated "dreaded part" of a task no model actually looked at would be worse than
-        // nothing. `AppState.applyStuckDreadResult` maps `nil` to its own static, pre-written
-        // fallback sentence (the app's own words about itself having nothing to say right now,
-        // never an invented claim about the task) — never silence, never a guess.
-        return nil
-    }
-
-    /// "too_big" reason (anh Khôi, 2026-07-29 REDESIGN — see `NEXT_ACTION_SYSTEM_PREAMBLE`'s doc
-    /// comment server-side, `supabase/functions/_shared/gemini.ts`, for the full "one action, not
-    /// a plan" reasoning): name exactly ONE next physical action, never a multi-step plan — the
-    /// full plan is still reachable via `breakdownWithContext`/`TaskBreakdownView`, just not what
-    /// this reason itself returns anymore. Same OPTIONAL context-forwarding shape as `stuckDread`
-    /// above, and the identical "no fabricated floor" rule: `nil` here means neither tier produced
-    /// a real next action, and the caller (`AppState.applyStuckNextActionResult`) maps that to a
-    /// NEUTRAL "couldn't find one" state — never a static substantive suggestion the way
-    /// `stuckDread`'s fallback is, because a next-action's entire content IS the claim about what
-    /// to physically do, and inventing that claim here would be exactly the fabrication this
-    /// reason's redesign exists to avoid.
-    func stuckNextAction(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async -> String? {
-        if let fm, let message = await fm.nextAction(
-            title: title, notes: notes, sourceTranscript: sourceTranscript,
-            deadline: deadline, existingSubtasks: existingSubtasks
-        ) {
-            return message
-        }
-        if let cloud, let cloudGate, await cloudGate.isOptedIn(), await cloudGate.isOnline() {
-            if let message = await cloud.nextActionDetailed(
-                title: title, notes: notes, sourceTranscript: sourceTranscript,
-                deadline: deadline, existingSubtasks: existingSubtasks
-            ) {
-                return message
-            }
-        }
-        return nil
     }
 
     // MARK: - Cap + floor helpers

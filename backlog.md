@@ -785,6 +785,23 @@
     - Tour chưa cover Settings/menu-bar — chỉ 4 stop trong cửa sổ chính (`TodayView`/`Sidebar`), chưa có bước nào dẫn vào Settings hay menu bar item.
     - Chưa có bản dịch tiếng Việt — toàn bộ copy tour là tiếng Anh (khớp UI hiện tại 100% English), chưa tính đến localize.
     - ✅ **Đối chiếu lại sau khi Agent B xong:** `Sources/Integrations/CalendarAccess.swift` đã landed, API khớp 100% với contract (`Status` 5 case, `status`/`calendarCount`/`lastError`, `requestAccess() async`/`refreshStatus()`/`openSystemSettings()`) — `TourOverlay.swift`/`AppState.swift` compile-by-inspection sạch với type thật, không còn là giả định.
+### 💰 Cắt chi phí Gemini — 3 nút, CHƯA DUYỆT LÀM (khảo sát 2026-08-25)
+
+Bối cảnh: anh Khôi hỏi có nên post-train Qwen (LoRA trên $100 credit Google) để thay Gemini. **Kết luận: KHÔNG.** Self-host L4 spot 24/7 ≈ $216/tháng, tương đương ~120.000 call Gemini/tháng ở mức $0,0018/case — Volar chưa ở gần ngưỡng đó, nên self-host là lỗ ròng. Fine-tune chỉ chính đáng nếu mục tiêu là chạy on-device/offline, không phải để tiết kiệm.
+
+Đo bằng `deno run --allow-env supabase/scripts/probe-time-parsing.ts --dry-run` (0đ), case `parse_transcript`:
+
+| Khối | chars | ~token | cố định? | vị trí |
+|---|---|---|---|---|
+| `systemInstruction` | 4.144 | ~1.184 | có | đầu request |
+| `now`/`transcript`/`timezone` | 166 | ~50 | KHÔNG | đầu contents |
+| `instructions` (date rules) | 8.837 | ~2.524 | **8.235 chars cố định + 602 động** | **CUỐI contents** |
+| tổng | | ~3.761 | ~94% cố định | |
+
+- [ ] **Nút 1 — chuyển khối date-rules cố định (8.235 chars) từ `contents.instructions` lên `systemInstruction`.** Hiện nó nằm SAU `now`/`transcript` động, nên prefix cache của Gemini chỉ với tới `systemInstruction` (31% input); 66% còn lại trả giá đầy mỗi call. Gộp lên đầu thì 94% input thành một khối bất biến → cached token tính 25% giá ⇒ ước ~70% chi phí input, $0,0018 → ~$0,0005/case. Giữ 602 chars đuôi động ("For THIS request, now = ...") ở lại contents. **Hai điều chưa xác minh:** (a) `gemini-3.1-flash-lite` có implicit caching không và ngưỡng token tối thiểu bao nhiêu — phải đọc docs trước khi tin con số 70%; (b) chuyển text từ user turn sang system turn CÓ THỂ đổi hành vi model ⇒ đúng loại thay đổi bắt buộc probe xác nhận, anh Khôi duyệt mới chạy.
+- [ ] **Nút 2 — `FoundationModelParser` (510 dòng, đã có) làm tầng 1, cloud chỉ khi confidence thấp.** Cắt SỐ LƯỢNG call thay vì cắt token/call; không đụng prompt nên không cần probe. Chưa ai đo Apple FM xử được bao nhiêu % câu thường ngày — cần đo trước khi định ngưỡng.
+- [ ] **Nút 3 — batch API cho call nền (`dread`, `next-action`) nếu không cần realtime.** Gemini giảm ~50% cho batch. Chỉ đáng làm sau nút 1.
+
 ## ★ NHÁNH `ios` — Volar for iOS (feature 004, bắt đầu 2026-07-27)
 
 Worktree `C:\projects\voci-ios`, branch `ios`. Plan đầy đủ: `specs/004-ios-port/plan.md`.
@@ -1182,6 +1199,178 @@ gập), 3 task con nổi lên (13pt `textPri` + chấm màu urgency bên trái, 
 - [ ] `design/volar-mac.jsx` (prototype, sửa lần cuối 2026-07-16) vẫn là bản sidebar phẳng cũ,
       count hardcode 12/3. Đang lệch hẳn với code Swift — port ngược hoặc khai tử prototype.
 
+### Bỏ rail thuộc tính ở Today — 2026-08-24 (anh Khôi chụp app thật)
+
+"Phần này để ngay dưới tên task là được, không cần tách sidebar riêng." `heroRail` 240pt bỏ,
+thay bằng `heroMetaRow` — một hàng ngang ngay DƯỚI tên task, trên cả dòng lý do (đọc xong tên
+việc thì thứ cần biết tiếp là hạn với thời lượng). Gộp luôn hai chip cũ (frog, waiting on) vào
+cùng hàng; `nowChips` và `SpotlightChip` xoá vì hết chỗ gọi. `TaskDetailView` GIỮ rail của nó —
+ở đó mọi field sửa được nên một cột riêng có việc thật để làm.
+
+- [ ] Build + nhìn mắt. `HStack` không xuống dòng: task có đủ priority + deadline + start +
+      duration + frog + waiting là 6 mục trên một hàng, cửa sổ hẹp sẽ ép co. Chưa xử lý vì chưa
+      đo thật — nếu chật thì cắt bớt mục hoặc cho xuống dòng.
+
+### Dọn thanh công cụ trên cùng — 2026-08-24, CHƯA BUILD
+
+Anh Khôi: bỏ nút search, giữ nút capture nguyên chỗ, mấy nút khác nhét vào nút Settings.
+`TodayView.toolbar` nay chỉ còn: **+ (capture)** · Sign in (khi chưa đăng nhập) · ⚙.
+`SettingsToolButton` từ `SettingsLink` trần đổi thành `Menu`: "Play/Stop ambient sound",
+"Read my day aloud", divider, "Settings…" (vẫn là `SettingsLink` — API duy nhất mở cửa sổ
+Settings mà không đi vòng qua selector `showSettingsWindow:` đã bị bỏ).
+
+- [ ] Bỏ nốt nút "+" capture khỏi toolbar (anh Khôi 2026-08-24, lượt sau): cùng một việc đã có
+      ba đường khác và đường nào cũng to hơn — nút "Tap to speak" đầu sidebar, hotkey ⌃⌥M từ bất
+      kỳ app nào, và menu bar. Toolbar nay còn Sign in + ⚙.
+- [ ] Chữ tiêu đề "Volar" trên titlebar: `WindowChrome.swift` ĐÃ ẩn sẵn bằng
+      `window.titleVisibility = .hidden`. Chữ anh Khôi thấy là ở ARTIFACT (mockup em vẽ), không
+      phải app thật — đã sửa artifact. Cửa sổ Settings vẫn giữ tiêu đề (scene riêng, không đi qua
+      `WindowChrome`), và nó có ích để phân biệt hai cửa sổ.
+- [ ] **Nút search là nút CHẾT từ lúc dựng** (`ToolButton(icon: .search) {}` — closure rỗng). Đã
+      xoá. Nếu sau này muốn search thật thì `CommandBar.swift` đã có sẵn trong repo, nối vào đó.
+- [ ] Build + nhìn mắt: `.menuStyle(.borderlessButton)` + `.menuIndicator(.hidden)` đặt trong
+      `ToolbarItemGroup` chưa verify — menu trong toolbar macOS đôi khi tự vẽ thêm mũi tên.
+- [ ] `SettingsToolButtonStyle` GIỮ LẠI: `SignInToolPill` vẫn dùng nó. (Suýt xoá nhầm.)
+
+### Sidebar còn 3 mục, Inbox → Archived — 2026-08-24, CHƯA BUILD
+
+Anh Khôi: bỏ task con dưới mỗi section, Today đậm lên, bỏ hẳn Upcoming, Inbox đổi thành Archived.
+`NavSection` nay là `today / archived / completed`. Peek 3 task trong sidebar xoá sạch
+(`PeekEntry`, `SectionPeekRow`, `todayPeek`/`upcomingPeek`/`inboxPeek`/`completedPeek`, trạng thái
+gập, chevron). `SectionHeaderRow` thêm `emphasized` — Today 13.5pt semibold `textPri` kể cả khi
+không được chọn, hai mục kia 12.5pt `textSec`. `AppState`: thêm `archivedTasks`/`archivedNavCount`/
+`archiveTask(_:)`; xoá `upcomingGroups`/`upcomingNavCount`/`inboxTasks`/`inboxNavCount`/
+`startOfTomorrow`.
+
+- [ ] Build + nhìn mắt.
+- [ ] Bổ sung cùng ngày: mỗi section có icon (`.focus` cho Now, `.archive` mới thêm vào
+      `VolarIconName` → SF Symbol `archivebox`, `.check` cho Completed). Nhãn "Today" → **"Now"**
+      ở cả sidebar lẫn tiêu đề section — case enum vẫn tên `.today` (đổi tên case là sửa ~15 chỗ
+      cho đúng một nhãn chữ). Hàng "Now" tiêu màu `accent.solid` + bold 14pt kể cả khi không được
+      chọn; active thì nền `accent.surface` thay vì `surfaceHi`.
+- [ ] **Now cố ý phá luật "một điểm bão hoà trên màn hình"** (`Theme.swift`). Phá có giới hạn: chip
+      NOW ở cột chính dùng `nowAccent` (mint dành riêng cho task đang chạy), hàng sidebar dùng
+      `accent.solid` (accent người dùng chọn được) — hai token khác nhau. Nhìn mắt xem hai thứ có
+      đánh nhau không, nhất là khi user chọn accent mint.
+- [ ] **`.archived` trước lần này CHƯA CÓ ĐƯỜNG NÀO ĐẶT trong app** — nó chỉ tồn tại trong
+      `TaskStatus` và trong test của engine. Nếu không thêm gì thì section Archived vĩnh viễn rỗng,
+      nên em đã thêm **"Archive" vào context menu** của `TaskRow` và của card NOW. Đó là đường duy
+      nhất. Nếu anh Khôi muốn chỗ khác (nút, vuốt, lệnh giọng nói) thì nói.
+- [ ] **Chưa có đường BỎ archive.** Vào Archived rồi thì chỉ còn Delete. Cần "Unarchive" trong
+      context menu của row đã archived — chưa làm vì chưa rõ nó nên quay về đâu (todo? trạng thái cũ
+      không được lưu lại).
+- [ ] Task `.archived` là INELIGIBLE với `VolarCore.nextTask()`, nên archive task đang là NOW thì
+      việc kế tiếp tự lên. Chưa verify bằng mắt.
+- [ ] `Shared/Model/TaskSections.swift` giữ nguyên dù Upcoming/Inbox đã bỏ: nó còn `isClosed` và
+      mấy helper ngày mà chỗ khác dùng, và hai bản Windows/iOS vẫn có Upcoming/Inbox.
+- [ ] `VolarIconName.upcoming`/`.inbox` vẫn còn trong `VolarIcon.swift` — giờ không ai gọi ở bản
+      Mac, nhưng là enum dùng chung ba bản nên không đụng.
+
+### Related thu nhỏ + link + confirm + due vàng — 2026-08-24, CHƯA BUILD
+
+Bốn yêu cầu của anh Khôi trong một lượt:
+1. Related thôi dùng `TaskRow` đầy đủ ("chiếm spotlight của task rồi kìa") → `RelatedTaskRow`
+   mới: một dòng 12.5pt, không chấm ưu tiên, không dòng meta, không số thứ tự.
+2. Tên task là LINK: hover → màu accent + gạch chân. Cố ý không đổi con trỏ chuột —
+   `NSCursor.push/pop` phải khớp cặp mà hàng này biến mất ngay khi task hết chặn, unmount lúc
+   con trỏ đang ở trên là kẹt bàn tay khắp app; `.pointerStyle(.link)` thì đòi macOS 15 (sàn 14).
+3. Ô tick hỏi lại bằng `.confirmationDialog` trước khi `toggleDone` — chống bấm nhầm.
+4. Hạn để vàng (`VolarColor.med`) ở hàng meta Today và ở `RelatedTaskRow`.
+
+- [ ] Build + nhìn mắt.
+- [ ] **Phạm vi "due vàng" mới chỉ ở hai chỗ đó.** Badge `due` trong `TaskRow` (Upcoming / Inbox /
+      Completed) vẫn đi qua `DeadlineUrgency.tint` — đổi màu theo tỉ lệ thời gian còn lại, luật
+      anh Khôi chốt 2026-08-20. Nếu anh muốn vàng ở mọi nơi thì phải bỏ luật đó, hỏi trước.
+- [ ] `.confirmationDialog` chỉ đặt ở Related. Checkbox trong `TaskRow` vẫn tick-là-xong ngay —
+      ở danh sách chính đó là thao tác người dùng chủ động làm, thêm một bước xác nhận vào luồng
+      chính là phạt nhầm người.
+
+### 🔴 CHƯA GIẢI QUYẾT: viền mint dọc bên trái (anh Khôi báo 2026-08-24, ảnh chụp)
+
+Anh Khôi gửi ảnh một đường mint dọc chạy suốt chiều cao ở mép trái cửa sổ, muốn bỏ. Grep hết
+`nowAccent`/`accent.solid` + mọi `frame(width: 1...4)` trong repo: **không còn chỗ nào vẽ nó**.
+Hai ứng viên duy nhất từng vẽ đường mint dọc dài:
+1. Thanh 3px `nowAccent` ở mép trái vỏ card NOW — ĐÃ xoá 2026-08-22 cùng vỏ card. Nếu anh Khôi
+   build trước commit đó thì đây chính là nó, build lại là hết.
+2. Ring accent 1.5px + glow của guided tour (`TourOverlay.swift:138`) vẽ quanh "hole" của stop
+   đang chỉ. Nếu ảnh chụp lúc tour đang chạy thì đó là chủ đích, không phải lỗi.
+Cần anh Khôi xác nhận (ảnh rộng hơn / có đang chạy tour không) trước khi sửa — xoá mò một trong
+hai cái đều có thể xoá nhầm.
+
+### Today thành trang detail kiểu Linear — 2026-08-22, CHƯA BUILD
+
+Anh Khôi chốt hai vòng trong cùng ngày; đây là bản cuối, thay hẳn bản ghi ngay dưới.
+`todayScrollView` nay là `HStack { ScrollView(nội dung, maxWidth 680) ; heroRail 240pt }` — cùng
+bộ xương với `TaskDetailView`. `nowSpotlight` bỏ hết vỏ card (nền `nowSurface`, viền bo 22pt,
+thanh accent 3px, `volarSpotlight`); chip "NOW" là dấu hiệu duy nhất còn lại. Hàng NEXT và ngăn
+Later thay bằng `relatedSection` (Waiting on / Blocking, đọc từ `Condition.taskDone` hai chiều).
+Ngăn Completed rời khỏi Today thành `NavSection.completed` — section thứ tư trong sidebar, có
+peek riêng, có `completedNavCount`. `NextPeekRow`, `CollapsibleTaskSection`, `peekTask`,
+`remainingOpenTasks`, `laterExpanded`, `completedExpanded` xoá vì không còn ai gọi.
+
+- [ ] Build + nhìn mắt trên Mac. Đây là lần sửa lớn nhất trong ngày, viết mù hoàn toàn.
+- [ ] `tasksBlocked(by:)` quét ngược O(số task × số điều kiện) mỗi lần vẽ lại — quan hệ chỉ lưu ở
+      đầu bị chặn, không có danh sách ngược. Rẻ ở quy mô một ngày; dựng chỉ mục nếu list lên hàng
+      nghìn task.
+- [ ] Chưa có gì trong `relatedSection` phân biệt "đang chặn tôi" với "tôi chặn nó" ngoài hai
+      nhãn chữ. Nếu nhìn thật thấy khó phân biệt thì thêm icon hướng (← / →).
+- [ ] `TaskRow` trong `relatedSection` vẫn hiện số thứ tự rank của nó — có thể gây khó hiểu vì
+      mấy task này không thuộc chuỗi rank của Today. Chưa đo bằng mắt nên chưa sửa.
+- [ ] **Tính năng "Stuck?" XOÁ HẲN khỏi client (anh Khôi 2026-08-22: "cái này vô dụng quá").**
+      Đã nhổ: `FocusOverlay` (nút + `StuckReasonPicker` + `stuckCard` + 3 banner), 3 banner ở
+      `TodayView`, toàn bộ khối trong `AppState` (`StuckReason`, `StuckDreadState`,
+      `StuckNextActionState`, 6 property, 15 hàm, `stuckDreadFallbackMessage`),
+      `IntentRouter.stuckDread`/`stuckNextAction`, `CloudParser.dreadDetailed`/`nextActionDetailed`
+      (+ `maxNextActionChars`), `FoundationModelParser.dread`/`nextAction` +
+      `runDreadSession`/`runNextActionSession` + `GeneratedDread`/`GeneratedNextAction` + 2 cap,
+      và cả file `SharedTests/StuckReasonTests.swift`. Grep 35 symbol → 0 tham chiếu còn lại.
+      **Chưa build lần nào** — đây là đợt xoá xuyên 7 file, cần Mac xác nhận.
+- [ ] **Server còn nhánh `mode: "stuck"`** (`supabase/functions/parse/index.ts:511-590`,
+      `_shared/gemini.ts` `DREAD_SYSTEM_PREAMBLE`/`NEXT_ACTION_SYSTEM_PREAMBLE`,
+      `_shared/schema.ts` `MAX_DREAD_MESSAGE_CHARS`/`MAX_NEXT_ACTION_CHARS`). Nay không client
+      nào gọi tới. Cố ý CHƯA đụng: xoá nhánh server là một deploy riêng, mà bản Windows/iOS trong
+      hai worktree kia vẫn còn code Stuck cũ trỏ vào đó. Dọn sau khi hai bản kia cũng bỏ.
+- [ ] **Tính năng DELEGATION xoá khỏi client (anh Khôi 2026-08-22).** Đã nhổ: `DelegationTracker`
+      + `ClaudeCodeConnector` (xoá file), khối orchestrator trong `AppState` (state, timer,
+      `delegateTask`, 3 hàm `resolveDelegation*`, hàng đợi, intent giọng nói "giao cho Claude" +
+      `VoiceDoneAction.delegate`), `DelegationAmbientSection` (`TodayView`), badge "⏳ N"
+      (`MenuBarLabel`), cả tab **Integrations** trong Settings (nó chỉ chứa card Connect Claude
+      Code) + `ClaudeDirBookmark`, route `volar://ai-done` + disambiguation trong `AppLinkHandler`,
+      `TaskStore.clearExternalCondition(withPrefix:)`, ba nhánh `.delegate` trong `PopoverView`.
+      **Chưa build.**
+- [ ] **GIỮ LẠI có chủ đích: `DelegationMeta` + `TaskItem.delegation` + `VolarTask.delegationData`
+      + trường `delegation` trong `SyncPayload`.** Không còn chỗ nào GHI vào chúng, nhưng xoá là
+      migration SwiftData + đổi contract sync, mà Windows/iOS vẫn đọc/ghi field này. Dọn khi cả ba
+      bản cùng bỏ. Đã ghi chú "TÀN DƯ" ngay trên struct trong `Recurrence.swift`.
+- [ ] `volar://capture` GIỮ NGUYÊN — `AppLinkHandler` còn sống với đúng route đó; chỉ `ai-done`
+      biến mất. Bản Windows đang dùng `volar://capture`, không ảnh hưởng.
+- [ ] Hook Stop của Claude Code (nếu anh Khôi đã cài vào `~/.claude`) nay bắn `volar://ai-done`
+      vào chỗ không ai nghe — app log rồi bỏ qua, không lỗi. Gỡ hook thủ công nếu muốn sạch.
+- [ ] Hai worktree `C:\projectsoci-windows` (`window`) và `C:\projectsoci-ios` (`ios`) vẫn
+      còn nguyên tính năng Stuck. Khi merge/port phải nhổ tương tự.
+- [ ] Section Completed dùng `appState.doneTasks` chưa sắp xếp theo thời điểm hoàn thành (không
+      có field đó) — thứ tự hiện là thứ tự trong `tasks`.
+
+### [THAY THẾ bởi mục trên] Card NOW mang hình trang detail + bỏ ngăn Later — 2026-08-22
+
+Anh Khôi: "chỗ Today là để user biết task hiện tại của mình là gì, phải làm gì, và description là
+để họ nhớ lại context" + "show những task khác trong mục Later là không cần thiết".
+`nowSpotlight` từ poster căn giữa → card hai cột như trang detail: trái là tít + lý do + chip
+frog/waiting + MÔ TẢ (chỉ đọc, `lineLimit(8)`) + hai hàng nút; phải là `heroRail` 200pt chỉ đọc
+(ưu tiên / hạn / giờ bắt đầu / thời lượng, hàng nào rỗng thì ẩn). Ngăn "Later" xoá hẳn cùng
+`laterListTasks` + `laterExpanded`. NEXT và Completed giữ.
+
+- [ ] Build + nhìn mắt trên Mac.
+- [ ] **Today không còn chỗ nào duyệt hết việc trong ngày.** Task 3 trở đi chỉ còn thấy qua peek
+      sidebar (tối đa 3) và Upcoming. Anh Khôi đã chốt là không cần; ghi lại vì đây là mất chức
+      năng có thật, không phải sót. Đường lùi rẻ: dựng lại `CollapsibleTaskSection("Later")` gập
+      SẴN thay vì mở sẵn như trước.
+- [ ] Hai hàng nút trong cột trái: chưa đo thật, nếu cửa sổ ở đúng minWidth 920 thì hàng trên
+      (Start focus + Done + Switch) vẫn có thể chật.
+- [ ] `priorityTint`/`priorityName` mới thêm vào `Shared/Views/Components.swift`. Bốn chỗ khác
+      (`TaskRow`, `FocusOverlay`, `TaskDetailView`, `PopoverView`) vẫn giữ bản `private` riêng —
+      cố ý không đụng trong lần này, gom nốt khi có dịp.
+
 ### Task detail thành trang Linear — 2026-08-22, CHƯA BUILD
 
 `TaskDetailView` từ panel 340pt dock cạnh `mainColumn` → TRANG hai cột THAY CHỖ `mainColumn`:
@@ -1378,6 +1567,24 @@ sửa `project.yml`, không cần Xcode. Nhưng vẫn phải build/verify trên 
   sống cả ngày. Viết TypeScript, gọi `volar://`, không đụng code Swift ⇒ không chặn việc Mac.
   Phụ thuộc: I5 (phải có docs URL scheme trước).
 
+- [ ] **[I8] Ảnh → task (OCR) — CHƯA LÀM, CHƯA DUYỆT** (2026-08-26, anh Khôi hỏi trong session).
+  Hiện repo 0 hit `Vision`/`VNRecognizeText`/OCR; Share Extension cố ý chỉ nhận
+  `NSExtensionActivationSupportsText` + 1 web URL, không nhận `public.image`. Nghĩa là chụp màn hình
+  một tin nhắn / tờ lịch rồi bảo Volar tách task thì hiện KHÔNG có đường nào.
+  Nếu duyệt: mở `public.image` trong `ShareExtension/Info.plist` → `VNRecognizeTextRequest` (on-device,
+  miễn phí, không rời máy) → text đổ vào đúng `AppLinkHandler.onCapture` như mọi entry point khác,
+  vẫn qua confirm card. Chi phí thật nằm ở chỗ khác: text OCR ra là cả màn hình chứ không phải một
+  câu, nên trần 2000 ký tự và prompt parse (vốn được dạy cho câu nói) sẽ phải xét lại — **đụng prompt
+  production ⇒ cần probe**. Đừng làm trước khi I0→I7 build xanh trên Mac.
+  **Quyền (đã tra 2026-08-26):** đường "user tự chụp rồi share/kéo ảnh vào" KHÔNG cần thêm quyền TCC
+  nào — Vision OCR chạy on-device, không entitlement, không mạng; ảnh do user chọn nên nằm trong
+  `files.user-selected.read-write` đã có. Đường "Volar tự chụp màn hình" thì CẦN quyền Screen
+  Recording — đắt, đáng ngờ với App Review, và trùng luật đã cấm "screen-time detection". Chỉ làm
+  đường thứ nhất.
+  **Rủi ro riêng của OCR:** text chụp màn hình có thể chứa dữ liệu nhạy cảm ngoài ý user, mà consent
+  cloud parse hiện chỉ nói "TEXT của điều anh nói". Bật `public.image` mà không sửa câu consent là
+  lỗi quyền riêng tư, không phải lỗi UX.
+
 **❌ ĐÃ QUYẾT KHÔNG LÀM** (ghi lại để lần sau khỏi đề xuất lại):
 - **Sync hai chiều với Todoist / Things / Reminders.** Biến Volar thành ô nhập liệu đẹp cho sản phẩm
   của người khác, và nhân đôi mặt sync trong khi engine sync còn giữa chừng (plan 008). Nếu buộc
@@ -1411,3 +1618,27 @@ KHÔNG supersede luật một nguồn sáng, luật cấm đỏ, ramp ấm = ưu
 - [ ] **Settings: Sáng / Tối / Theo hệ thống** (2026-08-17) — mặc định theo hệ thống. Cần anh Khôi xác nhận mặc định.
 - [ ] **`VolarAccent` 4 family** (2026-08-17) — nhân đôi thành 8 giá trị cho 2 mode là việc thừa; đề xuất rút gọn. Chờ anh Khôi quyết.
 - [ ] **Kiểm riêng trên Mac** (2026-08-17) — icon menubar (template image) + `MenuBarLabel` bám appearance thanh menu, không bám app; ảnh App Store phải chụp lại cả 2 mode.
+- [ ] **Chưa build-verify: nút card NOW + mô tả trong Glance** (2026-08-24) — `TodayView.nowSpotlight` thu nút xuống 12pt / đệm 12×6 (cao ~27pt), `GlanceHUD` thêm dòng mô tả (3 dòng ở peek, 5 dòng khi ghim). Viết trên Windows, không Xcode: cần một lượt nhìn trên Mac xem nút còn đủ bấm và thẻ Glance có bị cao quá không.
+- [ ] **Chưa build-verify: Glance đổi sang bấm-mở** (2026-08-24) — bỏ mode peek/hold (`GlanceController` chỉ còn hidden/shown), bỏ dòng NEXT, hạn thành nhãn DUE/OVERDUE, mô tả sáng lên (textSec, 12pt), thêm phím tắt ⌘D đánh dấu xong rồi đóng thẻ. Panel nay LUÔN lấy key focus khi hiện — cần thử trên Mac xem có cướp focus khó chịu lúc đang gõ ở app khác không, và xem ⌘D có đụng phím tắt nào của app đang chạy không.
+- [ ] **Chưa build-verify: option trong Settings thành dòng danh sách** (2026-08-24) — vẫn giữ 7 tab. Chỉ đổi bên trong mỗi tab: `SettingsRow` bỏ nền card + bo góc, thành dòng danh sách có gạch tóc dưới, chạy hết bề ngang (lề 22); VStack của từng tab spacing 0. Tab Account/About vẫn có lề (`Tab.isInset`). Cần nhìn trên Mac: dòng full-bleed có sát mép cửa sổ quá không, và gạch tóc cuối danh sách có thừa không.
+- [ ] **Chưa build-verify: sidebar gọn lại** (2026-08-24) — bỏ `onDeviceFooter`, bỏ `ProSidebarRow` (cả struct lẫn hai sheet Paywall/SignIn kèm nó trong `Sidebar.swift`), `captureButton` + hàng phím ⌃⌥M chuyển xuống đáy sau `Spacer`. Bỏ hàng "Task parsing" và "Cloud parsing status" khỏi Settings. Cần nhìn trên Mac: (1) tour chặng 1 (`.tourAnchor(.capture)`) giờ trỏ xuống đáy cột, xem lỗ khoét còn đúng chỗ không; (2) không còn đường nào vào Paywall từ sidebar — chỉ còn tab Account trong Settings, xem có đủ không; (3) ai đã từ chối cloud parse thì nay không bật lại được từ Settings (consent gate và `setParseEngine` vẫn còn, chỉ mất chỗ chọn) — nếu cần thì thêm lại một đường bật.
+- [ ] **Task board (kanban theo mốc thời gian) — mới có design, chưa có code** (2026-08-24) — anh Khôi đặt 2026-08-24. Design nằm ở artifact Volar Screens, mục 2. Cột theo hạn: Overdue / Today / Tomorrow / This week / Later, KHÔNG có cột trạng thái; kéo thẻ = dời hạn. Để dựng thật cần: thêm case `.board` vào `AppState.selectedSection` (+ mọi chỗ switch trên enum đó), một view kanban mới, và chốt xem kéo-thả có ghi `deadline` thật không (nếu có thì kéo vào "This week"/"Later" phải quy ra ngày cụ thể nào).
+- [x] **Sidebar: nhãn nhóm `Focus` -> `Tasks`** (2026-08-24) — ba hàng dưới nó là Now/Archived/Completed, không liên quan phiên focus.
+- [ ] **Đặt Cloudflare AI Gateway trước Gemini + Groq** (2026-08-29) — đề xuất chưa duyệt. Chỉ đổi
+  base URL trong `_shared/gemini.ts` và `functions/groq/index.ts`, không đổi logic. Được: log +
+  chi phí từng call, rate limit, fallback khi provider lỗi — đúng thứ thiếu hồi vụ đốt 55.000đ
+  ngày 7→9/8. Miễn phí, KHÔNG cần credit hay apply chương trình gì. Rủi ro: thêm một hop mạng vào
+  đường đi của `/parse` và `/groq` (latency + một điểm chết mới) — phải đo trước khi bật cho prod.
+- [x] ~~**Cân nhắc thay Groq Whisper bằng Workers AI Whisper cho `/groq`**~~ (2026-08-29) — ĐÓNG
+  cùng ngày sau khi tra giá: Workers AI Whisper là $0.0005/phút audio, tức 10.000 phút ≈ $5. Bill
+  STT nhỏ đến mức migrate không tiết kiệm gì đáng kể, và cũng không tiêu nổi credit. Ngoài ra
+  `@cf/openai/whisper-large-v3-turbo` chính là model Groq đang chạy nên cũng không có lợi ích chất
+  lượng nào. Tiền thật của Volar nằm ở Gemini `/parse`, không phải STT. Nội dung cũ giữ lại dưới
+  đây để biết vì sao từng cân nhắc:
+  ~~(2026-08-29) — đề xuất
+  chưa duyệt, chỉ khả thi nếu được duyệt credit Cloudflare for Startups (Workers AI có cap riêng
+  theo tier, CHƯA biết cap tier 3 là bao nhiêu — phải hỏi Cloudflare). Đây là cách DUY NHẤT biến
+  credit thành tiền tiết kiệm thật cho Volar, vì credit không trả hộ Gemini/Groq/Supabase.
+  Chưa làm vì: app là voice-first, Groq nhanh bất thường và latency STT chính là UX — phải A/B đo
+  cả latency lẫn độ chính xác tiếng Việt trước, không đổi mù.
+

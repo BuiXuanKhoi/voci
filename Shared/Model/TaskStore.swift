@@ -390,27 +390,13 @@ final class TaskStore {
     /// recomputing the diff a second time (self-review "performance").
     ///
     /// Behavior UNCHANGED from before FIX 1 — now implemented via `clearFirstExternal(on:now:matching:)`
-    /// with an always-true predicate, shared with `clearExternalCondition(withPrefix:on:now:)` below.
+    /// with an always-true predicate.
     @discardableResult
     func clearFirstExternalCondition(on id: UUID, now: Date = Date()) -> [UUID] {
         clearFirstExternal(on: id, now: now, matching: { _ in true })
     }
 
-    /// FIX 1 (security, DelegationTracker.markNeedsReview): like `clearFirstExternalCondition`,
-    /// but only matches the first unsatisfied `.external` condition whose description
-    /// `hasPrefix(prefix)`, instead of blindly taking the first unsatisfied `.external` condition
-    /// on the task regardless of which one it is. Without this, an inbound `volar://ai-done`
-    /// signal could satisfy a HUMAN-tracked external gate (e.g. "waiting on legal") that happens
-    /// to be first in the list, just because it was unsatisfied — this lets the caller (the AI
-    /// delegation tracker) target only the condition it actually owns
-    /// (`DelegationTracker.waitingPrefix`, "waiting on AI: "). A no-op (returns `[]`) for an
-    /// unknown id or a task with no matching unsatisfied condition.
-    @discardableResult
-    func clearExternalCondition(withPrefix prefix: String, on id: UUID, now: Date = Date()) -> [UUID] {
-        clearFirstExternal(on: id, now: now, matching: { $0.hasPrefix(prefix) })
-    }
-
-    /// Shared implementation for `clearFirstExternalCondition`/`clearExternalCondition(withPrefix:)`:
+    /// Shared implementation for `clearFirstExternalCondition`:
     /// finds the first unsatisfied `.external` condition on `id` whose description satisfies
     /// `match`, flips it to satisfied, saves, and returns newly-eligible task ids. A no-op
     /// (returns `[]`, no save) if `id` is unknown or nothing matches.

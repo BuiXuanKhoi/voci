@@ -111,7 +111,7 @@ final class FullScreenTakeoverWindow {
         autoCloseTimer?.invalidate()
         // Same `Timer(timeInterval:repeats:block:)` + `RunLoop.main.add(_:forMode:.common)`
         // construction `ReminderScheduler.startFullScreenEscalationSweep()` uses (which itself
-        // mirrors `AppState.startDelegationTimer()`'s established convention) — the `@Sendable`
+        // mirrors `AppState`'s own timer convention) — the `@Sendable`
         // block hops back onto `@MainActor` before touching `self`.
         let timer = Timer(timeInterval: Self.autoCloseInterval, repeats: false) { @Sendable [weak self] _ in
             _Concurrency.Task { @MainActor [weak self] in
@@ -165,7 +165,7 @@ private struct TakeoverContentView: View {
     /// near-black in light mode, which on a still-dark scrim means invisible text/chrome — hence
     /// these pinned constants instead. `TakeoverContentView` is `private` to this file and used
     /// nowhere else, so there is no shared-component conflict to flag here (unlike
-    /// `FocusOverlay.swift`'s `SwitchBreakdownSuggestionBanner`/stuck banners).
+    /// `FocusOverlay.swift`'s `SwitchBreakdownSuggestionBanner`).
     ///
     /// ponytail: theoretically redundant now that `body` also sets
     /// `.environment(\.colorScheme, .dark)` on the whole subtree below — same reasoning as

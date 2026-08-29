@@ -189,6 +189,12 @@ struct TaskRow: View {
         .contextMenu {
             Button("Break down into steps…") { appState.openBreakdown(for: task) }
             Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
+            // Archive (2026-08-24): đường DUY NHẤT để một task vào section Archived. Không phải
+            // hoàn thành, không phải xoá — "tôi không làm cái này nữa nhưng đừng vứt nó". Ẩn khi
+            // task đã archived rồi, vì chưa có đường bỏ archive (xem backlog).
+            if task.status != .archived {
+                Button("Archive") { appState.archiveTask(task.id) }
+            }
             Divider()
             Button("Delete", role: .destructive) { appState.deleteTask(task.id) }
         }

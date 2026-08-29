@@ -129,6 +129,12 @@ extension ReminderPolicy: Codable {
 
 // MARK: - DelegationMeta
 
+/// TÀN DƯ (2026-08-22): tính năng delegation đã bỏ khỏi app — không còn chỗ nào GHI vào field này
+/// nữa, nên thực tế nó luôn `nil` với dữ liệu mới. Struct và field `TaskItem.delegation` cố ý GIỮ
+/// LẠI: chúng nằm trong schema SwiftData (`VolarTask.delegationData`) và trong `SyncPayload` — xoá
+/// đi là một lần migration store cộng một lần đổi contract sync, mà hai bản Windows/iOS vẫn đang
+/// đọc/ghi field này. Dọn khi cả ba bản cùng bỏ; tới lúc đó nó chỉ tốn một cột JSON luôn rỗng.
+///
 /// Present on a task while delegated-to-AI (US4). Lifecycle owned by the (later) orchestrator
 /// layer — this file only defines the persisted shape.
 struct DelegationMeta: Sendable, Equatable, Codable {

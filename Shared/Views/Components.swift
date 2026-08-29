@@ -29,6 +29,27 @@ func rankReasonLabel(_ reason: RankReason) -> String? {
     }
 }
 
+/// Chấm màu + nhãn của `Priority`. Bốn chỗ trong app đã tự viết lại đúng hai `switch` này
+/// (`TaskRow`, `FocusOverlay`, `TaskDetailView`, `PopoverView`), mỗi chỗ một bản `private` —
+/// `TodayView`'s NOW card là chỗ thứ năm, và nó dừng ở đây. Bốn bản kia cố ý KHÔNG đụng tới trong
+/// lần này: chúng đang chạy đúng, và đổi bốn file để gom một `switch` ba nhánh là mở rộng phạm vi
+/// của một thay đổi UI thành một đợt refactor. Ghi trong backlog để gom nốt khi có dịp.
+func priorityTint(_ priority: Priority) -> Color {
+    switch priority {
+    case .high: return VolarColor.high
+    case .medium: return VolarColor.med
+    case .low: return VolarColor.low
+    }
+}
+
+func priorityName(_ priority: Priority) -> String {
+    switch priority {
+    case .high: return "High"
+    case .medium: return "Medium"
+    case .low: return "Low"
+    }
+}
+
 /// "45m" / "2h" / "3d" — coarse single-unit duration for `rankReasonLabel`'s overdue case only.
 /// Not a general-purpose formatter (no `DateComponentsFormatter` dependency for one call site).
 private func formatShortDuration(_ interval: TimeInterval) -> String {

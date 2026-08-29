@@ -11,29 +11,21 @@
 // so an in-window dim no longer makes sense (and cancel-on-click-outside was deliberately dropped
 // too — the panel brief calls for recording to survive the user clicking elsewhere).
 //
-// STUDIO DARK RETHEME (2026-07, visual layer only): restructured the flat Now/Later/Completed list
-// into the NOW/NEXT/LATER spatial grammar from `volar-redesign/command-deck.html` — one spotlit
-// active task, one dimmed "next" peek, and a collapsed/capped "Later" drawer so the window never
-// reads as a wall of rows (constitution V). Every `@State`/binding/action that existed before this
-// pass is still here, just re-homed: the "Now" section's per-row checkbox/context-menu/tap-to-open
-// live on in `NextPeekRow` (for the dimmed peek) and the reused `TaskRow` (inside the collapsible
-// Later/Completed drawers); the single "active" task additionally gets a bespoke hero treatment
-// (`nowSpotlight`) since `TaskRow`'s compact layout has no room for the hero title/chips/actions the
-// design calls for. `TaskRow`/`Components.swift`/`AppState.swift` are all frozen — nothing outside
-// this file changed.
+// STUDIO DARK RETHEME (2026-07) dựng màn này thành lưới NOW/NEXT/LATER: một task được chiếu sáng,
+// một hàng "next" mờ, một ngăn "Later" gập sẵn.
+//
+// 2026-08-22 (anh Khôi: "làm nó y chang như cái tab detail bên Linear") bỏ hai phần sau của lưới
+// đó. Today nay LÀ trang detail của việc đang phải làm — cùng bộ xương với `TaskDetailView`: nội
+// dung bên trái, rail thuộc tính 240pt bên phải. Hàng NEXT và ngăn "Later" thay bằng
+// `relatedSection` (việc đang chặn / bị chặn bởi việc này); ngăn "Completed" thành một section
+// riêng trong sidebar (`NavSection.completed`). `NextPeekRow` và `CollapsibleTaskSection` xoá theo
+// vì không còn chỗ gọi. Không có gì ngoài file này đổi, trừ `NavSection` (+`completed`) và hai hàm
+// `priorityTint`/`priorityName` mới trong `Components.swift`.
 import SwiftUI
 import VolarCore
 
 struct TodayView: View {
     @Environment(AppState.self) private var appState: AppState
-
-    /// List v2 (design.md §5.7): "Later" starts with its first 5 rows already visible — a fully
-    /// collapsed drawer was part of why the screen read as near-empty. `CollapsibleTaskSection`'s
-    /// own `maxVisibleRows`/scroll cap still governs how many show once expanded; this only flips
-    /// the drawer's OWN default state.
-    @State private var laterExpanded = true
-    /// NEW (retheme): "Completed" drawer, same collapsed-by-default convention as `laterExpanded`.
-    @State private var completedExpanded = false
 
     /// Drives `SignInSheet` (main-window Sign-in entry point fix, 2026-07-28) — Settings ▸ Account
     /// used to be the ONLY place to sign in, which a brand-new user has no reason to ever open, so
@@ -138,19 +130,14 @@ struct TodayView: View {
         .animation(VolarMotion.state, value: appState.tourActive)
         .toolbar {
             ToolbarItemGroup(placement: .primaryAction) {
-                // FIX E: used to only flip a local `@State` flag, never actually starting/stopping
-                // playback — `AppState.toggleAmbientSound()`/`ambientSound.isPlaying` (Phase-2C's
-                // real `AmbientSound.swift`) already exist; this just wires the button to them.
-                ToolButton(icon: appState.ambientSound.isPlaying ? .volume : .volumeOff, tint: appState.ambientSound.isPlaying) {
-                    appState.toggleAmbientSound()
-                }
-                ToolButton(icon: .waveform) {
-                    appState.readDayAloud()
-                }
-                ToolButton(icon: .search) {}
-                ToolButton(icon: .plus, accent: true) {
-                    appState.startCapture()
-                }
+                // 2026-08-24 (anh Khôi): thanh trên cùng dọn sạch, còn đúng Sign in + Settings.
+                //   - search: bỏ hẳn. Nó là `ToolButton(icon: .search) {}` — closure RỖNG từ lúc
+                //     dựng, bấm không làm gì; một nút không phản hồi tệ hơn là không có nút.
+                //   - ambient sound + read-day-aloud: dời vào menu dưới nút Settings, chúng là việc
+                //     thỉnh thoảng mới làm.
+                //   - "+" capture: bỏ nốt. Cùng một việc đã có ba đường khác và đường nào cũng to
+                //     hơn: nút "Tap to speak" chiếm nguyên đầu sidebar, hotkey ⌃⌥M gọi được từ bất
+                //     kỳ app nào, và menu bar. Một nút thứ tư nhỏ xíu trên titlebar không thêm gì.
                 // Sign-in entry point from the main window (fix, 2026-07-28): before this, signing
                 // in was reachable ONLY through Settings ▸ Account, which a first-time user has no
                 // reason to ever open — so cloud speech/parsing and Pro were effectively
@@ -209,7 +196,7 @@ struct TodayView: View {
             // the anchor," and so it stays outside the switch's own brace nesting.
             //
             // Section switch (2026-07-27, port of Windows TodayView.xaml.cs's own "Section switch"
-            // comment): the main column now hosts three sections, not just Today. Upcoming/Inbox
+            // comment): the main column now hosts three sections, not just Today. Archived/Completed
             // reuse the same `TaskRow` every drawer below already uses — no new row view — and get
             // their own plain-text empty state (`sectionEmptyView`), distinct from Today's
             // mic-icon `EmptyTodayCard`.
@@ -221,7 +208,7 @@ struct TodayView: View {
                     } else {
                         todayScrollView
                     }
-                case .upcoming, .inbox:
+                case .archived, .completed:
                     if isSectionEmpty {
                         sectionEmptyView
                     } else {
@@ -236,9 +223,18 @@ struct TodayView: View {
     }
 
     /// Today's NOW/NEXT/Later/Completed stack — unchanged content, just extracted out of
-    /// `mainColumn`'s body so the new Upcoming/Inbox branches (`sectionScrollView`) can sit
+    /// `mainColumn`'s body so the Archived/Completed branches (`sectionScrollView`) can sit
     /// alongside it in the section `switch` above without duplicating this scroll view's shape.
     private var todayScrollView: some View {
+        // 2026-08-22 (anh Khôi: "làm nó y chang như cái tab detail bên Linear"): Today không còn là
+        // một cột danh sách có card NOW ở đầu. Nó LÀ trang của việc đang phải làm. Cái card bo tròn
+        // `nowSurface` biến mất cùng lúc: một trang không tự đóng khung chính nó.
+        //
+        // 2026-08-24 (anh Khôi, ảnh chụp app thật): rail thuộc tính 240pt bên phải cũng bỏ nốt —
+        // "để ngay dưới tên task là được, không cần tách sidebar riêng". Một cột 240pt chỉ để chở
+        // ba dòng ngắn là đổi 1/4 bề ngang cửa sổ lấy thứ vừa đúng một hàng chữ; và nó bắt mắt
+        // nhảy ngang giữa chừng khi đang đọc từ trên xuống. `TaskDetailView` giữ rail của nó —
+        // ở đó mọi field đều SỬA được nên một cột riêng có việc thật để làm.
         ScrollView {
             VStack(alignment: .leading, spacing: appState.density.sectionGap) {
                 nowSpotlight
@@ -265,111 +261,43 @@ struct TodayView: View {
                 // shared with `FocusOverlay`'s own copy of the same banner (both read the exact
                 // same `AppState.switchBreakdownSuggestion`; see `SwitchBreakdownSuggestionBanner`,
                 // `Sources/Views/FocusOverlay.swift`). Same "renders nothing when there's nothing to
-                // show" convention as `DelegationAmbientSection()` right below.
+                // show" convention.
                 if let suggestion = appState.switchBreakdownSuggestion {
                     SwitchBreakdownSuggestionBanner(task: suggestion)
                 }
 
-                // "Stuck?" (anh Khôi, 2026-07-29): the "dread" reason's message/fallback banner,
-                // the "too_big" reason's single next-action banner, and the "cant_start" reason's
-                // 2-minute timer — shared with `FocusOverlay`'s own copies (`StuckDreadBanner`/
-                // `StuckNextActionBanner`/`StuckTimerBanner`, `Sources/Views/FocusOverlay.swift`)
-                // so wording/behavior can never drift between the two places "Stuck?" appears.
-                // None of the three renders anything while idle (same "always safe to include
-                // unconditionally" convention `DelegationAmbientSection()` right below documents
-                // for itself). The `...id == appState.dashboardActiveTask?.id` guards keep each
-                // banner scoped to whichever task the hero card is CURRENTLY showing — Stuck may
-                // have been invoked from `FocusOverlay` on a different task while this view sits
-                // underneath it.
-                if let dreadTask = appState.stuckDreadTask, appState.stuckDreadState != .idle,
-                   dreadTask.id == appState.dashboardActiveTask?.id {
-                    StuckDreadBanner(task: dreadTask)
-                }
-                if let nextActionTask = appState.stuckNextActionTask, appState.stuckNextActionState != .idle,
-                   nextActionTask.id == appState.dashboardActiveTask?.id {
-                    StuckNextActionBanner(task: nextActionTask)
-                }
-                if appState.stuckTimerActive {
-                    StuckTimerBanner()
-                }
 
-                // T043 (phase6-contract.md §C): ambient needs-review / WIP soft-limit /
-                // ai-done disambiguation — renders nothing when there's genuinely nothing
-                // to show (glance-and-dismiss, constitution V), so it's always safe to
-                // include unconditionally here.
-                DelegationAmbientSection()
 
-                if let peek = peekTask {
-                    NextPeekRow(task: peek)
-                }
-
-                if !laterListTasks.isEmpty {
-                    // List v2 (design.md §5.6.1): NOW (`nowSpotlight`) and NEXT (`NextPeekRow`)
-                    // occupy engine-order positions 1 and 2 without a `TaskRow` of their own, so
-                    // this drawer's first row starts numbering at 3.
-                    CollapsibleTaskSection(
-                        title: "Later",
-                        tasks: laterListTasks,
-                        rowGap: appState.density.rowGap,
-                        expanded: $laterExpanded,
-                        startIndex: 3,
-                        alwaysVisibleKind: .hard
-                    )
-                }
-
-                if !appState.doneTasks.isEmpty {
-                    CollapsibleTaskSection(
-                        title: "Completed",
-                        tasks: appState.doneTasks,
-                        rowGap: appState.density.rowGap,
-                        expanded: $completedExpanded
-                    )
-                }
+                // Ngăn "Later" (anh Khôi 2026-08-22: "show những task khác trong mục Later là
+                // không cần thiết") và hàng NEXT đã bỏ. Chỗ của chúng là `relatedSection` — không
+                // phải "vài việc khác trong ngày" mà đúng những việc DÍNH tới việc đang làm: cái gì
+                // đang chặn nó, và nó đang chặn cái gì. Một danh sách để lướt thì kéo mắt ra khỏi
+                // câu trả lời; một danh sách quan hệ thì trả lời tiếp chính câu đó.
+                //
+                // Ngăn "Completed" cũng rời khỏi đây — nay là một section riêng trong sidebar,
+                // ngang hàng Today (`NavSection.completed`).
+                relatedSection
 
                 hotkeyFooter
             }
-            .padding(.horizontal, 22)
+            .frame(maxWidth: 680, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.horizontal, 28)
             .padding(.top, 8)
-            .padding(.bottom, 18)
+            .padding(.bottom, 28)
             .animation(VolarMotion.list, value: appState.tasks)
         }
     }
 
-    /// Upcoming/Inbox body — same `TaskRow` every Today drawer already uses, so a task looks and
-    /// behaves identically wherever it appears (checkbox, hover, context menu, open-detail).
-    /// Upcoming adds a day-header per group (`AppState.upcomingGroups`); Inbox is a flat list —
-    /// nothing to group by, see `TaskSections.swift`'s header comment. Mirrors Windows
-    /// TodayView.xaml's `SectionScrollViewer` (`UpcomingGroupsItemsControl`/`InboxItemsControl`).
+    /// Archived/Completed body — cùng `TaskRow` mà mọi danh sách khác dùng, nên một task trông và
+    /// cư xử y hệt nhau ở mọi chỗ nó xuất hiện. Cả hai đều là danh sách phẳng: một việc đã cất đi
+    /// hoặc đã xong thì không còn hạn lẫn thứ hạng nào để nhóm theo.
     @ViewBuilder
     private var sectionScrollView: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: appState.density.sectionGap) {
-                switch appState.selectedSection {
-                case .upcoming:
-                    ForEach(appState.upcomingGroups) { group in
-                        VStack(alignment: .leading, spacing: 6) {
-                            // List v2 (design.md §5.4): every group-title label in this file is
-                            // 11pt/.semibold/uppercase/tracking+0.5/`textSec` — `textMut` (3.4:1)
-                            // is reserved for tertiary labels now, not section headers.
-                            Text(group.header.uppercased())
-                                .font(Font.volarMono(size: 11, weight: .semibold))
-                                .tracking(0.5)
-                                .foregroundStyle(VolarColor.textSec)
-                            VStack(spacing: appState.density.rowGap) {
-                                ForEach(group.tasks) { task in
-                                    TaskRow(task: task, isActive: false)
-                                }
-                            }
-                        }
-                    }
-                case .inbox:
-                    VStack(spacing: appState.density.rowGap) {
-                        ForEach(appState.inboxTasks) { task in
-                            TaskRow(task: task, isActive: false)
-                        }
-                    }
-                case .today:
-                    EmptyView()
+            VStack(alignment: .leading, spacing: appState.density.rowGap) {
+                ForEach(sectionRows) { task in
+                    TaskRow(task: task, isActive: false)
                 }
             }
             .padding(.horizontal, 22)
@@ -378,7 +306,15 @@ struct TodayView: View {
         }
     }
 
-    /// Upcoming/Inbox empty state — plain centered text, distinct from Today's mic-icon
+    private var sectionRows: [TaskItem] {
+        switch appState.selectedSection {
+        case .archived: return appState.archivedTasks
+        case .completed: return appState.doneTasks
+        case .today: return []
+        }
+    }
+
+    /// Archived/Completed empty state — plain centered text, distinct from Today's mic-icon
     /// `EmptyTodayCard` (neither section has anything to illustrate beyond the copy itself).
     /// Mirrors Windows TodayView.xaml's `SectionEmptyText`.
     private var sectionEmptyView: some View {
@@ -411,29 +347,82 @@ struct TodayView: View {
         }
     }
 
-    // MARK: - NOW / NEXT / LATER derivation (retheme, display-order only — no `AppState` change)
+    // MARK: - Related tasks (anh Khôi 2026-08-22)
+    //
+    // Thay chỗ hàng NEXT và ngăn Later. Đây KHÔNG phải "vài việc khác trong ngày" mà đúng những
+    // việc dính tới việc đang làm, theo chính quan hệ phụ thuộc engine dùng để xếp thứ tự
+    // (`VolarCore.Condition.taskDone`). Hai chiều, và chúng không cùng một chuyện:
+    //
+    //   - "Waiting on" — việc này đang chờ cái gì xong. Đọc thẳng từ `conditions` của nó.
+    //   - "Blocking"   — việc này đang chặn cái gì. Phải quét ngược cả `tasks`, vì quan hệ chỉ
+    //     được lưu ở MỘT đầu: đầu bị chặn. Không có danh sách "tôi đang chặn ai" ở đâu cả.
+    //
+    // Cả hai chiều đều lọc bỏ việc đã xong: một việc `done` không còn chặn ai và cũng không còn
+    // chờ ai, để nó nằm lại chỉ làm mục này dài ra bằng những quan hệ đã hết hiệu lực.
+    //
+    // ponytail: quét ngược là O(số task × số điều kiện) mỗi lần vẽ lại. Với quy mô một ngày làm
+    // việc thì rẻ hơn hẳn một chỉ mục ngược — mà chỉ mục ngược lại là thứ phải tự đồng bộ mỗi lần
+    // ai đó sửa/xoá một điều kiện. Dựng chỉ mục nếu có ngày danh sách task lên tới hàng nghìn.
 
-    /// Every open task except the one currently spotlit as NOW — same membership/order as the old
-    /// flat `nowTasks + laterTasks` list (`appState.openTasks`), just minus whichever task is
-    /// spotlit. Reads `appState.dashboardActiveTask`, NOT the raw engine `activeTask` — after a
-    /// Switch (`nowSpotlight`'s new "Switch" button) the spotlit task is the replacement, not
-    /// whatever the engine would otherwise still rank first, and this list must agree with the
-    /// hero card about which one that is (the switched-away task belongs back in this list, the
-    /// replacement must NOT still show up here too). If nothing is spotlit at all (e.g. everything
-    /// open is gated on an unmet condition), nothing is excluded.
-    private var remainingOpenTasks: [TaskItem] {
-        guard let active = appState.dashboardActiveTask else { return appState.openTasks }
-        return appState.openTasks.filter { $0.id != active.id }
+    private func waitingOnTasks(for task: TaskItem) -> [TaskItem] {
+        task.conditions.compactMap { condition in
+            guard case .taskDone(let id) = condition else { return nil }
+            guard let referenced = appState.tasks.first(where: { $0.id == id }), !referenced.done else { return nil }
+            return referenced
+        }
     }
 
-    /// The single dimmed "NEXT" peek — first of whatever's left after NOW.
-    private var peekTask: TaskItem? { remainingOpenTasks.first }
+    private func tasksBlocked(by task: TaskItem) -> [TaskItem] {
+        appState.tasks.filter { other in
+            guard other.id != task.id, !other.done else { return false }
+            return other.conditions.contains { condition in
+                if case .taskDone(let id) = condition { return id == task.id }
+                return false
+            }
+        }
+    }
 
-    /// Everything else — rendered inside the collapsed/capped "Later" drawer via `TaskRow`, so it
-    /// keeps every row action (checkbox/tap-to-open/context menu) unchanged.
-    private var laterListTasks: [TaskItem] {
-        guard !remainingOpenTasks.isEmpty else { return [] }
-        return Array(remainingOpenTasks.dropFirst())
+    /// Không có quan hệ nào thì mục này biến mất hẳn, không hiện "Nothing related" — đó là trạng
+    /// thái BÌNH THƯỜNG của phần lớn task, và một dòng báo rỗng lặp lại mỗi ngày chỉ là nhiễu.
+    @ViewBuilder
+    private var relatedSection: some View {
+        if let active = appState.dashboardActiveTask {
+            let waitingOn = waitingOnTasks(for: active)
+            let blocking = tasksBlocked(by: active)
+            if !waitingOn.isEmpty || !blocking.isEmpty {
+                // Nhỏ hẳn lại (anh Khôi 2026-08-24: "chiếm spotlight của task rồi kìa"). Trước đây
+                // mục này dùng `TaskRow` đầy đủ — cùng cỡ chữ, cùng chấm ưu tiên, cùng dòng meta
+                // với danh sách chính — nên hai ba việc PHỤ trông ngang hàng với việc đang phải
+                // làm ngay phía trên. Nay là `RelatedTaskRow`: một dòng, chữ nhỏ hơn, không chấm
+                // ưu tiên, không dòng meta.
+                VStack(alignment: .leading, spacing: 8) {
+                    if !waitingOn.isEmpty {
+                        relatedGroup("Waiting on", tasks: waitingOn)
+                    }
+                    if !blocking.isEmpty {
+                        relatedGroup("Blocking", tasks: blocking)
+                    }
+                }
+                .padding(.top, 6)
+            }
+        }
+    }
+
+    /// KHÔNG dùng `TaskRow` (dù nó là hàng chuẩn của Archived/Completed): mấy việc ở đây là
+    /// THAM CHIẾU tới chỗ khác, không phải danh sách chính của màn này, nên chúng phải đọc ra nhẹ
+    /// hơn hẳn việc đang phải làm ở trên. Xem `RelatedTaskRow`.
+    private func relatedGroup(_ label: String, tasks: [TaskItem]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label.uppercased())
+                .font(Font.volarMono(size: 10, weight: .semibold))
+                .tracking(0.6)
+                .foregroundStyle(VolarColor.textMut)
+                .padding(.leading, 2)
+                .padding(.bottom, 2)
+            ForEach(tasks) { task in
+                RelatedTaskRow(task: task)
+            }
+        }
     }
 
     // MARK: - NOW spotlight
@@ -450,216 +439,168 @@ struct TodayView: View {
     @ViewBuilder
     private var nowSpotlight: some View {
         if let active = appState.dashboardActiveTask {
-            VStack(spacing: 16) {
-                // List v2 (design.md §5.3): "NOW" is a small chip, not a colored text label — the
-                // hero's saturation budget is spent on this chip + the 3px leading bar in
-                // `.background` below, never on a text color or a full-row fill.
-                Text("NOW")
-                    .font(Font.volarMono(size: 11, weight: .semibold))
-                    .tracking(1.2)
-                    .foregroundStyle(VolarColor.bg)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 4)
-                    .background(VolarColor.nowAccent)
-                    .clipShape(Capsule())
+            // 2026-08-22 (anh Khôi): "chỗ Today là để user biết task hiện tại của mình là gì, phải
+            // làm gì, và description là để họ nhớ lại context". Card NOW vì thế không còn là một
+            // tấm poster căn giữa gồm tít + mấy chip nữa mà mang đúng hình dạng trang detail: cột
+            // trái đọc từ trên xuống (tít → lý do → mô tả → hành động), rail thuộc tính bên phải.
+            //
+            // Đổi từ căn giữa sang CĂN TRÁI là bắt buộc chứ không phải thẩm mỹ: mô tả nhiều dòng
+            // căn giữa thì mỗi dòng bắt đầu ở một chỗ khác nhau, mắt phải dò lại đầu dòng mỗi lần
+            // xuống hàng — đúng thứ không được phép bắt một người đang cố nhớ lại việc phải làm.
+            VStack(alignment: .leading, spacing: 14) {
+                    // List v2 (design.md §5.3): "NOW" is a small chip, not a colored text label — the
+                    // hero's saturation budget is spent on this chip + the 3px leading bar in
+                    // `.background` below, never on a text color or a full-row fill.
+                    Text("NOW")
+                        .font(Font.volarMono(size: 11, weight: .semibold))
+                        .tracking(1.2)
+                        .foregroundStyle(VolarColor.bg)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(VolarColor.nowAccent)
+                        .clipShape(Capsule())
 
-                Text(active.title)
-                    .font(.system(size: 28, weight: .semibold))
-                    .tracking(-0.7)
-                    .multilineTextAlignment(.center)
-                    .foregroundStyle(VolarColor.textPri)
-                    .shadow(color: VolarColor.nowGlow, radius: 18)
-                    .lineLimit(3)
+                    Text(active.title)
+                        .font(.system(size: 28, weight: .semibold))
+                        .tracking(-0.7)
+                        .foregroundStyle(VolarColor.textPri)
+                        .shadow(color: VolarColor.nowGlow, radius: 18)
+                        .lineLimit(3)
 
-                // List v2 (design.md §5.6.1, coordinator follow-up 2026-08-19): NOW is the ONE
-                // place "why is this first" matters most, and it's bespoke (not `TaskRow`) so it
-                // never got a reason line in the first pass. Reuses `rankReasonLabel` from
-                // `Components.swift` (owned by another agent) rather than a second formatter —
-                // same rule `TaskRow`'s own reason display follows.
-                if let label = rankReasonLabel(volarRankReason(for: active)) {
-                    Text(label)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(VolarColor.textSec)
-                }
+                    // Thuộc tính nằm NGAY DƯỚI tên task (anh Khôi 2026-08-24), trước cả dòng lý do:
+                    // đọc xong tên việc thì thứ cần biết tiếp là hạn với thời lượng, không phải
+                    // vì sao engine xếp nó đầu.
+                    heroMetaRow(for: active)
 
-                nowChips(for: active)
-
-                HStack(spacing: 10) {
-                    if !appState.focusActive {
-                        Button {
-                            appState.startFocus()
-                        } label: {
-                            Text("Start focus")
-                                .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(VolarColor.bg)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09).
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(
-                            LinearGradient(
-                                colors: [VolarColor.nowAccentSoft, VolarColor.nowAccent],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        // Guided tour, stop 3 primary anchor (`Sources/Views/Tour/*`): only ever
-                        // rendered while `!appState.focusActive` (this whole `Button` sits inside
-                        // that guard, immediately above), i.e. only while there's an eligible NOW
-                        // task to focus on — see `TourAnchorID.focusPrimary`'s doc comment for why
-                        // `frogPill`'s "Focus" button below is tagged as this stop's fallback.
-                        .tourAnchor(.focusPrimary)
-                    }
-
-                    Button {
-                        appState.toggleDone(active.id)
-                    } label: {
-                        Text(active.done ? "Mark not done" : "Done")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(VolarColor.textPri)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .background(VolarColor.surfaceHi)
-                    .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6, style: .continuous)
-                            .stroke(VolarColor.borderHi, lineWidth: 0.5)
-                    )
-
-                    // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain here — this Switch
-                    // button, its context-menu twin below, and the `dashboardActiveTask` rewiring
-                    // above have not been compiled, run, or seen on screen. Needs a Mac visual pass
-                    // (see final report's verify checklist) before shipping.
+                    // List v2 (design.md §5.6.1): NOW là chỗ "vì sao việc này đứng đầu" đáng nói
+                    // nhất, và nó không phải `TaskRow` nên lúc đầu không có dòng lý do. Dùng lại
+                    // `rankReasonLabel` (`Components.swift`) chứ không viết formatter thứ hai —
+                    // cùng luật mà `TaskRow` đang theo.
                     //
-                    // Switch ("đổi gió") — equal footing with "Done" right above, not a secondary/
-                    // hidden action (also mirrored in the context menu below, same as "Mark done"
-                    // already is, but this button row is the primary, always-visible home for it).
-                    // Deliberately the SAME neutral styling as "Done" (no accent fill, no icon, no
-                    // red) — this is a completely normal thing to tap, not an admission of anything.
-                    // Disabled (not hidden) when there's nowhere else open to switch to.
-                    if !active.done {
-                        Button {
-                            appState.switchDashboardActiveTask()
-                        } label: {
-                            Text("Switch")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(VolarColor.textPri)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(VolarColor.surfaceHi)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
-                        )
-                        .opacity(appState.canSwitchDashboardActiveTask ? 1 : 0.4)
-                        .disabled(!appState.canSwitchDashboardActiveTask)
-                        .help("Move on to something else — this task isn't done, it just steps out for now.")
+                    // `!showsDueInReasonLine` — luật cũ, chỗ dùng mới. Với task đến hạn hôm nay
+                    // `rankReasonLabel(.dueToday)` trả "due 09:00", mà hàng meta NGAY TRÊN đã có
+                    // mục Deadline 09:00: cùng một sự thật in hai lần cách nhau một dòng. Dòng lý
+                    // do tồn tại để THÊM thông tin, không phải nhắc lại.
+                    if let label = rankReasonLabel(volarRankReason(for: active)),
+                       !showsDueInReasonLine(active) {
+                        Text(label)
+                            .font(.system(size: 12.5))
+                            .foregroundStyle(VolarColor.textSec)
                     }
 
-                    // "Stuck?" (anh Khôi, 2026-07-29) — equal footing with "Done"/"Switch" right
-                    // above, same neutral capsule styling (no accent, no icon, no warning color):
-                    // an entirely ordinary thing to tap. Opens the same three-reason popover
-                    // (`StuckReasonPicker`) `FocusOverlay`'s own "Stuck?" button uses — one shared
-                    // definition, `Sources/Views/FocusOverlay.swift`.
-                    if !active.done {
-                        Button {
-                            appState.openStuckPicker(for: active)
-                        } label: {
-                            Text("Stuck?")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundStyle(VolarColor.textPri)
-                                .padding(.horizontal, 16)
-                                .padding(.vertical, 10)
-                                .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .background(VolarColor.surfaceHi)
-                        .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
-                        )
-                        .popover(isPresented: Binding(
-                            get: { appState.stuckPickerTask?.id == active.id },
-                            set: { presented in if !presented { appState.dismissStuckPicker() } }
-                        )) {
-                            StuckReasonPicker(task: active)
-                        }
-                        .help("Name what kind of stuck this is — different kinds need different fixes.")
+                    // Mô tả — thứ anh Khôi gọi là "để họ nhớ lại context, làm như thế nào".
+                    // CHỈ ĐỌC ở đây: bấm vào card là mở đúng trang detail để sửa, nên dựng thêm một
+                    // ô nhập thứ hai vào card này chỉ tạo ra hai chỗ sửa cùng một field.
+                    // `lineLimit(8)` là cái trần: một mô tả dài không được phép đẩy hàng nút xuống
+                    // khỏi tầm nhìn — phần còn lại đọc tiếp ở trang detail.
+                    if !active.details.isEmpty {
+                        Text(active.details)
+                            .font(.system(size: 13.5))
+                            .lineSpacing(4)
+                            .foregroundStyle(VolarColor.textSec)
+                            .lineLimit(8)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
 
-                    // T042 (phase6-contract.md §C): delegate affordance on the current (NOW) task
-                    // — `AppState.delegateTask` adds the unsatisfied "waiting on AI" condition,
-                    // which is what actually moves it out of this slot (constitution II: a
-                    // delegation is never a completion). Cool `.instrument` tint (not the reserved
-                    // NOW amber) since this is an instrument-class action, not the spotlight itself.
-                    if !active.done {
-                        Button {
-                            appState.delegateTask(active.id)
-                        } label: {
-                            HStack(spacing: 6) {
-                                VolarIcon(.bolt, size: 11, color: VolarColor.instrument, weight: .semibold)
-                                Text("Delegate to Claude")
-                                    .font(.system(size: 13, weight: .medium))
-                                    .foregroundStyle(VolarColor.textPri)
+                    // Một hàng, ba nút — đúng ba việc làm được với CHÍNH task này: bắt đầu, đánh
+                    // dấu xong, đổi sang việc khác. "Delegate to Claude" và cả tính năng "Stuck?"
+                    // đã bỏ hẳn khỏi app (anh Khôi 2026-08-22).
+                    HStack(spacing: 8) {
+                        if !appState.focusActive {
+                            Button {
+                                appState.startFocus()
+                            } label: {
+                                Text("Start focus")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(VolarColor.bg)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09).
+                                    .contentShape(Rectangle())
                             }
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 10)
-                            .contentShape(Rectangle())
+                            .buttonStyle(.plain)
+                            .background(
+                                LinearGradient(
+                                    colors: [VolarColor.nowAccentSoft, VolarColor.nowAccent],
+                                    startPoint: .top,
+                                    endPoint: .bottom
+                                )
+                            )
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            // Guided tour, stop 3 primary anchor (`Sources/Views/Tour/*`): only ever
+                            // rendered while `!appState.focusActive` (this whole `Button` sits inside
+                            // that guard, immediately above), i.e. only while there's an eligible NOW
+                            // task to focus on — see `TourAnchorID.focusPrimary`'s doc comment for why
+                            // `frogPill`'s "Focus" button below is tagged as this stop's fallback.
+                            .tourAnchor(.focusPrimary)
+                        }
+
+                        Button {
+                            appState.toggleDone(active.id)
+                        } label: {
+                            Text(active.done ? "Mark not done" : "Done")
+                                .font(.system(size: 12, weight: .medium))
+                                .foregroundStyle(VolarColor.textPri)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 6)
+                                .contentShape(Rectangle())
                         }
                         .buttonStyle(.plain)
-                        .background(VolarColor.instrumentDim.opacity(0.18))
+                        .background(VolarColor.surfaceHi)
                         .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
                         .overlay(
                             RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
+                                .stroke(VolarColor.borderHi, lineWidth: 0.5)
                         )
+
+                        // UNVERIFIED: authored on Windows, no Swift/Xcode toolchain here — this Switch
+                        // button, its context-menu twin below, and the `dashboardActiveTask` rewiring
+                        // above have not been compiled, run, or seen on screen. Needs a Mac visual pass
+                        // (see final report's verify checklist) before shipping.
+                        //
+                        // Switch ("đổi gió") — equal footing with "Done" right above, not a secondary/
+                        // hidden action (also mirrored in the context menu below, same as "Mark done"
+                        // already is, but this button row is the primary, always-visible home for it).
+                        // Deliberately the SAME neutral styling as "Done" (no accent fill, no icon, no
+                        // red) — this is a completely normal thing to tap, not an admission of anything.
+                        // Disabled (not hidden) when there's nowhere else open to switch to.
+                        if !active.done {
+                            Button {
+                                appState.switchDashboardActiveTask()
+                            } label: {
+                                Text("Switch")
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundStyle(VolarColor.textPri)
+                                    .padding(.horizontal, 12)
+                                    .padding(.vertical, 6)
+                                    .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            .background(VolarColor.surfaceHi)
+                            .clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                                    .stroke(VolarColor.borderHi, lineWidth: 0.5)
+                            )
+                            .opacity(appState.canSwitchDashboardActiveTask ? 1 : 0.4)
+                            .disabled(!appState.canSwitchDashboardActiveTask)
+                            .help("Move on to something else — this task isn't done, it just steps out for now.")
+                        }
                     }
+                    .padding(.top, 4)
                 }
-                .padding(.top, 4)
-            }
-            .padding(.horizontal, 40)
-            .padding(.vertical, 44)
-            // 300 -> 220 (anh Khôi, ảnh 2026-08-20: card rỗng mênh mông cho một task hai dòng).
-            // Vẫn là khối cao nhất màn hình nên NOW không mất vị thế, chỉ bớt khoảng trống chết.
-            .frame(maxWidth: .infinity, minHeight: 220)
-            // Spotlight glow must sit BETWEEN the ink base and the text/chips — applying it here
-            // (innermost, before the opaque `.background(VolarColor.bg)` below) instead of after
-            // is what keeps the warm pool actually visible instead of hidden behind the opaque
-            // card fill. UNVERIFIED: layering reasoned from SwiftUI's `.background`/`.overlay`
-            // stacking order, not rendered on this machine (Windows, no Xcode).
-            .volarSpotlight(isActive: true)
-            // List v2 (design.md §5.3/§3.4): `nowSurface` (accent pha ~8% into `bg`), not a solid
-            // `nowAccent` fill — a large saturated
-            // block would break the "one saturated point on screen" rule the chip above already
-            // spends. The 3px leading bar is the row's ONLY other saturated pixel. Put inside this
-            // same `.background` (not a separate `.overlay`) so it gets clipped to the rounded
-            // corners together with the fill below, instead of squaring off past them.
-            .background(
-                ZStack(alignment: .leading) {
-                    VolarColor.nowSurface
-                    Rectangle().fill(VolarColor.nowAccent).frame(width: 3)
-                }
-            )
-            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(VolarColor.border, lineWidth: 0.5)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-            // Same tap-to-open-detail convention as `TaskRow` — the primary/ghost buttons above
-            // are their own `Button`s and consume their own tap first, same reasoning as
-            // `TaskRow`'s doc comment on why a nested-Button row is safe here.
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.bottom, 6)
+            // Vỏ card đã bỏ (2026-08-22): không còn nền `nowSurface`, không còn viền bo 22pt,
+            // không còn thanh accent 3px lẫn `volarSpotlight`. Cả bốn thứ đó tồn tại để tách MỘT
+            // card ra khỏi danh sách quanh nó — mà nay không còn danh sách nào quanh nó, cả cột này
+            // đã là việc đó rồi. Chip "NOW" ở trên là dấu hiệu duy nhất còn cần.
+            //
+            // Today chỉ ĐỌC mô tả; sửa thì mở trang detail. Tap đặt trên cả khối nội dung vì đó là
+            // đường sửa duy nhất từ màn này — mấy nút bên trong là `Button` riêng nên chúng ăn tap
+            // của mình trước, không rơi xuống đây.
+            .contentShape(Rectangle())
             .onTapGesture { appState.openDetail(active.id) }
             .contextMenu {
                 Button("Break down into steps…") { appState.openBreakdown(for: active) }
@@ -671,7 +612,7 @@ struct TodayView: View {
                     // treatment "Mark done" already gets here.
                     Button("Switch") { appState.switchDashboardActiveTask() }
                         .disabled(!appState.canSwitchDashboardActiveTask)
-                    Button("Delegate to Claude…") { appState.delegateTask(active.id) }
+                    Button("Archive") { appState.archiveTask(active.id) }
                 }
                 Divider()
                 Button("Delete", role: .destructive) { appState.deleteTask(active.id) }
@@ -698,36 +639,78 @@ struct TodayView: View {
     /// Chip row under the NOW title — remaining estimate, deadline, frog marker, dependency note.
     /// All derived from existing `TaskItem` fields (`durationLabel`/`timeBadge`/`frog`/`conditions`)
     /// already used elsewhere (`TaskRow`) — no new data/logic, just a different presentation.
-    private func nowChips(for task: TaskItem) -> some View {
-        // BUG 2026-08-20 (anh Khôi gửi ảnh): đây từng là `ScrollView(.horizontal)`. `ScrollView`
-        // chiếm trọn bề ngang được cấp, và nội dung bên trong nó căn theo cạnh TRÁI — nên trong
-        // một hero card mà mọi thứ khác (chip NOW, tiêu đề, dòng lý do, hàng nút) đều căn giữa,
-        // riêng hàng chip rơi tọt về mép trái, trông như một mảnh lạc chỗ. Nhiều nhất là 4 chip
-        // ngắn trong một card rộng 520pt+ nên chẳng bao giờ cần cuộn: một `HStack` thường là đủ,
-        // và nó tự căn giữa theo `VStack` cha.
-        HStack(spacing: 8) {
-            if let durationLabel = task.durationLabel {
-                SpotlightChip(key: "left", value: durationLabel)
+    /// Thuộc tính của việc đang làm — MỘT HÀNG ngang ngay dưới tên task (anh Khôi 2026-08-24),
+    /// không còn là cột rail riêng. Cùng bộ icon với rail của `TaskDetailView` (cờ hạn chót, lịch,
+    /// play, đồng hồ) nên một task vẫn đọc ra giống nhau ở hai màn, chỉ khác hướng xếp.
+    ///
+    /// Vẫn CHỈ ĐỌC: bấm vào khối nội dung là mở trang detail, nơi mọi field sửa được. Hàng nào
+    /// chưa có giá trị thì biến mất hẳn, không hiện "Add …" — đây là chỗ đọc để nhớ ra việc, không
+    /// phải chỗ điền. `Priority` luôn có giá trị nên hàng này không bao giờ rỗng.
+    ///
+    /// Gộp luôn hai chip cũ (`frog`, `waiting on`) vào cùng hàng thay vì để chúng thành một hàng
+    /// riêng bên dưới: chúng cũng là thuộc tính của đúng task đó, tách ra chỉ tạo hai dải meta
+    /// chồng nhau nói cùng một chuyện.
+    private func heroMetaRow(for task: TaskItem) -> some View {
+        HStack(spacing: 14) {
+            metaItem(.flag, "Priority") {
+                HStack(spacing: 6) {
+                    Circle().fill(priorityTint(task.priority)).frame(width: 6, height: 6)
+                    Text(priorityName(task.priority))
+                }
             }
-            // Chỉ hiện chip "due" khi dòng lý do NGAY TRÊN chưa nói đúng câu đó. Với task đến hạn
-            // hôm nay, `rankReasonLabel(.dueToday)` trả về "due 09:00" — trùng từng ký tự với chip
-            // này, tức là cùng một sự thật in hai lần cách nhau 16pt (thấy rõ trong ảnh anh Khôi
-            // gửi). Cùng lý lẽ mà `rankReasonLabel` đã dùng để trả `nil` cho `.priority`: dòng lý
-            // do tồn tại để THÊM thông tin, không phải để nhắc lại thứ đã nằm trên màn hình.
-            if let timeBadge = task.timeBadge, !showsDueInReasonLine(task) {
-                SpotlightChip(key: "due", value: timeBadge)
+            if let due = task.timeBadge {
+                // Hạn để VÀNG (anh Khôi 2026-08-24) — `VolarColor.med`, token vàng/hổ phách duy
+                // nhất đã có sẵn cặp light/dark. Chỉ đổi ở hàng meta của Today và ở mục Related;
+                // badge `due` trong `TaskRow` (Archived/Completed) vẫn đi qua `DeadlineUrgency.tint`,
+                // tức đổi màu theo tỉ lệ thời gian còn lại — luật anh Khôi chốt 2026-08-20, không
+                // đụng vào trong lần này.
+                metaItem(.today, "Deadline") {
+                    Text(due)
+                        .font(Font.volarMono(size: 12.5))
+                        .foregroundStyle(VolarColor.med)
+                }
+            }
+            if let start = task.startTime {
+                metaItem(.play, "Start time") {
+                    Text(start.formatted(.dateTime.hour().minute())).font(Font.volarMono(size: 12.5))
+                }
+            }
+            if let duration = task.durationLabel {
+                metaItem(.clock, "Duration") { Text(duration).font(Font.volarMono(size: 12.5)) }
             }
             if task.frog {
-                SpotlightChip(value: "Hardest task today", style: .frog)
+                metaItem(.flag, "Hardest task today") {
+                    Text("Hardest today").foregroundStyle(VolarColor.high)
+                }
             }
             if !task.conditions.isEmpty {
-                SpotlightChip(key: "waiting", value: "on other work", style: .dependency)
+                metaItem(.clock, "Waiting on other work") { Text("waiting on other work") }
             }
+            Spacer(minLength: 0)
         }
-        .padding(.horizontal, 2)
+        .font(.system(size: 12.5))
+        .foregroundStyle(VolarColor.textSec)
+        .lineLimit(1)
     }
 
-    /// `true` khi dòng lý do của task này chính là "due …" — xem `nowChips`.
+    /// Một mục trong hàng meta. `label` không vẽ ra chữ nào — nó vào `.help` (tooltip) và vào
+    /// `.accessibilityLabel` của riêng cái ICON, đúng lý lẽ đã ghi ở `TaskDetailView.railRow`:
+    /// gộp cả mục thành một phần tử rồi đặt nhãn "Deadline" sẽ nuốt mất chính giá trị bên cạnh.
+    private func metaItem<Value: View>(
+        _ icon: VolarIconName,
+        _ label: String,
+        @ViewBuilder value: () -> Value
+    ) -> some View {
+        HStack(spacing: 6) {
+            VolarIcon(icon, size: 11, color: VolarColor.textMut)
+                .accessibilityLabel(label)
+            value()
+        }
+        .help(label)
+    }
+
+    /// `true` khi dòng lý do của task này chính là "due …", tức là nó chỉ nhắc lại hàng Deadline
+    /// mà hàng meta đã hiện — xem chỗ dùng trong `nowSpotlight`.
     private func showsDueInReasonLine(_ task: TaskItem) -> Bool {
         if case .dueToday = volarRankReason(for: task) { return true }
         return false
@@ -744,7 +727,7 @@ struct TodayView: View {
                     .font(.system(size: 26, weight: .medium))
                     .tracking(-0.52)
                     .foregroundStyle(VolarColor.textPri)
-                // Today keeps its own date + open/done counters; Upcoming/Inbox have no
+                // Today keeps its own date + open/done counters; Archived/Completed have no
                 // "date · N open · N done" shape to fill, so they show `sectionSubtitleText`
                 // instead (mirrors Windows `TodaySubtitleRow`/`SectionSubtitleText`'s mutually
                 // exclusive visibility in TodayView.xaml.cs's `UpdateVisual`).
@@ -788,15 +771,17 @@ struct TodayView: View {
         }
     }
 
-    // MARK: - Section switch (2026-07-27): Today/Upcoming/Inbox — port of Windows
+    // MARK: - Section switch: Today / Archived / Completed — port of Windows
     // TodayViewModel.SectionTitle/SectionSubtitle/SectionEmptyText/IsSectionEmpty
     // (ViewModels/TodayViewModel.cs:364-396). Copy is byte-for-byte identical to that source.
 
     private var sectionTitle: String {
         switch appState.selectedSection {
-        case .today: return "Today"
-        case .upcoming: return "Upcoming"
-        case .inbox: return "Inbox"
+        // "Now" chứ không "Today" (anh Khôi 2026-08-24) — màn này trả lời "việc phải làm NGAY BÂY
+        // GIỜ là gì", không phải "hôm nay có những gì". Case enum vẫn tên `.today`.
+        case .today: return "Now"
+        case .archived: return "Archived"
+        case .completed: return "Completed"
         }
     }
 
@@ -804,30 +789,30 @@ struct TodayView: View {
         switch appState.selectedSection {
         case .today:
             return nil
-        case .upcoming:
-            return appState.upcomingNavCount == 0
-                ? "Nothing scheduled after today"
-                : "\(appState.upcomingNavCount) scheduled after today"
-        case .inbox:
-            return appState.inboxNavCount == 0
-                ? "Nothing waiting to be sorted"
-                : "\(appState.inboxNavCount) with no date yet"
+        case .archived:
+            return appState.archivedNavCount == 0
+                ? "Nothing archived"
+                : "\(appState.archivedNavCount) archived"
+        case .completed:
+            return appState.completedNavCount == 0
+                ? "Nothing finished yet today"
+                : "\(appState.completedNavCount) done"
         }
     }
 
     private var sectionEmptyText: String {
         switch appState.selectedSection {
-        case .upcoming:
-            return "Nothing scheduled after today. Say a task with a date and it lands here."
+        case .archived:
+            return "Nothing archived. Cất một việc đi khi anh không làm nó nữa nhưng chưa muốn xoá."
         default:
-            return "Inbox is empty. Anything you capture without a date waits here."
+            return "Nothing finished yet. Tick something off and it moves here."
         }
     }
 
     private var isSectionEmpty: Bool {
         switch appState.selectedSection {
-        case .upcoming: return appState.upcomingGroups.isEmpty
-        case .inbox: return appState.inboxTasks.isEmpty
+        case .archived: return appState.archivedTasks.isEmpty
+        case .completed: return appState.doneTasks.isEmpty
         case .today: return false
         }
     }
@@ -1005,25 +990,43 @@ struct TodayView: View {
 /// toolchain to render it) — if it silently ignores `.buttonStyle(_:)` at runtime, the gear would
 /// still open Settings correctly, just without the hover/press affordance matching its siblings.
 private struct SettingsToolButton: View {
+    @Environment(AppState.self) private var appState: AppState
     @State private var isHovering = false
 
     var body: some View {
-        SettingsLink {
+        Menu {
+            // Hai việc dời từ thanh công cụ vào đây (anh Khôi 2026-08-24). Chúng là HÀNH ĐỘNG chứ
+            // không phải cấu hình, nên nằm trong menu này chứ không nằm trong màn Settings — bấm
+            // "đọc to ngày hôm nay" trong một trang cấu hình là sai chỗ.
+            Button(appState.ambientSound.isPlaying ? "Stop ambient sound" : "Play ambient sound") {
+                appState.toggleAmbientSound()
+            }
+            Button("Read my day aloud") {
+                appState.readDayAloud()
+            }
+            Divider()
+            // `SettingsLink` chứ không phải `Button` gọi tay: nó là API duy nhất mở được cửa sổ
+            // Settings của SwiftUI mà không đi vòng qua selector `showSettingsWindow:` đã bị bỏ.
+            SettingsLink { Text("Settings…") }
+        } label: {
             VolarIcon(.settings, size: 14, color: VolarColor.textSec, weight: .regular)
                 .frame(width: 28, height: 28)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(SettingsToolButtonStyle())
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
         .background(isHovering ? VolarColor.veil(0.06) : .clear)
         .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
         .onHover { isHovering = $0 }
         .animation(VolarMotion.hover, value: isHovering)
-        .accessibilityLabel("Settings")
+        .accessibilityLabel("Settings and more")
     }
 }
 
-/// Local re-declaration of `Components.swift`'s private `ToolButtonStyle` — see
-/// `SettingsToolButton`'s doc comment for why it isn't reused directly.
+/// Press-scale dùng chung cho `SignInToolPill` (và trước đây cho `SettingsToolButton`, nay đã đổi
+/// sang `Menu` nên không cần `ButtonStyle` nữa). Bản khai lại tại chỗ của `ToolButtonStyle` trong
+/// `Components.swift` — xem chú thích ở `SettingsToolButton` cho lý do không dùng thẳng bản đó.
 private struct SettingsToolButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -1118,164 +1121,93 @@ private struct EmptyTodayCard: View {
     }
 }
 
-/// NEW (retheme): a single small chip for the NOW spotlight's chip row (remaining estimate,
-/// deadline, frog marker, dependency note). Private to `TodayView` — visual-only, carries no
-/// binding/action of its own (the spotlight card around it owns tap/context-menu).
-private struct SpotlightChip: View {
-    enum Style { case plain, frog, dependency }
-
-    var key: String? = nil
-    let value: String
-    var style: Style = .plain
-
-    var body: some View {
-        HStack(spacing: 5) {
-            if let key {
-                Text(key)
-                    .font(Font.volarMono(size: 10.5))
-                    .foregroundStyle(keyColor)
-            }
-            Text(value)
-                .font(.system(size: 12.5))
-                .foregroundStyle(valueColor)
-        }
-        .padding(.horizontal, 11)
-        .padding(.vertical, 6)
-        .background(VolarColor.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 5, style: .continuous)
-                .stroke(
-                    borderColor,
-                    style: style == .dependency ? StrokeStyle(lineWidth: 0.5, dash: [3, 2]) : StrokeStyle(lineWidth: 0.5)
-                )
-        )
-    }
-
-    private var keyColor: Color {
-        switch style {
-        case .plain: return VolarColor.textMut
-        case .frog: return VolarColor.nowAccentSoft
-        case .dependency: return VolarColor.instrument
-        }
-    }
-
-    private var valueColor: Color {
-        switch style {
-        case .plain: return VolarColor.textSec
-        case .frog: return VolarColor.nowAccentSoft
-        case .dependency: return VolarColor.textMut
-        }
-    }
-
-    private var borderColor: Color {
-        switch style {
-        case .plain: return VolarColor.borderHi
-        case .frog: return VolarColor.nowRing
-        case .dependency: return VolarColor.instrumentDim
-        }
-    }
-}
-
-/// NEW (retheme): the single dimmed "NEXT" peek — everything except NOW is calm/collapsed, and this
-/// is the one deliberate exception (a glance at what's coming, not a full row). Bespoke layout (not
-/// `TaskRow`) to match `command-deck.html`'s peek treatment, but every action `TaskRow` offers is
-/// preserved here via the same `appState` calls: checkbox -> `toggleDone`, tap -> `openDetail`,
-/// context menu -> breakdown/toggle/delete, identical to `TaskRow`'s own context menu.
-private struct NextPeekRow: View {
+/// Một dòng trong mục Related — nhẹ hơn hẳn `TaskRow`, và cư xử khác nó ở hai chỗ có chủ đích
+/// (anh Khôi 2026-08-24):
+///
+/// 1. **Tên task là LINK, không phải chữ thường.** Mấy việc ở đây là tham chiếu tới chỗ khác, nên
+///    chúng phải TRÔNG như bấm được: chữ đổi sang màu accent + gạch chân khi rê chuột. `TaskRow`
+///    cũng mở detail khi bấm, nhưng nó không có tín hiệu nào cho biết điều đó — chấp nhận được với
+///    một danh sách (ở đó bấm dòng là chuyện hiển nhiên), không chấp nhận được với một tham chiếu
+///    lọt giữa một trang chữ.
+///
+///    Cố ý KHÔNG đổi con trỏ chuột: `NSCursor.pointingHand.push()/pop()` phải khớp cặp, mà hàng
+///    này biến mất ngay khi task hết chặn — unmount lúc con trỏ còn đang ở trên nó là kẹt con trỏ
+///    hình bàn tay khắp app. `.pointerStyle(.link)` thì đòi macOS 15, sàn của bản này là 14.
+///
+/// 2. **Ô tick hỏi lại trước khi đánh dấu xong.** Đây không phải việc đang làm; người dùng tới đây
+///    để ĐỌC xem cái gì đang chặn cái gì, nên một cú bấm trượt sang ô tick sẽ đánh dấu xong một
+///    việc họ còn chẳng nghĩ tới. Ở danh sách chính thì tick-là-xong đúng (đó là thao tác họ chủ
+///    động làm); ở đây thì không. Dùng `.confirmationDialog` chứ không tự dựng popup — cùng lý lẽ
+///    "đừng viết lại thứ hệ thống đã có" mà `DateBufferControl` đã theo.
+private struct RelatedTaskRow: View {
     let task: TaskItem
 
     @Environment(AppState.self) private var appState: AppState
+    @State private var isHovering = false
+    @State private var isHoveringTitle = false
+    @State private var confirmingDone = false
 
-    /// `true` khi dòng lý do sẽ chỉ nhắc lại cái hạn mà cột phải đã hiện — xem `body`.
-    private var reasonRepeatsTrailing: Bool {
-        guard task.durationLabel == nil, task.timeBadge != nil else { return false }
-        if case .dueToday = volarRankReason(for: task) { return true }
-        return false
-    }
+    private var accentColors: Accent { appState.accent.accent }
 
     var body: some View {
-        HStack(spacing: 14) {
-            checkbox
+        HStack(spacing: 9) {
+            Button { confirmingDone = true } label: {
+                Circle()
+                    .strokeBorder(VolarColor.textMut, lineWidth: 1.2)
+                    .frame(width: 14, height: 14)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("Mark done — hỏi lại trước khi ghi")
+            .confirmationDialog(
+                "Mark \u{201C}\(task.title)\u{201D} as done?",
+                isPresented: $confirmingDone,
+                titleVisibility: .visible
+            ) {
+                Button("Mark done") { appState.toggleDone(task.id) }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Việc này không phải việc đang làm — Volar hỏi lại để một cú bấm trượt không đánh dấu nhầm.")
+            }
 
-            VStack(alignment: .leading, spacing: 3) {
-                // List v2 (design.md §5.4): same header spec as `CollapsibleTaskSection`'s own
-                // title label — 11pt/.semibold/uppercase/tracking+0.5/`textSec`.
-                Text("NEXT")
-                    .font(Font.volarMono(size: 11, weight: .semibold))
-                    .tracking(0.5)
-                    .foregroundStyle(VolarColor.textSec)
+            Button { appState.openDetail(task.id) } label: {
                 Text(task.title)
-                    .font(.system(size: 14.5))
-                    .foregroundStyle(task.done ? VolarColor.textMut : VolarColor.textSec)
-                    .strikethrough(task.done, pattern: .solid, color: VolarColor.veil(0.25))
+                    .font(.system(size: 12.5))
+                    .foregroundStyle(isHoveringTitle ? accentColors.solid : VolarColor.textSec)
+                    .underline(isHoveringTitle, color: accentColors.solid)
                     .lineLimit(1)
                     .truncationMode(.tail)
-                // List v2 (design.md §5.6.1, coordinator follow-up 2026-08-19): NEXT is the
-                // other bespoke (non-`TaskRow`) row, same reasoning as `nowSpotlight`'s reason
-                // line above — reuses `rankReasonLabel`, no second formatter.
-                // BUG 2026-08-20 (anh Khôi gửi ảnh): row NEXT hiện "due 09:00" dưới tiêu đề và
-                // "09:00" ở cột phải — cùng một cái hạn, hai chỗ, cách nhau một dòng. Cột phải chỉ
-                // hiện hạn khi task KHÔNG có ước lượng thời lượng (`durationLabel ?? timeBadge`),
-                // nên điều kiện phải kiểm đúng chuyện đó, không phải cứ thấy `.dueToday` là bỏ:
-                // task có "45 min" ở cột phải thì dòng "due 09:00" vẫn là nơi duy nhất nói ra hạn.
-                if !task.done, !reasonRepeatsTrailing, let label = rankReasonLabel(volarRankReason(for: task)) {
-                    Text(label)
-                        .font(.system(size: 11.5))
-                        .foregroundStyle(VolarColor.textSec)
-                        .lineLimit(1)
-                }
+                    .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
+            .onHover { isHoveringTitle = $0 }
+            .help("Mở task này")
 
             Spacer(minLength: 8)
 
-            if let meta = task.durationLabel ?? task.timeBadge {
-                Text(meta)
-                    .font(Font.volarMono(size: 11.5))
-                    .foregroundStyle(VolarColor.textMut)
+            if let due = task.timeBadge {
+                Text(due)
+                    .font(Font.volarMono(size: 11))
+                    .monospacedDigit()
+                    // Vàng (anh Khôi 2026-08-24). `VolarColor.med` là token vàng/hổ phách duy nhất
+                    // đã có sẵn cặp light/dark trong `Theme.swift` — không đẻ thêm hex mới cho một
+                    // chỗ dùng. Cố ý KHÔNG đi qua `DeadlineUrgency.tint`: mấy việc ở đây không phải
+                    // việc đang làm, nên một cái hạn đỏ rực ở mục phụ là đúng thứ kéo mắt sai chỗ.
+                    .foregroundStyle(VolarColor.med)
+                    .layoutPriority(1)
             }
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 15)
-        .background(VolarColor.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(VolarColor.border, lineWidth: 0.5)
-        )
-        .opacity(0.62)
-        .contentShape(Rectangle())
-        .onTapGesture { appState.openDetail(task.id) }
-        .contextMenu {
-            Button("Break down into steps…") { appState.openBreakdown(for: task) }
-            Button(task.done ? "Mark not done" : "Mark done") { appState.toggleDone(task.id) }
-            Divider()
-            Button("Delete", role: .destructive) { appState.deleteTask(task.id) }
-        }
-    }
-
-    private var checkbox: some View {
-        Button {
-            appState.toggleDone(task.id)
-        } label: {
-            Circle()
-                .strokeBorder(task.done ? VolarColor.textSec : VolarColor.veil(0.28), lineWidth: 1.5)
-                .background(Circle().fill(task.done ? VolarColor.textSec : .clear))
-                .frame(width: 15, height: 15)
-                .overlay {
-                    if task.done {
-                        VolarIcon(.check, size: 9, color: VolarColor.bg, weight: .bold)
-                    }
-                }
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .background(isHovering ? VolarColor.cardHover : .clear)
+        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
+        .onHover { isHovering = $0 }
+        .animation(VolarMotion.hover, value: isHovering)
     }
 }
 
 /// List v2 (design.md §5.6.1/§6): the row-list "why does this rank here" reason — shared by
-/// `nowSpotlight`, `NextPeekRow`, and every `CollapsibleTaskSection` call site below, since NOW/
-/// NEXT/Later are the three places a reason line is asked for. Reuses `TaskItem.snapshot()` — the
+/// `nowSpotlight` và `TaskRow`. Reuses `TaskItem.snapshot()` — the
 /// exact `TaskItem` -> `VolarCore.Task` mapping `AppState.eligibleOrder`
 /// (`Shared/App/AppState.swift`) already uses — instead of a second hand-rolled mapping; that
 /// duplication is exactly the mistake `AppState.eligibleOrder`'s own doc comment says the codebase
@@ -1283,7 +1215,7 @@ private struct NextPeekRow: View {
 ///
 /// `now: Date()` read fresh on every call (coordinator follow-up 2026-08-19: checked for a shared
 /// clock first) — `AppState.clock` exists but is `private`, this file has no other view-level
-/// "now", and every caller here (`nowSpotlight`, `NextPeekRow` peek, the first 3 Later rows) is a
+/// "now", and every caller here is a
 /// small, infrequently-recomputed set, not a hot loop — so a fresh `Date()` per call is the
 /// simplest correct option, same as `AppState.eligibleOrder`'s own callers each pass their own
 /// `now`. Revisit only if `AppState` ever exposes a public `now`/tick for views generally.
@@ -1291,345 +1223,11 @@ private func volarRankReason(for task: TaskItem) -> RankReason {
     VolarCore.rankReason(for: task.snapshot(), now: Date(), calendar: .current)
 }
 
-/// NEW (retheme): the collapsed-by-default, capped "Later"/"Completed" drawer — deliberately
-/// toggled open rather than always rendering every row, so a long list never becomes the "30-row
-/// wall" the constitution rules out. Every row inside is a real `TaskRow`, so nothing about
-/// checkbox/tap-to-open/context-menu/breakdown changes — this only wraps that same `ForEach` in a
-/// collapsible, height-capped container. `tasks`/`rowGap` are passed in rather than reached for via
-/// `AppState` directly so this one struct serves both the Later and Completed call sites.
-private struct CollapsibleTaskSection: View {
-    let title: String
-    let tasks: [TaskItem]
-    let rowGap: CGFloat
-    @Binding var expanded: Bool
-    /// List v2 (design.md §5.6.1): 1-based engine-order index of `tasks[0]`. `nil` (default) for
-    /// drawers whose tasks aren't part of the ranked open-task sequence — the Completed call site
-    /// never passes this, since done tasks have no rank/number.
-    var startIndex: Int? = nil
-    /// specs/010-calendar-and-hard-deadlines/design.md §3.2 row 3: a `.hard` deadline must never
-    /// end up in the collapsed/hidden part of a drawer — a real, penalty-backed deadline hidden
-    /// by the app is exactly the failure mode this whole feature exists to stop (design.md §3.0:
-    /// "một hạn có chế tài mà bị app giấu đi"). `nil` (default, the Completed call site) leaves
-    /// every row inside the normal collapse/scroll behavior, unchanged — the "Later" call site
-    /// below passes `.hard` so those rows render above the fold whether `expanded` is on or off.
-    var alwaysVisibleKind: DeadlineKind? = nil
-
-    /// `tasks`, paired with each element's TRUE position in `tasks` (not the filtered subset's
-    /// local index) — both `pinnedRows`/`collapsibleRows` below read `offset` off of this so a
-    /// row's rank number (`startIndex + offset`) never shifts just because pinning moved it out
-    /// of the scrollable half.
-    private var indexedTasks: [IndexedTask] {
-        tasks.enumerated().map { IndexedTask(offset: $0.offset, task: $0.element) }
-    }
-
-    /// Struct chứ không phải tuple `(offset:task:)`: hai `ForEach` bên dưới cần định danh từng
-    /// row, mà Swift KHÔNG cho key path trỏ vào phần tử tuple — `ForEach(pinnedRows, id: \.task.id)`
-    /// là lỗi compile, không phải chuyện chạy sai. `Identifiable` để `ForEach(rows)` khỏi cần `id:`.
-    private struct IndexedTask: Identifiable {
-        let offset: Int
-        let task: TaskItem
-        var id: UUID { task.id }
-    }
-
-    /// design.md §3.1 — `deadlineKind` is meaningless without a `deadline` (same guard
-    /// `SweepView.SweepRow.isHardDeadline` applies): a `.hard`-tagged task whose deadline has
-    /// since been cleared has no outside date left to protect, so it must NOT be pinned above the
-    /// fold forever. One predicate for both halves so pinned + collapsible always partition
-    /// `indexedTasks` exactly — no row can go missing or render twice.
-    private func isPinned(_ task: TaskItem) -> Bool {
-        guard let alwaysVisibleKind else { return false }
-        return task.deadline != nil && task.deadlineKind == alwaysVisibleKind
-    }
-
-    /// Always rendered, regardless of `expanded` — see `alwaysVisibleKind`'s doc comment.
-    private var pinnedRows: [IndexedTask] {
-        indexedTasks.filter { isPinned($0.task) }
-    }
-
-    /// Everything NOT pinned — these are the only rows subject to `expanded`/the scroll cap.
-    private var collapsibleRows: [IndexedTask] {
-        indexedTasks.filter { !isPinned($0.task) }
-    }
-
-    /// Roughly how many rows are visible before the drawer's own internal scroll takes over —
-    /// "ranked, capped list — never a wall" without actually dropping any task from the data
-    /// source (it's still reachable by scrolling once expanded). UNVERIFIED: `approxRowHeight` is
-    /// an estimate of `TaskRow`'s rendered height (not measured — no Xcode on this machine); worst
-    /// case a couple more/fewer rows are visible before scrolling than intended, which is a purely
-    /// cosmetic drift, not a functional one.
-    private let maxVisibleRows: CGFloat = 6
-    private let approxRowHeight: CGFloat = 56
-
-    /// Shared by both the always-visible pinned rows and the collapsible scroll region below, so
-    /// the two never drift in how they build a `TaskRow` from an (offset, task) pair.
-    @ViewBuilder
-    private func row(_ offset: Int, _ task: TaskItem) -> some View {
-        // List v2 (design.md §5.6.1/§5.6.2, coordinator follow-up 2026-08-19): `rowIndex` is this
-        // row's 1-based engine-order position (nil when `startIndex` is nil, e.g. Completed, which
-        // never shows a reason). NOW (1) and NEXT (2) already show their own reason line via
-        // bespoke views above (`nowSpotlight`/`NextPeekRow`), not `TaskRow` — so for the "Later"
-        // call site (`startIndex: 3`), the reason cutoff is 5, i.e. the first 3 rows OF THIS
-        // DRAWER (global index 3, 4, 5). Below that it's noise, per design.md's "chỉ 3 row đầu".
-        let rowIndex = startIndex.map { $0 + offset }
-        TaskRow(
-            task: task,
-            isActive: false,
-            index: rowIndex,
-            reason: (rowIndex ?? .max) <= 5 ? volarRankReason(for: task) : nil
-        )
-        .transition(rowTransition)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            header
-
-            // Pinned rows (`.hard` deadlines, when `alwaysVisibleKind` is set) render OUTSIDE the
-            // `expanded` gate below — see `alwaysVisibleKind`'s doc comment.
-            if !pinnedRows.isEmpty {
-                VStack(spacing: rowGap) {
-                    ForEach(pinnedRows) { row($0.offset, $0.task) }
-                }
-                .padding(.horizontal, 14)
-                .padding(.top, 4)
-                .padding(.bottom, collapsibleRows.isEmpty ? 14 : 0)
-            }
-
-            if expanded && !collapsibleRows.isEmpty {
-                ScrollView {
-                    VStack(spacing: rowGap) {
-                        ForEach(collapsibleRows) { row($0.offset, $0.task) }
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.top, pinnedRows.isEmpty ? 4 : 0)
-                    .padding(.bottom, 14)
-                }
-                .frame(maxHeight: min(CGFloat(collapsibleRows.count), maxVisibleRows) * (approxRowHeight + rowGap))
-            }
-        }
-        .background(VolarColor.surface)
-        .clipShape(RoundedRectangle(cornerRadius: 15, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 15, style: .continuous)
-                .stroke(VolarColor.border, lineWidth: 0.5)
-        )
-    }
-
-    /// Same insert/remove transition the old flat list used for every `TaskRow` — new rows drop in
-    /// from just above, removed rows fade out and settle slightly smaller. Local to this struct
-    /// (rather than shared from `TodayView`) since this is the only place a `TaskRow` `ForEach`
-    /// still lives after the retheme.
-    private var rowTransition: AnyTransition {
-        .asymmetric(
-            insertion: .opacity.combined(with: .offset(y: -6)),
-            removal: .opacity.combined(with: .scale(scale: 0.97))
-        )
-    }
-
-    private var header: some View {
-        HStack(spacing: 10) {
-            // List v2 (design.md §5.4): 11pt/.semibold/uppercase/tracking+0.5/`textSec`.
-            Text(title.uppercased())
-                .font(Font.volarMono(size: 11, weight: .semibold))
-                .tracking(0.5)
-                .foregroundStyle(VolarColor.textSec)
-            Text("\(tasks.count)")
-                .font(Font.volarMono(size: 11))
-                .foregroundStyle(VolarColor.textMut)
-            Spacer()
-            Button {
-                withAnimation(VolarMotion.hover) { expanded.toggle() }
-            } label: {
-                Text(expanded ? "Hide" : "Show")
-                    .font(Font.volarMono(size: 11, weight: .medium))
-                    .foregroundStyle(VolarColor.textSec)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 5)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .background(VolarColor.surfaceHi)
-            .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                    .stroke(VolarColor.borderHi, lineWidth: 0.5)
-            )
-        }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 13)
-    }
-}
-
-/// T043 (phase6-contract.md §C): the ambient "needs review" surface for the AI-delegation
-/// orchestrator — resurfaced delegations whose check-back came due
-/// (`AppState.dueDelegationRechecks`, refreshed off a minute-scale timer/app activation;
-/// constitution I: an ordinary in-app card, NEVER a system notification), the one-tap
-/// ambiguous-`ai-done`-signal disambiguation card (`AppState.pendingDisambiguationTaskIDs`,
-/// mirroring `AppLinkHandler.pendingDisambiguation`), and a gentle dismissible soft-limit hint once
-/// too many delegations are in flight at once. Self-contained (reads `appState` via environment) so
-/// `TodayView.mainColumn` only has to decide WHERE it sits. Renders zero height when there's
-/// nothing to show — never a permanent fixture (constitution V, glance-and-dismiss).
-private struct DelegationAmbientSection: View {
-    @Environment(AppState.self) private var appState: AppState
-    /// Session-local dismiss (not persisted): "gentle, dismissible" per the contract, not "never
-    /// show again forever" — a genuinely large WIP count is worth re-surfacing on a fresh session.
-    @State private var wipHintDismissed = false
-
-    private static let wipSoftLimit = 4
-
-    private var wipCount: Int { appState.delegation?.wipCount() ?? 0 }
-
-    private var dueTasks: [TaskItem] {
-        appState.dueDelegationRechecks.compactMap { id in appState.tasks.first { $0.id == id } }
-    }
-
-    private var disambiguationCandidates: [TaskItem] {
-        appState.pendingDisambiguationTaskIDs.compactMap { id in appState.tasks.first { $0.id == id } }
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if wipCount > Self.wipSoftLimit, !wipHintDismissed {
-                softLimitHint
-            }
-            if !disambiguationCandidates.isEmpty {
-                disambiguationCard
-            }
-            ForEach(dueTasks) { task in
-                needsReviewCard(task)
-            }
-        }
-    }
-
-    // MARK: - Soft-limit hint
-
-    private var softLimitHint: some View {
-        HStack(spacing: 10) {
-            VolarIcon(.bolt, size: 12, color: VolarColor.instrument, weight: .semibold)
-            (
-                Text("\(wipCount)").font(Font.volarMono(size: 12.5).monospacedDigit())
-                + Text(" tasks are out with Claude right now — review before delegating more?")
-                    .font(.system(size: 12.5))
-            )
-                .foregroundStyle(VolarColor.textSec)
-                .lineLimit(2)
-            Spacer(minLength: 8)
-            Button {
-                wipHintDismissed = true
-            } label: {
-                VolarIcon(.x, size: 9, color: VolarColor.textMut)
-            }
-            .buttonStyle(.plain)
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .background(VolarColor.instrumentDim.opacity(0.14))
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
-        )
-    }
-
-    // MARK: - Disambiguation (`ai-done` matched more than one waiting task)
-
-    private var disambiguationCard: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("An AI run finished — which task was it?")
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(VolarColor.textPri)
-            VStack(alignment: .leading, spacing: 6) {
-                ForEach(disambiguationCandidates) { task in
-                    Button {
-                        appState.resolveAppLinkDisambiguation(taskId: task.id)
-                    } label: {
-                        Text(task.title)
-                            .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(VolarColor.textPri)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.horizontal, 9)
-                            .frame(height: 26)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .background(VolarColor.card)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .stroke(VolarColor.border, lineWidth: 0.5)
-                    )
-                    .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-                }
-            }
-            Button("None of these") {
-                appState.dismissAppLinkDisambiguation()
-            }
-            .buttonStyle(.plain)
-            .font(.system(size: 11.5, weight: .medium))
-            .foregroundStyle(VolarColor.textMut)
-        }
-        .padding(12)
-        .background(VolarColor.card)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VolarColor.instrumentDim, lineWidth: 0.5)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    // MARK: - Needs-review card ([Done] / [Still waiting] / [Check later])
-
-    private func needsReviewCard(_ task: TaskItem) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 6) {
-                VolarIcon(.clock, size: 11, color: VolarColor.instrument, weight: .semibold)
-                Text("Check-in: \(task.title)")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(VolarColor.textPri)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-            }
-            HStack(spacing: 8) {
-                ambientButton("Done", solid: true) { appState.resolveDelegationDone(task.id) }
-                ambientButton("Still waiting") { appState.resolveDelegationStillWaiting(task.id) }
-                ambientButton("Check later") { appState.resolveDelegationCheckLater(task.id) }
-            }
-        }
-        .padding(12)
-        .background(VolarColor.card)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(VolarColor.border, lineWidth: 0.5)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-
-    private func ambientButton(_ title: String, solid: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(solid ? Color.white : VolarColor.textPri)
-                .padding(.horizontal, 12)
-                .frame(height: 28)
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(solid ? VolarColor.instrument : VolarColor.surfaceHi)
-        .overlay(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .stroke(solid ? Color.clear : VolarColor.borderHi, lineWidth: 0.5)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-    }
-}
-
 // MARK: - 006-cues-and-waiting: cue reminder + waiting-mode holder (T5, wire UI)
 //
-// Both rows below share `DelegationAmbientSection`'s own card shell (`VolarColor.card` +
-// `VolarColor.border` hairline, 8pt corner radius) so the three ambient surfaces in this file read
-// as one family, not three competing styles. Neither row carries an icon/color the way
-// `softLimitHint`/`needsReviewCard` above do — design.md §3's anti-shame/anti-nag rule ("Cấm đỏ,
+// Hai row bên dưới dùng chung một vỏ card (`VolarColor.card` + hairline `VolarColor.border`, bo
+// 8pt) để các mặt ambient trong file này đọc ra một họ, không phải mấy kiểu đánh nhau. Không row
+// nào mang icon/màu — design.md §3's anti-shame/anti-nag rule ("Cấm đỏ,
 // cấm badge... giọng chữ điềm tĩnh") is why this is plain text with no accent tint at all, closer
 // to `SweepView`'s calm copy than to an instrument-tinted status card.
 

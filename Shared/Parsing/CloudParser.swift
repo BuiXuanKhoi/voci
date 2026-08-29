@@ -103,12 +103,6 @@ struct CloudParser: Sendable {
     /// client and server never silently disagree about "how many subtasks are worth telling the
     /// model about."
     var maxExistingSubtasks = 20
-    /// Server-side re-check of `_shared/schema.ts`'s `MAX_NEXT_ACTION_CHARS` (currently 160) —
-    /// same "never trust a remote response blindly" posture `maxDreadMessageChars` below
-    /// documents for the sibling `dread` reason. Deliberately SHORTER than that cap — see
-    /// `MAX_NEXT_ACTION_CHARS`'s doc comment server-side for why.
-    var maxNextActionChars = 160
-
     /// Fresh instance per call, deliberately not a shared `static let`: `ISO8601DateFormatter` is
     /// a mutable reference type Foundation has not audited/marked `Sendable`, and this struct's
     /// methods run off the main actor — sharing one instance across concurrent calls would be a
@@ -204,9 +198,7 @@ struct CloudParser: Sendable {
 
     /// Shared context-payload builder (anh Khôi, 2026-07-29 "richer context" addendum) — appends
     /// `source_transcript`/`deadline`/`existing_subtasks` to an in-progress request `payload` IN
-    /// PLACE, used by `breakdownDetailed`, `dreadDetailed`, and `nextActionDetailed` alike so the
-    /// three modes can never drift onto three different truncation/formatting rules for the same
-    /// three OPTIONAL fields. An instance method (not `static`, unlike `utf16Prefix` above) purely
+    /// PLACE, dùng bởi `breakdownDetailed` (trước đây còn hai chế độ "stuck" nữa, đã bỏ 2026-08-22). An instance method (not `static`, unlike `utf16Prefix` above) purely
     /// so it can read `self.maxContextTranscriptChars`/`self.maxExistingSubtasks`.
     ///
     /// `sourceTranscript` is UNTRUSTED input (the user's own speech, captured verbatim at
@@ -469,145 +461,6 @@ struct CloudParser: Sendable {
         // already enforces it (`_shared/schema.ts`) — never trust a remote response blindly.
         guard (3...9).contains(steps.count) else { return nil }
         return steps
-    }
-
-    // MARK: - Stuck mode, "dread" and "too_big" reasons (same route, `mode: "stuck"`)
-    //
-    // "Stuck?" feature (anh Khôi, 2026-07-29, REDESIGNED same day after he challenged the first
-    // version): three different reasons a task doesn't get started need three genuinely different
-    // fixes. "dread" ("em ngán/sợ động vào nó" — I don't want to touch this one) names the SPECIFIC
-    // dreaded part of THIS task and proposes a <=2-minute physical action touching it.
-    // "too_big" used to route straight into the EXISTING `breakdownDetailed` flow above
-    // (`AppState.openBreakdown(for:)`); it now calls `nextActionDetailed` below instead, which asks
-    // for exactly ONE next physical action, never a 3-9 step plan — see `NEXT_ACTION_SYSTEM_PREAMBLE`'s
-    // doc comment server-side (`supabase/functions/_shared/gemini.ts`) for why a full plan under
-    // near-zero context is fabrication dressed as advice. The full plan is still one tap away (the
-    // client's "See full plan" button still calls `AppState.openBreakdown(for:)`, unchanged). The
-    // third reason ("cant_start" — can't get moving at all) never reaches this file or the network
-    // at all: it's a plain client-side 2-minute timer (`AppState.startStuckCantStartTimer`), so
-    // there is no corresponding method here.
-
-    /// Server-side re-check of `_shared/schema.ts`'s `MAX_DREAD_MESSAGE_CHARS` (currently 400) —
-    /// same "never trust a remote response blindly" posture `breakdownDetailed`'s `(3...9)`
-    /// re-check documents right above. Kept as an instance `var` (not a `static let`) purely so a
-    /// future test can override it, mirroring `maxTranscriptChars`/`maxResponseBytes`'s own shape.
-    var maxDreadMessageChars = 400
-
-    private struct DreadResponse: Decodable {
-        var message: String
-    }
-
-    private struct NextActionResponse: Decodable {
-        var message: String
-    }
-
-    /// Cloud call for the "dread" reason only. Mirrors `breakdownDetailed`'s exact shape (same
-    /// consent/credential gate, same `makeRequest`/timeout helpers, same `utf16Prefix` truncation)
-    /// — the only differences are the wire `mode`/`reason` literals, the response shape, and the
-    /// re-validation cap. Returns `nil` on ANY failure (no consent/credential, offline, non-200,
-    /// oversized body, undecodable JSON, empty message, over-cap message) — never partially
-    /// trusts a malformed response, and never throws up to the UI (matches every other method in
-    /// this file's error-handling convention). `sourceTranscript`/`deadline`/`existingSubtasks`
-    /// (anh Khôi, 2026-07-29 "richer context" addendum) are OPTIONAL, defaulting to `nil` so every
-    /// pre-addendum call site keeps compiling and behaving exactly as before.
-    func dreadDetailed(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async -> String? {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return nil }
-
-        guard let base = try? await credentials.baseURL(),
-              let header = await credentials.authHeader() else { return nil }
-
-        var payload: [String: Any] = [
-            "mode": "stuck",
-            "reason": "dread",
-            "task_title": Self.utf16Prefix(trimmedTitle, 300),
-        ]
-        if let notes, !notes.isEmpty {
-            payload["notes"] = Self.utf16Prefix(notes, 1000)
-        }
-        appendContext(
-            to: &payload, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
-        )
-
-        guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
-            return nil
-        }
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            // Transport failure — silent fall-through, no logging (same privacy rationale as
-            // `parseDetailed`'s/`resolveCompletion`'s identical catch blocks).
-            return nil
-        }
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
-        guard data.count <= maxResponseBytes else { return nil }
-        guard let decoded = try? JSONDecoder().decode(DreadResponse.self, from: data) else { return nil }
-
-        let trimmedMessage = decoded.message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedMessage.isEmpty, trimmedMessage.utf16.count <= maxDreadMessageChars else { return nil }
-        return trimmedMessage
-    }
-
-    /// Cloud call for the "too_big" reason (anh Khôi, 2026-07-29 REDESIGN — replaces this reason's
-    /// original "reuse breakdownDetailed verbatim" call). Mirrors `dreadDetailed`'s exact shape
-    /// (same consent/credential gate, same `makeRequest`/timeout helpers, same context-forwarding,
-    /// same error-handling convention) — the only differences are the wire `reason` literal, the
-    /// re-validation cap (`maxNextActionChars`, deliberately SHORTER than `maxDreadMessageChars`),
-    /// and that this reason has no static fallback content to fall back to on the client (see
-    /// `AppState.applyStuckNextActionResult`): `nil` here means "found nothing," never "here's a
-    /// generic suggestion instead."
-    func nextActionDetailed(
-        title: String,
-        notes: String?,
-        sourceTranscript: String? = nil,
-        deadline: Date? = nil,
-        existingSubtasks: [TaskContextSubtask]? = nil
-    ) async -> String? {
-        let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedTitle.isEmpty else { return nil }
-
-        guard let base = try? await credentials.baseURL(),
-              let header = await credentials.authHeader() else { return nil }
-
-        var payload: [String: Any] = [
-            "mode": "stuck",
-            "reason": "too_big",
-            "task_title": Self.utf16Prefix(trimmedTitle, 300),
-        ]
-        if let notes, !notes.isEmpty {
-            payload["notes"] = Self.utf16Prefix(notes, 1000)
-        }
-        appendContext(
-            to: &payload, sourceTranscript: sourceTranscript, deadline: deadline, existingSubtasks: existingSubtasks
-        )
-
-        guard let request = Self.makeRequest(base: base, header: header, timeout: timeout, jsonPayload: payload) else {
-            return nil
-        }
-
-        let data: Data
-        let response: URLResponse
-        do {
-            (data, response) = try await session.data(for: request)
-        } catch {
-            return nil
-        }
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else { return nil }
-        guard data.count <= maxResponseBytes else { return nil }
-        guard let decoded = try? JSONDecoder().decode(NextActionResponse.self, from: data) else { return nil }
-
-        let trimmedMessage = decoded.message.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedMessage.isEmpty, trimmedMessage.utf16.count <= maxNextActionChars else { return nil }
-        return trimmedMessage
     }
 
     // MARK: - Resolve-completion mode (T0xx: cloud paraphrase rescue for `VoiceDone`'s

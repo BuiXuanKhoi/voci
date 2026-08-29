@@ -16,11 +16,11 @@ private let focusTotalSeconds = 25 * 60
 /// near-BLACK film) which on a still-dark scrim means invisible text/chrome. These constants
 /// mirror the exact hex values `VolarColor`'s DARK branch resolves to (`Shared/Design/Theme.swift`)
 /// — i.e. this screen keeps looking exactly like it did before light mode existed, pinned instead
-/// of accidentally inherited. Deliberately NOT applied to `StuckReasonPicker` (its own
+/// of accidentally inherited. Deliberately NOT applied to popover content (its own
 /// appearance-following `.popover` chrome, never drawn on this scrim) — that one genuinely needs
 /// to track the real system appearance, unlike everything else in this tree.
 ///
-/// `SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/`StuckNextActionBanner`/`StuckTimerBanner`
+/// `SwitchBreakdownSuggestionBanner`
 /// below (shared verbatim with `TodayView`'s NOW hero card) used to be a real gap here: pinning
 /// their `VolarColor.*` ink to this enum would've fixed them on this scrim but broken them on
 /// `TodayView`'s normal, appearance-following panel. Opus's follow-up (2026-08-19) closed that gap
@@ -91,8 +91,7 @@ struct FocusOverlay: View {
             return .handled
         }
         // Opus, 2026-08-19 follow-up: pins the WHOLE overlay subtree — including the four banners
-        // shared with `TodayView` (`SwitchBreakdownSuggestionBanner`/`StuckDreadBanner`/
-        // `StuckNextActionBanner`/`StuckTimerBanner`, plus every `VolarColor.*` anywhere in this
+        // shared with `TodayView` (`SwitchBreakdownSuggestionBanner`, plus every `VolarColor.*` anywhere in this
         // tree) — to the dark branch, regardless of the system's actual light/dark setting. This
         // is the framework's own built-in "on-scrim vs on-panel" context switch: SwiftUI resolves
         // every dynamic `Color`/`NSColor` against `\.colorScheme`, so overriding it here (outermost
@@ -150,25 +149,6 @@ struct FocusOverlay: View {
                         .padding(.top, 18)
                 }
 
-                // "Stuck?" (anh Khôi, 2026-07-29): the "dread" reason's message/fallback banner,
-                // the "too_big" reason's single next-action banner, and the "cant_start" reason's
-                // 2-minute timer — shared with `TodayView`'s hero card exactly like the breakdown-
-                // invite banner right above — same wording, same state, never two implementations.
-                // None of the three renders anything while idle.
-                if let dreadTask = appState.stuckDreadTask, dreadTask.id == task.id,
-                   appState.stuckDreadState != .idle {
-                    StuckDreadBanner(task: dreadTask)
-                        .padding(.top, 18)
-                }
-                if let nextActionTask = appState.stuckNextActionTask, nextActionTask.id == task.id,
-                   appState.stuckNextActionState != .idle {
-                    StuckNextActionBanner(task: nextActionTask)
-                        .padding(.top, 18)
-                }
-                if appState.stuckTimerActive {
-                    StuckTimerBanner()
-                        .padding(.top, 18)
-                }
             }
 
             VStack {
@@ -274,15 +254,12 @@ struct FocusOverlay: View {
         return (children.filter(\.done).count, children.count)
     }
 
-    /// "Mark done", "Switch", and "Stuck?" side by side, equal footing — per anh Khôi's contract,
-    /// neither Switch nor Stuck is a secondary/hidden action; each stands next to Done exactly
-    /// like this. Tapping "Stuck?" must feel exactly as ordinary as tapping "Done" (no red, no
-    /// icon, no urgency styling) — this app's no-shame tone (`SweepView.swift`).
+    /// "Mark done" và "Switch" cạnh nhau, ngang hàng. Nút "Stuck?" thứ ba đã bỏ (anh Khôi
+    /// 2026-08-22: "cái này vô dụng quá") — cùng toàn bộ ba banner và cái picker của nó.
     private func focusPrimaryActions(_ task: TaskItem) -> some View {
         HStack(spacing: 10) {
             markDoneButton(task)
             switchButton
-            stuckButton(task)
         }
     }
 
@@ -337,40 +314,6 @@ struct FocusOverlay: View {
         .opacity(appState.canSwitchFocusTask ? 1 : 0.4)
         .disabled(!appState.canSwitchFocusTask)
         .help("Move on to something else — this task isn't done, it just steps out for now.")
-    }
-
-    /// "Stuck?" (anh Khôi, 2026-07-29) — same neutral capsule styling as `switchButton` right
-    /// above (no accent fill, no icon, no warning color): a completely ordinary thing to tap.
-    /// Opens a small popover with the three plainly-worded reasons (`StuckReasonPicker`, shared
-    /// with `TodayView`'s hero card, defined at the bottom of this file); the popover's open/closed
-    /// state is entirely driven by `AppState.stuckPickerTask`, never a locally-owned `@State` bool
-    /// — same "AppState is the one source of truth" convention every other piece of state in this
-    /// view already follows.
-    private func stuckButton(_ task: TaskItem) -> some View {
-        Button {
-            appState.openStuckPicker(for: task)
-        } label: {
-            Text("Stuck?")
-                .font(.system(size: 13, weight: .medium))
-                .tracking(-0.065) // -0.005em @ 13pt
-                .foregroundStyle(FocusInk.text) // on the scrim — pinned ink, see `FocusInk`
-                .padding(.horizontal, 20)
-                .padding(.vertical, 9)
-                // Same clickable-area fix as `switchButton` right above — `.background` is chained
-                // outside this label.
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(VolarColor.card)
-        .overlay(RoundedRectangle(cornerRadius: 5, style: .continuous).strokeBorder(FocusInk.border, lineWidth: 0.5))
-        .clipShape(RoundedRectangle(cornerRadius: 5, style: .continuous))
-        .popover(isPresented: Binding(
-            get: { appState.stuckPickerTask?.id == task.id },
-            set: { presented in if !presented { appState.dismissStuckPicker() } }
-        )) {
-            StuckReasonPicker(task: task)
-        }
-        .help("Name what kind of stuck this is — different kinds need different fixes.")
     }
 
     private var topRightButtons: some View {
@@ -558,287 +501,5 @@ struct SwitchBreakdownSuggestionBanner: View {
                 .strokeBorder(VolarColor.border, lineWidth: 0.5)
         )
         .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-    }
-}
-
-// MARK: - "Stuck?" (anh Khôi, 2026-07-29)
-//
-// Three views, shared verbatim between `FocusOverlay` (above) and `TodayView`'s hero card, exactly
-// like `SwitchBreakdownSuggestionBanner` right above — one definition each, so wording/behavior can
-// never drift between the two places "Stuck?" appears. UNVERIFIED — authored on Windows, no Swift/
-// Xcode toolchain here; needs a Mac visual pass (see final report's verify checklist).
-
-/// Popover content for the "Stuck?" button: three plainly-worded reasons, one tap each. Deliberately
-/// plain, first-person, human sentences — the raw `StuckReason` case names ("too_big"/"dread"/
-/// "cant_start") never appear as user-facing text anywhere. No icons, no color-coding by "severity"
-/// — all three are equally ordinary things to feel, matching this app's no-shame tone
-/// (`SweepView.swift`).
-struct StuckReasonPicker: View {
-    @Environment(AppState.self) private var appState
-    let task: TaskItem
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            reasonRow("This feels like more than one task.") {
-                appState.chooseStuckReason(.tooBig, for: task)
-            }
-            reasonRow("This one feels heavy to even look at.") {
-                appState.chooseStuckReason(.dread, for: task)
-            }
-            reasonRow("I can't get myself moving at all.") {
-                appState.chooseStuckReason(.cantStart, for: task)
-            }
-        }
-        .padding(8)
-        .frame(width: 270)
-    }
-
-    private func reasonRow(_ text: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(text)
-                .font(.system(size: 13))
-                .foregroundStyle(VolarColor.textPri)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 9)
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-/// Shared card chrome for every "Stuck?" banner (`StuckDreadBanner`, `StuckTimerBanner`,
-/// `StuckNextActionBanner` — anh Khôi, 2026-07-29: "tái dùng được thì tái dùng, đừng dựng banner
-/// thứ ba trùng lặp") — one `RoundedRectangle`/padding/stroke definition instead of three copies,
-/// so a future visual tweak can never drift between them. Purely a layout helper — no state, no
-/// behavior, and extracting it changes NOTHING about how `StuckDreadBanner`/`StuckTimerBanner`
-/// already looked or behaved (same padding/background/overlay/clipShape values as before, just
-/// named once).
-///
-/// `VolarColor.border` here (and `.textPri`/`.textSec`/`.textMut` inside `StuckDreadBanner`/
-/// `StuckNextActionBanner`/`StuckTimerBanner`, the only callers) stays DYNAMIC, not `FocusInk` —
-/// same reasoning as `SwitchBreakdownSuggestionBanner`'s doc comment above: these three are shared
-/// verbatim with `TodayView`'s hero card. GAP CLOSED the same way: `FocusOverlay.body`'s
-/// `.environment(\.colorScheme, .dark)` override resolves every `VolarColor.*` here to the dark
-/// branch when rendered inside `FocusOverlay`, while `TodayView` (no such override) still gets the
-/// real system appearance.
-private func stuckCard<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
-    content()
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(maxWidth: 480)
-        .background(VolarColor.card)
-        .overlay(
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .strokeBorder(VolarColor.border, lineWidth: 0.5)
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-}
-
-/// The "dread" reason's response: a short, specific message (or, absent any model, a static honest
-/// fallback) plus a single "start the 2-minute action" button. Reads `appState.stuckDreadState`
-/// directly rather than taking content as a parameter — single source of truth, same convention
-/// `SwitchBreakdownSuggestionBanner` establishes for reading `appState.switchBreakdownSuggestion`
-/// directly instead of being handed a copy.
-struct StuckDreadBanner: View {
-    @Environment(AppState.self) private var appState
-    let task: TaskItem
-
-    var body: some View {
-        Group {
-            switch appState.stuckDreadState {
-            case .idle:
-                EmptyView()
-            case .loading:
-                loadingBody
-            case .loaded(let message):
-                messageBody(message)
-            case .fallback:
-                messageBody(AppState.stuckDreadFallbackMessage)
-            }
-        }
-    }
-
-    private var loadingBody: some View {
-        stuckCard {
-            HStack {
-                Text("Thinking\u{2026}")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(VolarColor.textMut)
-                Spacer(minLength: 8)
-            }
-        }
-    }
-
-    private func messageBody(_ message: String) -> some View {
-        stuckCard {
-            HStack(alignment: .top, spacing: 10) {
-                Text(message)
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(VolarColor.textSec)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Spacer(minLength: 8)
-
-                VStack(alignment: .trailing, spacing: 6) {
-                    Button("Start (2 min)") {
-                        appState.acceptStuckDreadAction()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(VolarColor.textPri)
-
-                    Button("Close") {
-                        appState.dismissStuckDread()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(VolarColor.textMut)
-                }
-            }
-        }
-    }
-}
-
-/// The "too_big" reason's response (anh Khôi, 2026-07-29 REDESIGN — see `AppState
-/// .StuckNextActionState`'s doc comment for why this no longer opens `TaskBreakdownView` directly
-/// as its first move): ONE next physical action, or — when nothing was found — a neutral "couldn't
-/// find one" line that is NEVER a fabricated static suggestion (unlike `StuckDreadBanner`'s
-/// `.fallback` case; see that state's own doc comment for why the two are deliberately NOT the
-/// same shape). Either way, a lighter secondary button still opens the FULL existing breakdown
-/// flow for anyone who wants the whole plan, not just the next step — shown in every non-idle
-/// state, never conditioned on whether the quick answer itself succeeded.
-struct StuckNextActionBanner: View {
-    @Environment(AppState.self) private var appState
-    let task: TaskItem
-
-    var body: some View {
-        Group {
-            switch appState.stuckNextActionState {
-            case .idle:
-                EmptyView()
-            case .loading:
-                loadingBody
-            case .loaded(let message):
-                loadedBody(message)
-            case .unavailable:
-                unavailableBody
-            }
-        }
-    }
-
-    private var loadingBody: some View {
-        stuckCard {
-            HStack {
-                Text("Thinking\u{2026}")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(VolarColor.textMut)
-                Spacer(minLength: 8)
-            }
-        }
-    }
-
-    private func loadedBody(_ message: String) -> some View {
-        stuckCard {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .top, spacing: 10) {
-                    Text(message)
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(VolarColor.textSec)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-
-                    Spacer(minLength: 8)
-
-                    VStack(alignment: .trailing, spacing: 6) {
-                        Button("Start (2 min)") {
-                            appState.acceptStuckNextActionAction()
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(VolarColor.textPri)
-
-                        Button("Close") {
-                            appState.dismissStuckNextAction()
-                        }
-                        .buttonStyle(.plain)
-                        .font(.system(size: 12.5, weight: .medium))
-                        .foregroundStyle(VolarColor.textMut)
-                    }
-                }
-                seeFullPlanButton
-            }
-        }
-    }
-
-    private var unavailableBody: some View {
-        stuckCard {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    // Neutral, honest unavailability — no suggested content at all (see
-                    // `AppState.StuckNextActionState.unavailable`'s doc comment for why this must
-                    // never carry a substantive fallback the way `StuckDreadBanner`'s does).
-                    Text("No single next step to suggest right now.")
-                        .font(.system(size: 12.5))
-                        .foregroundStyle(VolarColor.textMut)
-                    Spacer(minLength: 8)
-                    Button("Close") {
-                        appState.dismissStuckNextAction()
-                    }
-                    .buttonStyle(.plain)
-                    .font(.system(size: 12.5, weight: .medium))
-                    .foregroundStyle(VolarColor.textMut)
-                }
-                seeFullPlanButton
-            }
-        }
-    }
-
-    /// Secondary, lighter-weight escape hatch to the FULL existing breakdown flow — never a second
-    /// implementation of it (`AppState.openFullPlanFromStuck` just calls the existing, unchanged
-    /// `openBreakdown(for:)`). Shown in every non-idle state.
-    private var seeFullPlanButton: some View {
-        Button("See full plan") {
-            appState.openFullPlanFromStuck(for: task)
-        }
-        .buttonStyle(.plain)
-        .font(.system(size: 12, weight: .regular))
-        .foregroundStyle(VolarColor.textMut)
-    }
-}
-
-/// The "cant_start" reason's response: a plain 2-minute countdown, permission to do absolutely
-/// anything — not bound to any specific task (see `AppState.startStuckCantStartTimer`'s doc
-/// comment for why this is its own small timer, not `startFocus()`/`FocusOverlay`'s own countdown
-/// display). No progress ring, no task title, no chip row — deliberately bare, since the entire
-/// point is "it doesn't matter what you do."
-struct StuckTimerBanner: View {
-    @Environment(AppState.self) private var appState
-
-    var body: some View {
-        stuckCard {
-            HStack(spacing: 10) {
-                Text(formattedTime(appState.stuckTimerSecondsLeft))
-                    .font(Font.volarMono(size: 13, weight: .medium))
-                    .monospacedDigit()
-                    .foregroundStyle(VolarColor.textPri)
-                Text("Two minutes. Anything counts.")
-                    .font(.system(size: 12.5))
-                    .foregroundStyle(VolarColor.textSec)
-                Spacer(minLength: 8)
-                Button("Stop") {
-                    appState.endStuckCantStartTimer()
-                }
-                .buttonStyle(.plain)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(VolarColor.textMut)
-            }
-        }
-    }
-
-    private func formattedTime(_ seconds: Int) -> String {
-        let clamped = max(seconds, 0)
-        return String(format: "%d:%02d", clamped / 60, clamped % 60)
     }
 }

@@ -54,9 +54,9 @@ final class HotkeyManager {
     /// single-hotkey version, so nothing about the FIRST hotkey's identity changes), `2` = ⌃⌥T.
     private static let hotkeyIDCapture = EventHotKeyID(signature: fourCharCode("Volar"), id: 1)
     private static let hotkeyIDTextCapture = EventHotKeyID(signature: fourCharCode("Volar"), id: 2)
-    /// `3` = ⌃⌥N, Glance (`Sources/Views/GlanceHUD.swift`). The FIRST hotkey here that uses key-up
-    /// for anything: hold = peek (ends on release), tap = pin. `GlanceController` owns that
-    /// distinction — this file only reports press and release faithfully.
+    /// `3` = ⌃⌥N, Glance (`Sources/Views/GlanceHUD.swift`). Bấm-bật/bấm-tắt như ⌃⌥M — chế độ
+    /// giữ-để-xem đã bỏ (anh Khôi 2026-08-24), nên `onGlanceUp` thường là `nil`. File này vẫn báo
+    /// cả press lẫn release y như cũ: ai muốn dùng key-up thì gắn handler, không thì thôi.
     private static let hotkeyIDGlance = EventHotKeyID(signature: fourCharCode("Volar"), id: 3)
 
     /// Packs up to 4 ASCII characters into the `OSType`/`FourCharCode` Carbon expects for a
@@ -314,9 +314,8 @@ final class HotkeyManager {
                 // closure for it.
             }
         case Self.hotkeyIDGlance.id:
-            // The only hotkey whose key-UP carries meaning. `GlanceController` decides tap-vs-hold
-            // from the interval between these two calls; this file deliberately holds no opinion,
-            // so the threshold can be tuned in one place without touching Carbon code.
+            // `isGlanceDown` chống auto-repeat: Carbon bắn press liên tục khi phím bị giữ, mà
+            // `hotkeyDown()` nay là toggle — không chặn thì giữ phím sẽ nhấp nháy thẻ.
             if isKeyDown {
                 guard !isGlanceDown else { return }
                 isGlanceDown = true

@@ -26,7 +26,7 @@ private let volarWellFill = Color(volarLight: 0x000000, lightOpacity: 0.04, dark
 
 struct SettingsView: View {
     private enum Tab: String, CaseIterable, Identifiable, Equatable {
-        case general, hotkeys, notifications, permissions, appearance, integrations, account, about
+        case general, hotkeys, notifications, permissions, appearance, account, about
         var id: String { rawValue }
 
         var icon: VolarIconName {
@@ -41,7 +41,6 @@ struct SettingsView: View {
             // `.account`'s use of the same glyph below.
             case .permissions: return .check
             case .appearance: return .sparkle
-            case .integrations: return .bolt
             // No dedicated "person/account" glyph exists in `VolarIconName` (`Design/VolarIcon.swift`,
             // not in this task's owned files — adding a case would require editing it). `.check`
             // is the closest available stand-in (reads as "verified identity"); flagged in backlog.md
@@ -58,14 +57,16 @@ struct SettingsView: View {
             case .notifications: return "Notifications"
             case .permissions: return "Permissions"
             case .appearance: return "Appearance"
-            case .integrations: return "Integrations"
             case .account: return "Account"
             case .about: return "About"
             }
         }
+
+        /// Account/About không phải danh sách row — chúng có card, form đăng nhập, nút — nên giữ
+        /// lề hai bên. Năm tab còn lại để row chạy hết bề ngang cửa sổ.
+        var isInset: Bool { self == .account || self == .about }
     }
 
-    @State private var tab: Tab = .general
 
     // Cosmetic-only local settings state (not part of the frozen AppState API).
     // `defaultDuration` used to live here too — 2026-07-29: promoted to a real `AppState` setting
@@ -127,6 +128,8 @@ struct SettingsView: View {
     @State private var showSyncRejects = false
     @State private var showSyncPurgeConfirm = false
 
+    @State private var tab: Tab = .general
+
     @Environment(AppState.self) private var appState
     // Settings is its own scene (a separate `Window`/`Settings` group from the main window per
     // VolarApp.swift) — the guided-tour overlay (agent A, Views/Tour/*) lives IN the main window,
@@ -137,6 +140,9 @@ struct SettingsView: View {
     var body: some View {
         @Bindable var appState = appState
 
+        // Bảy tab GIỮ NGUYÊN (anh Khôi 2026-08-24): chia tab là để nhảy thẳng tới nhóm mình
+        // cần, không phải cuộn đi tìm. Thứ đổi nằm bên TRONG mỗi tab — xem `SettingsRow`: các
+        // option không còn là những cái card bo tròn tách rời nữa mà xếp liền thành một danh sách.
         VStack(spacing: 0) {
             tabStrip
 
@@ -148,12 +154,14 @@ struct SettingsView: View {
                     case .notifications: notificationsTab
                     case .permissions: permissionsTab
                     case .appearance: appearanceTab(appState: appState)
-                    case .integrations: integrationsTab
                     case .account: accountTab
                     case .about: aboutTab
                     }
                 }
-                .padding(22)
+                // Danh sách row chạy hết bề ngang cửa sổ (row tự có lề 22 bên trong), nên tab nào
+                // là danh sách thì không đệm ngang. Account/About là card + form nên vẫn cần lề.
+                .padding(.horizontal, tab.isInset ? 22 : 0)
+                .padding(.vertical, tab.isInset ? 22 : 6)
             }
         }
         .frame(minWidth: 560, minHeight: 460)
@@ -231,7 +239,7 @@ struct SettingsView: View {
     }
 
     private var generalTab: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             SettingsRow(label: "Speech engine", hint: "On-device (Apple, WhisperKit) stays private and free. Groq is cloud — it sends your audio for the best multilingual/Vietnamese accuracy.") {
                 // `SpeechEngineChoice` (AppState.swift) doesn't declare Hashable, so — same
                 // convention as the Density picker below — bind through its `String` rawValue
@@ -263,29 +271,15 @@ struct SettingsView: View {
                         .foregroundStyle(VolarColor.textSec)
                 }
             }
-            SettingsRow(label: "Task parsing", hint: "On-device stays private and free (Apple on-device model when available, otherwise a built-in heuristic). Cloud AI sends only the TEXT of what you said (never audio) to our proxy for higher-quality parsing of trickier phrasing.") {
-                // `ParseEnginePreference` doesn't declare Hashable — same convention as the Speech
-                // engine / Density pickers, bind through its `String` rawValue instead of the enum.
-                Picker("", selection: Binding(
-                    get: { appState.parseEnginePreference.rawValue },
-                    set: { if let pref = ParseEnginePreference(rawValue: $0) { appState.setParseEngine(pref) } }
-                )) {
-                    ForEach(ParseEnginePreference.allCases) { pref in
-                        Text(pref.label).tag(pref.rawValue)
-                    }
-                }
-                .labelsHidden()
-                .pickerStyle(.menu)
-                .tint(accentColors.solid)
-                .frame(width: 200)
-            }
-            if appState.parseEnginePreference == .cloud, !ConfigParseCredentialProvider.isConfigured {
-                SettingsRow(label: "Cloud parsing status", hint: "Sign in (Account tab) to enable cloud parsing — every signed-in account gets a daily quota, free or Pro. Until you sign in, Volar quietly uses on-device parsing.") {
-                    Text("Not configured — using on-device")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(VolarColor.textSec)
-                }
-            }
+            // Hàng "Task parsing" (On-device / Cloud AI) và hàng trạng thái của nó đã bỏ
+            // 2026-08-24 (anh Khôi): "user đâu cần biết họ đang xài AI hay on-device parse đâu,
+            // họ chỉ quan tâm xong việc thôi". Câu hỏi này không có phương án đúng cho người dùng
+            // chọn — cloud hiểu câu khó hơn, on-device là thứ tự chạy khi không có mạng/chưa đăng
+            // nhập, và app đã tự lùi về on-device ở mọi trường hợp cloud không dùng được.
+            //
+            // KHÔNG bỏ phần đồng ý gửi dữ liệu: `AppState.cloudParseConsent` và cửa sổ hỏi một
+            // lần trước lần parse ĐẦU TIÊN (`proceedToCapture`) còn nguyên, `setParseEngine` cũng
+            // vẫn còn cho onboarding gọi. Cái bỏ ở đây chỉ là chỗ CHỌN trong Settings.
             SettingsRow(label: "Recognition language", hint: "The language Volar listens for when you capture a task by voice, including Vietnamese.") {
                 Picker("", selection: Binding(
                     get: { appState.recognitionLocaleID },
@@ -570,7 +564,7 @@ struct SettingsView: View {
     // MARK: - Hotkeys
 
     private var hotkeysTab: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             SettingsRow(label: "Quick capture", hint: "Press this combo from anywhere to toggle recording — press to start, press again to stop.") {
                 KeyRecorder(keys: ["\u{2303}", "\u{2325}", "M"])
             }
@@ -611,7 +605,7 @@ struct SettingsView: View {
     // MARK: - Notifications
 
     private var notificationsTab: some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
             SettingsRow(label: "Show reminders", hint: "Send a macOS notification before each task.") {
                 VolarToggle(isOn: $showReminders)
             }
@@ -773,7 +767,7 @@ struct SettingsView: View {
     }
 
     /// Re-reads all four live statuses from their real sources. Called from `permissionsTab`'s
-    /// `.task` (fires every time this tab is switched to — matches `integrationsTab`'s existing
+    /// `.task` (fires every time this tab is switched to
     /// `.task` convention above for the same "may have changed while the user was elsewhere"
     /// reason) and again after any "Request" button actually asks the OS for something, so a grant
     /// or denial is reflected immediately rather than waiting for the next tab switch.
@@ -804,7 +798,7 @@ struct SettingsView: View {
     }
 
     private var permissionsTab: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             SettingsRow(label: "Microphone", hint: "Needed while you hold the capture hotkey, so Volar can hear what you're saying.") {
                 HStack(spacing: 10) {
                     Text(micPermissionState.text)
@@ -872,7 +866,7 @@ struct SettingsView: View {
                 }
             }
 
-            SettingsRow(label: "Notifications", hint: "Task reminders and delegation nudges arrive as macOS notifications.") {
+            SettingsRow(label: "Notifications", hint: "Task reminders arrive as macOS notifications.") {
                 HStack(spacing: 10) {
                     Text(notifPermissionState.text)
                         .font(.system(size: 12, weight: .medium))
@@ -905,8 +899,8 @@ struct SettingsView: View {
                 }
             }
         }
-        // Refreshes every time this tab is shown — matches `integrationsTab`'s own `.task` above
-        // (re-checks `claudeDetected`/`claudeConnected` on every appearance for the identical
+        // Refreshes every time this tab is shown
+        // (re-checks on every appearance for the identical
         // reason: state that can change OUTSIDE the app, behind Settings' back, while the window
         // isn't looking). Without this, a user who grants access in System Settings and clicks
         // back into Volar would still see a stale "Not allowed" — which is precisely the confusion
@@ -919,7 +913,7 @@ struct SettingsView: View {
     // MARK: - Appearance
 
     private func appearanceTab(appState: AppState) -> some View {
-        VStack(spacing: 16) {
+        VStack(spacing: 0) {
             // specs/009-light-mode-list-v2/design.md §7, moved here from General per anh Khôi
             // (2026-08-19): the old "Theme" row above was a dead `@State` control ("Volar is
             // dark-only" — no longer true now that a real light palette exists) that never
@@ -1072,235 +1066,9 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - Integrations (T044, phase6-contract.md §C: "Connect Claude Code")
-
-    /// `true` once `ClaudeCodeConnector.detect()` finds `~/.claude` — the contract's "show only if
-    /// Claude Code present" gate. Re-checked on `.task` (tab first shown) rather than cached across
-    /// the whole Settings window session, so re-opening Settings after installing the CLI picks it
-    /// up without relaunching Volar.
-    @State private var claudeDetected = false
-    /// Local UI-only "did THIS UI successfully connect" bookkeeping — `ClaudeCodeConnector` keeps
-    /// no app-facing connect/disconnect state of its own (its doc comment: "the caller composes
-    /// [State] from detect() plus its own bookkeeping"). Initialized from whether
-    /// `ClaudeDirBookmark` has a saved grant, so it survives Settings being reopened.
-    @State private var claudeConnected = false
-    @State private var claudeConnectError: String?
-    /// Set right before `sendTestSignal()` fires; cleared (and flips `testSignalReceived` on) the
-    /// next time `appState.lastAppLinkAt` changes — see the `.onChange` below.
-    @State private var testSignalAwaitingReceipt = false
-    @State private var testSignalReceived = false
-    /// M1: whether it's safe to offer "Send test signal" — `AppLinkHandler.handle`'s exactly-one-
-    /// waiting-task rule can't be told a signal is a test, so it's only safe when nothing real is
-    /// currently waiting to be wrongly resolved. `wipCount()` is the same live-derived count
-    /// `MenuBarLabel`'s "⏳ N" badge uses (`DelegationTracker.wipCount()`, O(n) over tasks, cheap
-    /// enough to read directly in this computed property rather than caching it).
-    private var claudeTestSignalSafe: Bool {
-        (appState.delegation?.wipCount() ?? 0) == 0
-    }
-
-    private var integrationsTab: some View {
-        VStack(spacing: 12) {
-            // WG4 (ship-blocker, reviewer fix): this used to gate the ENTIRE card — including the
-            // "Connect…" button itself — on `claudeDetected`. Under App Sandbox, `detect()` returns
-            // `false` on first run (the container home has no `~/.claude`;
-            // `ClaudeCodeConnector.detect()`'s own doc comment says to treat `false` as "unknown,
-            // offer the picker" — never as "hide the connect affordance"). `claudeCodeCard` already
-            // internally branches connect-vs-disconnect on `claudeConnected` (the real gate — an
-            // actual granted NSOpenPanel/bookmark, fully entitled regardless of sandbox detection),
-            // so it's always shown; `claudeDetected` is used ONLY to soften the copy inside it now
-            // (see `claudeConnectHint` below).
-            claudeCodeCard
-        }
-        .task {
-            claudeDetected = appState.claudeConnector.detect()
-            claudeConnected = ClaudeDirBookmark.resolve() != nil
-        }
-        .onChange(of: appState.lastAppLinkAt) { _, _ in
-            guard testSignalAwaitingReceipt else { return }
-            testSignalAwaitingReceipt = false
-            testSignalReceived = true
-        }
-    }
-
-    /// WG4: the card's description line, softened by `claudeDetected` — never a gate on whether
-    /// the card (or its Connect button) is shown at all, only on which sentence explains it.
-    private var claudeConnectHint: String {
-        guard !claudeConnected else {
-            return "Installs a Stop hook so Claude Code tells Volar when an agent run finishes — Volar never reads Claude Code's own state, only receives this one signal (contracts/app-links.md)."
-        }
-        return claudeDetected
-            ? "Found ~/.claude on this Mac — connect to install a Stop hook so Claude Code tells Volar when an agent run finishes."
-            : "Choose your ~/.claude folder to connect. Volar couldn't confirm it's there automatically (normal under sandboxing) — it may still exist; pick it below."
-    }
-
-    /// The full "Connect Claude Code" card: preview → connect/disconnect → test-signal, all in one
-    /// `VolarColor.card` block (rather than several `SettingsRow`s) since the preview code block
-    /// and multi-step connect flow don't fit that row's fixed label/hint/control shape.
-    private var claudeCodeCard: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Connect Claude Code")
-                    .font(.system(size: 13.5, weight: .medium))
-                    .foregroundStyle(VolarColor.textPri)
-                Text(claudeConnectHint)
-                    .font(.system(size: 12))
-                    .foregroundStyle(VolarColor.textSec)
-                    .lineSpacing(2)
-            }
-
-            Text(appState.claudeConnector.previewHookEntry())
-                .font(.system(size: 11, design: .monospaced))
-                .foregroundStyle(VolarColor.instrument)
-                .textSelection(.enabled)
-                .padding(10)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(volarWellFill)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                .volarHairline(cornerRadius: 8)
-
-            if let claudeConnectError {
-                Text(claudeConnectError)
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(VolarColor.reschedule)
-                    .lineLimit(3)
-            }
-
-            HStack(spacing: 8) {
-                if claudeConnected {
-                    // M1 (self-review "client-exploit", reviewer fix): `AppLinkHandler.handle` for
-                    // `ai-done` resolves (marks needs-review) whenever EXACTLY ONE task is currently
-                    // waiting on AI, regardless of whether the signal is a real Claude Code Stop
-                    // hook or this test button — `ClaudeCodeConnector.sendTestSignal()` (out of this
-                    // fix's file ownership) carries no marker distinguishing the two. Rather than
-                    // let "Send test signal" silently clear a real in-flight delegation, it's only
-                    // offered while there is nothing it COULD wrongly resolve (`wipCount() == 0`).
-                    // (`AppLinkHandler.handle` also now treats a future `test=1`/`probe=1` param as
-                    // receipt-only, forward-compatible if the connector is ever updated to send one
-                    // — see that file's `handleAIDone`.)
-                    if claudeTestSignalSafe {
-                        settingsPillButton("Send test signal", solid: true) { sendClaudeTestSignal() }
-                    }
-                    settingsPillButton("Disconnect") { disconnectClaudeCode() }
-                } else {
-                    settingsPillButton("Connect…", solid: true) { connectClaudeCode() }
-                }
-            }
-
-            if claudeConnected, !claudeTestSignalSafe {
-                Text("Test signal hidden while a delegation is waiting — sending it now could mark a real task reviewed instead of just testing the connection.")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(VolarColor.textMut)
-                    .lineLimit(3)
-            }
-
-            if testSignalAwaitingReceipt {
-                Text("Signal sent — waiting…")
-                    .font(.system(size: 11.5))
-                    .foregroundStyle(VolarColor.textMut)
-            } else if testSignalReceived {
-                Text("\u{2713} received")
-                    .font(.system(size: 11.5, weight: .medium))
-                    .foregroundStyle(VolarColor.done)
-            }
-        }
-        .padding(16)
-        .background(VolarColor.card)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .volarHairline(cornerRadius: 11)
-    }
-
-    private func settingsPillButton(_ title: String, solid: Bool = false, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(.system(size: 12.5, weight: .medium))
-                .foregroundStyle(solid ? .white : VolarColor.textPri)
-                .padding(.horizontal, 14)
-                .frame(height: 30)
-                // Vùng bấm phủ đúng vùng nhìn thấy (luật anh Khôi chốt 2026-08-09, commit
-                // `356b72f`) — `.background`/`.overlay` ngay dưới đây nằm NGOÀI `Button`, cùng họ
-                // bug commit đó sửa ở 8 file khác. Đây là helper DÙNG CHUNG cho mọi nút pill trong
-                // cả tab Account (Restore Purchases, Sign out, Redeem, ...) lẫn hai nút sync mới
-                // (008-sync) — bỏ sót trong đợt quét trước vì nó nằm sau một hàm helper thay vì
-                // trực tiếp trong view, không phải vì nó không thuộc cùng họ lỗi.
-                .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .background(solid ? accentColors.solid : VolarColor.surfaceHi)
-        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-        .overlay(
-            // `.strokeBorder` (was `.stroke`) — same `RoundedRectangle(cornerRadius: 8)` shape as
-            // the `.clipShape` two lines up, so a centered `.stroke` would draw half its 0.5pt line
-            // outside that clip boundary; `.strokeBorder` draws entirely inside, staying flush with
-            // the actual clipped edge.
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .strokeBorder(solid ? VolarColor.veil(0.18) : VolarColor.borderHi, lineWidth: 0.5)
-        )
-    }
-
-    /// NSOpenPanel pre-targeted at `~/.claude`, granting the security-scoped bookmark
-    /// `ClaudeCodeConnector.connect(bookmarkedClaudeDir:)` needs (App Sandbox). Mirrors
-    /// `chooseImage`'s existing picker pattern above. `ClaudeDirBookmark.save` persists the grant
-    /// under THIS file's own key (distinct from — and in addition to — the connector's own
-    /// internal `detect()` bookkeeping bookmark, which is `private` to `ClaudeCodeConnector` and
-    /// therefore unreachable from here; see `ClaudeDirBookmark`'s doc comment below for why a
-    /// second bookmark store is the correct call, not duplication for its own sake).
-    private func connectClaudeCode() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.allowsMultipleSelection = false
-        // M2 (minor, reviewer fix): `FileManager.default.homeDirectoryForCurrentUser` under App
-        // Sandbox resolves to the SANDBOX CONTAINER's home, not the user's real home — pre-targeting
-        // `<container>/.claude` (which never exists) forced the user to navigate away every time.
-        // `NSHomeDirectoryForUser(NSUserName())` looks the real home up via the directory-services
-        // passwd entry directly, bypassing the sandbox's redirected `$HOME`, so it resolves to the
-        // user's ACTUAL home. Falls back to the real home directory itself (letting the user
-        // navigate from there) when `~/.claude` doesn't exist yet there, and never crashes/force-
-        // unwraps if resolution fails outright — the panel just opens at its own default location.
-        if let realHome = NSHomeDirectoryForUser(NSUserName()) {
-            let realHomeURL = URL(fileURLWithPath: realHome, isDirectory: true)
-            let claudeDir = realHomeURL.appendingPathComponent(".claude", isDirectory: true)
-            panel.directoryURL = FileManager.default.fileExists(atPath: claudeDir.path) ? claudeDir : realHomeURL
-        }
-        panel.message = "Choose your ~/.claude folder so Volar can install the Claude Code hook."
-        panel.prompt = "Grant Access"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        do {
-            try appState.claudeConnector.connect(bookmarkedClaudeDir: url)
-            ClaudeDirBookmark.save(for: url)
-            claudeConnected = true
-            claudeConnectError = nil
-        } catch {
-            claudeConnectError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-    }
-
-    private func disconnectClaudeCode() {
-        guard let url = ClaudeDirBookmark.resolve() else {
-            claudeConnectError = "Volar lost access to ~/.claude — reconnect once to disconnect cleanly."
-            claudeConnected = false
-            return
-        }
-        do {
-            try appState.claudeConnector.disconnect(bookmarkedClaudeDir: url)
-            ClaudeDirBookmark.clear()
-            claudeConnected = false
-            claudeConnectError = nil
-        } catch {
-            claudeConnectError = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
-        }
-    }
-
-    /// Fires `ClaudeCodeConnector.sendTestSignal()` (opens `volar://ai-done?cwd=...` via
-    /// `NSWorkspace`, per contract B), then waits for the real inbound round trip —
-    /// `appState.lastAppLinkAt` is stamped by `AppState.onAppLinkHandled()`, called from
-    /// `VolarApp.swift`'s `.onOpenURL` right after `AppLinkHandler.handle(_:)` processes it — so
-    /// "✓ received" reflects an actual signal, not a fixed timer.
-    private func sendClaudeTestSignal() {
-        testSignalReceived = false
-        testSignalAwaitingReceipt = true
-        appState.claudeConnector.sendTestSignal()
-    }
+    // Tab "Integrations" (T044, "Connect Claude Code") đã bỏ cùng tính năng delegation
+    // 2026-08-22: nó chỉ chứa đúng một card — cài Stop hook cho Claude Code để nó bắn
+    // `volar://ai-done` về. Không còn delegation thì cái hook đó không có gì để báo.
 
     // MARK: - Account (Task 4, account-auth.md contract)
 
@@ -1351,7 +1119,7 @@ struct SettingsView: View {
     }
 
     /// Single card, same "one `VolarColor.card` block, not several `SettingsRow`s" reasoning as
-    /// `claudeCodeCard` above — the sign-in forms and the signed-in summary don't fit that row's
+    /// — the sign-in forms and the signed-in summary don't fit that row's
     /// fixed label/hint/control shape.
     private var accountCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1395,7 +1163,7 @@ struct SettingsView: View {
     //
     // Signed-in only (see `accountTab`'s guard above) — the toggle is an account-level property, so
     // it's meaningless to show before there's an account to attach it to. Same
-    // "one `VolarColor.card` block" shape as `accountCard`/`claudeCodeCard` above.
+    // "one `VolarColor.card` block" shape as `accountCard` above.
 
     private var syncCard: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -1810,11 +1578,15 @@ private struct SettingsRow<Content: View>: View {
             Spacer(minLength: 12)
             content()
         }
-        .padding(.horizontal, 18)
-        .padding(.vertical, 14)
-        .background(VolarColor.card)
-        .clipShape(RoundedRectangle(cornerRadius: 11, style: .continuous))
-        .volarHairline(cornerRadius: 11)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        // Không còn nền card + bo góc riêng cho từng dòng (anh Khôi 2026-08-24). Mỗi card là một
+        // cái khung, mà ba mươi cái khung xếp dọc thì mắt phải đọc ba mươi lần "đây là một khối
+        // mới" trước khi đọc được nội dung. Một gạch tóc giữa hai dòng nói đúng chừng ấy chuyện.
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(VolarColor.border).frame(height: 0.5)
+        }
     }
 }
 
@@ -1939,58 +1711,6 @@ private struct KeyRecorder: View {
         .background(volarWellFill)
         .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
         .volarHairline(cornerRadius: 8)
-    }
-}
-
-/// Security-scoped bookmark for the user-granted `~/.claude` directory (T044, App Sandbox), used
-/// ONLY so this Settings UI can re-obtain a `URL` for `ClaudeCodeConnector.disconnect(
-/// bookmarkedClaudeDir:)` across relaunches — `connect(bookmarkedClaudeDir:)` already persists its
-/// OWN bookmark internally (`Orchestrator/ClaudeCodeConnector.swift`'s `persistBookmark`, under a
-/// `private` UserDefaults key) purely for its own `detect()` fallback, but never exposes a way to
-/// resolve that bookmark back to a `URL` for a later `disconnect` call. Mirrors
-/// `AmbientBackground.swift`'s `SecureImageBookmark` byte-for-byte (same save/resolve/clear shape,
-/// same `.withSecurityScope` bookmark options, same stale-bookmark re-mint-on-resolve behavior) —
-/// a second small bookmark store, not a refactor of that one, since `SecureImageBookmark` is scoped
-/// to the ambient-background image and this is a different grant entirely.
-private enum ClaudeDirBookmark {
-    private static let key = "volar.claudeDirBookmarkData.settingsUI"
-
-    static func save(for url: URL) {
-        do {
-            let data = try url.bookmarkData(
-                options: .withSecurityScope,
-                includingResourceValuesForKeys: nil,
-                relativeTo: nil
-            )
-            UserDefaults.standard.set(data, forKey: key)
-        } catch {
-            // Best-effort only, mirrors `SecureImageBookmark.save`: `connect(bookmarkedClaudeDir:)`
-            // above already succeeded by the time this runs, so a save failure here only means a
-            // later `disconnect` will need the user to reconnect first — never lost/corrupted state.
-            print("[Volar.SettingsView.ClaudeDirBookmark] save failed: \(error)")
-        }
-    }
-
-    static func clear() {
-        UserDefaults.standard.removeObject(forKey: key)
-    }
-
-    /// Resolves the saved bookmark back to a `URL`, re-minting it if stale. Never throws: any
-    /// failure (missing bookmark, moved/deleted folder, tampered UserDefaults data) returns `nil`
-    /// so callers fall back to "reconnect" rather than crashing.
-    static func resolve() -> URL? {
-        guard let data = UserDefaults.standard.data(forKey: key) else { return nil }
-        var isStale = false
-        guard let url = try? URL(
-            resolvingBookmarkData: data,
-            options: .withSecurityScope,
-            relativeTo: nil,
-            bookmarkDataIsStale: &isStale
-        ) else { return nil }
-        if isStale {
-            save(for: url)
-        }
-        return url
     }
 }
 

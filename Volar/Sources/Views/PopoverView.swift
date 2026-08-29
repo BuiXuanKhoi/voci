@@ -1296,13 +1296,11 @@ struct PopoverView: View {
     }
 
     private func voiceDoneQuestion(_ confirm: VoiceDoneConfirm) -> String {
-        // T042: `.delegate` extends this frozen-adjacent 2-case ternary into a proper switch — see
-        // `VoiceDoneAction`'s doc comment (AppState.swift) for why delegation reuses this same card.
+        // Từng có ba nhánh; `.delegate` đã bỏ cùng tính năng delegation (2026-08-22).
         let verb: String
         switch confirm.action {
         case .complete: verb = "Mark done"
         case .clearExternal: verb = "Clear"
-        case .delegate: verb = "Hand off to Claude"
         }
         if confirm.candidates.count == 1 {
             return "\(verb): \u{201C}\(confirm.candidates[0].title)\u{201D}?"
@@ -1310,18 +1308,13 @@ struct PopoverView: View {
         switch confirm.action {
         case .complete: return "Which task is done?"
         case .clearExternal: return "Which one cleared?"
-        case .delegate: return "Which task did you hand off?"
         }
     }
 
-    /// One-tap confirm button label — `.delegate` always has exactly one candidate (`AppState.
-    /// presentDelegationConfirm` only ever targets the current `activeTask`), so this branch is the
-    /// one that actually renders in practice; the multi-candidate list below still falls back to
-    /// each candidate's own title for `.complete`/`.clearExternal`.
+    /// One-tap confirm button label.
     private func voiceDoneOneTapLabel(_ action: VoiceDoneAction, title: String) -> String {
         switch action {
         case .complete, .clearExternal: return "Yes — \(title)"
-        case .delegate: return "Yes — hand off"
         }
     }
 
